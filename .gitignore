@@ -1,0 +1,70 @@
+# Build directories
+cmake-build-debug/
+build/
+build_linux/
+out/
+bin/
+lib/
+cmake-build-debug/
+cmake-build-release/
+test_output/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+*.cmake
+compile_commands.json
+
+# Ninja build files
+*.ninja
+.ninja_deps
+.ninja_log
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.so.*
+*.dylib
+*.dll
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Dependencies
+*.d
+
+# IDE files
+.vs/
+.vscode/
+.idea/
+*.swp
+*.user
+*.user.*
+.cache/
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Project specific temporary files
+# Add your project-specific temporary files here
+

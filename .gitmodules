@@ -1,0 +1,20 @@
+[submodule "external/glm"]
+        path = external/glm
+        url = https://github.com/g-truc/glm.git
+
+[submodule "external/tinyusdz"]
+        path = external/tinyusdz
+        url = https://github.com/lighttransport/tinyusdz.git
+
+[submodule "external/stb"]
+path = external/stb
+url = https://github.com/nothings/stb.git
+
+[submodule "external/cppzmq"]
+	path = external/cppzmq
+	url = https://github.com/zeromq/cppzmq.git
+
+
+[submodule "external/imgui"]
+	path = external/imgui
+	url = https://github.com/ocornut/imgui.git
