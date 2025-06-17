@@ -20,6 +20,30 @@ This will configure and build the GUI as `ReceiverUI` in the `tools/ReceiverUI` 
 
 ---
 
+## ⚠️ Note on ImGui Submodule and Docking Branch
+
+### Why You Might See Build Errors Like:
+error: ‘ImGuiConfigFlags_DockingEnable’ was not declared in this scope
+error: ‘DockSpace’ is not a member of ‘ImGui’
+...
+Submodule path 'external/imgui': checked out '842837e35b421a4c85ca30f6840321f0a3c5a029'
+
+
+### Explanation
+
+By default, Git submodules track a **specific commit**, not a branch—even if your `.gitmodules` specifies `branch = docking` for ImGui.  
+This means that after cloning or updating submodules, ImGui will be in a "detached HEAD" state at the commit your main repo references, and **not necessarily on the `docking` branch** (which is required for ReceiverUI's docking and multi-viewport features).
+
+### How to Fix
+
+If you encounter errors about missing ImGui docking symbols, **manually switch ImGui to the docking branch and update the submodule reference**:
+
+```
+cd external/imgui/ && git checkout docking
+```
+
+
+
 ## Feature Checklist
 
 ### ✅ Available

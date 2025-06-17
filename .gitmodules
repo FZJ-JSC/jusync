@@ -17,6 +17,8 @@
 [submodule "external/imgui"]
 	path = external/imgui
 	url = https://github.com/ocornut/imgui.git
+	branch = docking
+	update = merge
 
 [submodule "external/nlohmann"]
 	path = external/nlohmann
