@@ -1,3 +1,4 @@
+
 # JUSYNC
 
 A high-performance C++ middleware library that provides seamless communication between ANARI (ANAlytic Rendering Interface) applications and USD (Universal Scene Description) data streams via ZeroMQ messaging. This middleware enables real-time streaming of USD files, textures, and mesh data over network connections, making it ideal for collaborative workflows, live preview systems, and distributed rendering pipelines.
@@ -5,6 +6,38 @@ A high-performance C++ middleware library that provides seamless communication b
 ## Overview
 
 The JUSYNC Middleware acts as a bridge between USD content creation tools and ANARI-based rendering applications. It implements a robust ZeroMQ ROUTER/DEALER communication pattern to handle file transfers with hash verification, automatic USD format conversion, and comprehensive mesh data extraction capabilities.
+
+## Recent Updates (v2.0)
+
+### 🔧 Critical Bug Fixes
+- **Fixed duplicate file processing** - Implemented `isDuplicateFile()` and `markFileAsProcessed()` methods to prevent the same file from being processed multiple times
+- **Resolved C interface memory access violations** - Eliminated premature memory deallocation in C interface that was causing application crashes
+- **Fixed mesh data conversion** - Corrected conversion between internal `glm::vec3` format and public API flat float arrays for RealtimeMesh compatibility
+
+### 🛡️ Enhanced Safety & Validation
+- **Comprehensive input validation** - Added extensive bounds checking throughout USD processing pipeline
+- **Memory safety improvements** - Enhanced memory allocation checks with proper exception handling and size validation
+- **Thread safety enhancements** - Fixed atomic operations in statistics classes and improved mutex usage
+- **Pointer validation** - Added `MIDDLEWARE_VALIDATE_POINTER` macros throughout the codebase
+
+### 🎮 RealtimeMesh Integration
+- **Intelligent geometry preservation** - Added detection for large geometry arrays to preserve original USD data for Unreal's RealtimeMesh system
+- **Enhanced mesh validation** - Comprehensive mesh data validation with bounds checking and geometry integrity validation
+- **Optimized preprocessing** - Smart preprocessing that detects and preserves large geometry for better Unreal Engine compatibility
+
+### 🔄 USD Processing Improvements
+- **Enhanced reference resolution** - Improved reference and payload resolution system with better error handling
+- **Transform validation** - Added determinant checking to prevent singular matrix transformations
+- **Better error context** - Enhanced error messages with more specific context about failed operations
+
+### 🌐 Cross-Platform Enhancements
+- **Safe string handling** - Added platform-specific safe string copying methods (`strncpy_s` on Windows, standard `strncpy` elsewhere)
+- **Improved conditional compilation** - Enhanced `MiddlewareLogging.h` with better Unreal Engine detection
+- **Fixed API macro definitions** - Resolved duplicate API macro definitions in C interface
+
+### ⚠️ Breaking Changes
+- **ProcessingStats and MessageStats classes** are now non-copyable (use snapshot methods instead)
+- **Enhanced validation** may reject previously accepted invalid data
 
 ## Feature Matrix
 
@@ -27,6 +60,8 @@ The JUSYNC Middleware acts as a bridge between USD content creation tools and AN
 - [x] **Comprehensive Logging**: Environment-specific logging (Unreal Engine vs Standard C++)
 - [x] **Error Handling**: Detailed error reporting with fallback mechanisms
 - [x] **Memory Management**: RAII patterns with automatic cleanup
+- [x] **Duplicate Prevention**: Intelligent duplicate file detection and processing prevention
+- [x] **RealtimeMesh Compatibility**: Optimized for Unreal Engine RealtimeMesh workflows
 
 ### ❌ Not Available Features
 
@@ -175,8 +210,8 @@ C --> D[Bind to ZeroMQ Endpoint]
     W[USD File Path] --> X[LoadUSDFromDisk]
     X --> Y[Read File to Buffer]
     Y --> P
-   
-```
+    ```
+
 ## Public API Reference
 
 ### Core Classes
@@ -185,165 +220,6 @@ C --> D[Bind to ZeroMQ Endpoint]
 
 ```
 
-class AnariUsdMiddleware {
-public:
-// Lifecycle Management
-AnariUsdMiddleware();
-~AnariUsdMiddleware();
-bool initialize(const char* endpoint = nullptr);
-void shutdown();
-bool isConnected() const;
-
-    // Callback Management
-    int registerUpdateCallback(FileUpdateCallback callback);
-    void unregisterUpdateCallback(int callbackId);
-    int registerMessageCallback(MessageCallback callback);
-    void unregisterMessageCallback(int callbackId);
-    
-    // Data Reception
-    bool startReceiving();
-    void stopReceiving();
-    
-    // USD Processing
-    bool ConvertUSDtoUSDC(const std::string& inputFilePath, const std::string& outputFilePath);
-    bool LoadUSDBuffer(const std::vector<uint8_t>& buffer, const std::string& fileName, std::vector<MeshData>& outMeshData);
-    bool LoadUSDFromDisk(const std::string& filePath, std::vector<MeshData>& outMeshData);
-    
-    // Texture Processing
-    TextureData CreateTextureFromBuffer(const std::vector<uint8_t>& buffer);
-    bool WriteGradientLineAsPNG(const std::vector<uint8_t>& buffer, const std::string& outPath);
-    bool GetGradientLineAsPNGBuffer(const std::vector<uint8_t>& buffer, std::vector<uint8_t>& outPngBuffer);
-    };
-
-```
-
-### Data Structures
-
-#### FileData
-```
-
-struct FileData {
-std::string filename;        // Original filename
-std::vector<uint8_t> data;   // Raw file data
-std::string hash;            // SHA-256 hash for verification
-std::string fileType;        // Detected file type ("USD", "IMAGE", etc.)
-};
-
-```
-
-#### MeshData
-```
-
-struct MeshData {
-std::string elementName;     // USD element name
-std::string typeName;        // USD type name
-std::vector<float> points;   // 3D vertex positions (x,y,z triplets)
-std::vector<uint32_t> indices; // Triangle indices
-std::vector<float> normals;  // Normal vectors (x,y,z triplets)
-std::vector<float> uvs;      // Texture coordinates (u,v pairs)
-};
-
-```
-
-#### TextureData
-```
-
-struct TextureData {
-int width = 0;               // Image width in pixels
-int height = 0;              // Image height in pixels
-int channels = 0;            // Number of color channels
-std::vector<uint8_t> data;   // Raw pixel data (RGBA format)
-};
-
-```
-
-### Callback Types
-
-```
-
-using FileUpdateCallback = std::function<void(const FileData\&)>;
-using MessageCallback = std::function<void(const std::string\&)>;
-
-```
-
-## Usage Examples
-
-### Basic Setup and File Reception
-
-```
-
-\#include "AnariUsdMiddleware.h"
-
-// Create middleware instance
-anari_usd_middleware::AnariUsdMiddleware middleware;
-
-// Initialize with custom endpoint
-if (!middleware.initialize("tcp://*:5556")) {
-std::cerr << "Failed to initialize middleware" << std::endl;
-return -1;
-}
-
-// Register callback for file updates
-int callbackId = middleware.registerUpdateCallback(
-[\&middleware](const anari_usd_middleware::AnariUsdMiddleware::FileData\& fileData) {
-std::cout << "Received: " << fileData.filename
-<< " (" << fileData.data.size() << " bytes)" << std::endl;
-
-        if (fileData.fileType == "USD") {
-            // Process USD file from buffer
-            std::vector<anari_usd_middleware::AnariUsdMiddleware::MeshData> meshes;
-            if (middleware.LoadUSDBuffer(fileData.data, fileData.filename, meshes)) {
-                std::cout << "Extracted " << meshes.size() << " meshes" << std::endl;
-            }
-        }
-    }
-    );
-
-// Start receiving data
-middleware.startReceiving();
-
-```
-
-### Loading USD from Disk
-
-```
-
-// Load USD file directly from filesystem
-std::vector<anari_usd_middleware::AnariUsdMiddleware::MeshData> meshes;
-if (middleware.LoadUSDFromDisk("path/to/model.usd", meshes)) {
-for (const auto\& mesh : meshes) {
-std::cout << "Mesh: " << mesh.elementName << std::endl;
-std::cout << "  Vertices: " << mesh.points.size() / 3 << std::endl;
-std::cout << "  Triangles: " << mesh.indices.size() / 3 << std::endl;
-std::cout << "  Normals: " << mesh.normals.size() / 3 << std::endl;
-std::cout << "  UVs: " << mesh.uvs.size() / 2 << std::endl;
-}
-}
-
-```
-
-### Texture Processing
-
-```
-
-// Process texture from buffer
-std::vector<uint8_t> imageBuffer = /* load image data */;
-auto textureData = middleware.CreateTextureFromBuffer(imageBuffer);
-
-if (!textureData.data.empty()) {
-std::cout << "Texture: " << textureData.width << "x" << textureData.height
-<< " (" << textureData.channels << " channels)" << std::endl;
-}
-
-// Extract gradient and save as PNG
-std::vector<uint8_t> pngBuffer;
-if (middleware.GetGradientLineAsPNGBuffer(imageBuffer, pngBuffer)) {
-// Save PNG buffer to file
-std::ofstream file("gradient.png", std::ios::binary);
-file.write(reinterpret_cast<const char*>(pngBuffer.data()), pngBuffer.size());
-}
-
-```
 
 ## Network Protocol
 
@@ -418,7 +294,4 @@ The middleware provides comprehensive error handling with detailed logging:
 - **File Access**: Proper error reporting for file system operations
 
 Enable verbose logging for detailed processing information including USD prim hierarchies, ZeroMQ message flow, and file system operations.
-
-
-
 
