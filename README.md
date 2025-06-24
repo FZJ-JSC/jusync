@@ -7,7 +7,7 @@ A high-performance C++ middleware library that provides seamless communication b
 
 The JUSYNC Middleware acts as a bridge between USD content creation tools and ANARI-based rendering applications. It implements a robust ZeroMQ ROUTER/DEALER communication pattern to handle file transfers with hash verification, automatic USD format conversion, and comprehensive mesh data extraction capabilities.
 
-## Recent Updates (v2.0)
+## Recent Updates (v1.0.1)
 
 ### 🔧 Critical Bug Fixes
 - **Fixed duplicate file processing** - Implemented `isDuplicateFile()` and `markFileAsProcessed()` methods to prevent the same file from being processed multiple times
