@@ -744,9 +744,11 @@ FString UJUSYNCBlueprintLibrary::ExtractUSDAPreview(const TArray<uint8>& Buffer,
     return Preview;
 }
 
+// Update the async internal function
 void UJUSYNCBlueprintLibrary::AsyncBatchSpawnInternal(
     const TArray<FJUSYNCMeshData>& MeshDataArray,
     const TArray<FVector>& SpawnLocations,
+    const TArray<FRotator>& SpawnRotations,
     TSharedPtr<TArray<AActor*>> SharedResults,
     int32 CurrentBatch,
     int32 BatchSize,
@@ -770,91 +772,301 @@ void UJUSYNCBlueprintLibrary::AsyncBatchSpawnInternal(
     int32 StartIndex = CurrentBatch * BatchSize;
     int32 EndIndex = FMath::Min(StartIndex + BatchSize, MeshDataArray.Num());
     
-    UE_LOG(LogTemp, Warning, TEXT("📦 Processing async batch %d: indices %d-%d"), 
-        CurrentBatch, StartIndex, EndIndex - 1);
+    UE_LOG(LogTemp, Warning, TEXT("📦 Processing async batch %d: indices %d-%d with rotations"),
+           CurrentBatch, StartIndex, EndIndex - 1);
 
-    // Process current batch
+    // Process current batch with rotations
     for (int32 i = StartIndex; i < EndIndex; ++i)
     {
+        FRotator UERotation = ConvertParaViewToUERotation(SpawnRotations[i]);
         AActor* SpawnedActor = SpawnRealtimeMeshAtLocation(
-            MeshDataArray[i], SpawnLocations[i]);
+            MeshDataArray[i], SpawnLocations[i], UERotation);
+        
         SharedResults->Add(SpawnedActor);
         
         if (SpawnedActor)
         {
-            UE_LOG(LogTemp, Log, TEXT("✅ Async spawned mesh %d at %s"), 
-                i, *SpawnLocations[i].ToString());
+            UE_LOG(LogTemp, Log, TEXT("✅ Async spawned mesh %d at %s with rotation %s"),
+                   i, *SpawnLocations[i].ToString(), *UERotation.ToString());
         }
     }
 
     // Check if we're done
     if (EndIndex >= MeshDataArray.Num())
     {
-        // All batches complete
-        UE_LOG(LogTemp, Warning, TEXT("🎉 Async batch spawn complete: %d/%d successful"), 
-            SharedResults->Num(), MeshDataArray.Num());
-        
-        // Broadcast completion (you can add delegate broadcasting here)
+        UE_LOG(LogTemp, Warning, TEXT("🎉 Async batch spawn complete: %d/%d successful"),
+               SharedResults->Num(), MeshDataArray.Num());
         return;
     }
 
     // Schedule next batch
     FTimerHandle TimerHandle;
-    World->GetTimerManager().SetTimer(TimerHandle, 
+    World->GetTimerManager().SetTimer(TimerHandle,
         FTimerDelegate::CreateLambda([=]()
         {
-            AsyncBatchSpawnInternal(MeshDataArray, SpawnLocations, SharedResults, 
+            AsyncBatchSpawnInternal(MeshDataArray, SpawnLocations, SpawnRotations, SharedResults,
                                   CurrentBatch + 1, BatchSize, BatchDelay);
-        }), 
+        }),
         BatchDelay, false);
 }
 
 TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocationsSync(
     const TArray<FJUSYNCMeshData>& MeshDataArray,
-    const TArray<FVector>& SpawnLocations)
+    const TArray<FVector>& SpawnLocations,
+    const TArray<FRotator>& SpawnRotations)
 {
     TArray<AActor*> SpawnedActors;
     
-    // Debug logging
-    UE_LOG(LogTemp, Warning, TEXT("=== SYNC BATCH SPAWN DEBUG ==="));
-    UE_LOG(LogTemp, Warning, TEXT("MeshDataArray.Num(): %d"), MeshDataArray.Num());
-    UE_LOG(LogTemp, Warning, TEXT("SpawnLocations.Num(): %d"), SpawnLocations.Num());
-
-    if (MeshDataArray.Num() != SpawnLocations.Num())
+    // Create default rotations if not provided
+    TArray<FRotator> FinalRotations = SpawnRotations;
+    if (FinalRotations.Num() == 0)
     {
-        UE_LOG(LogTemp, Error, TEXT("❌ Array size mismatch! Meshes: %d, Locations: %d"),
-            MeshDataArray.Num(), SpawnLocations.Num());
-        return SpawnedActors;
+        FinalRotations = GenerateDefaultRotations(MeshDataArray.Num());
     }
+
+    UE_LOG(LogTemp, Warning, TEXT("=== SYNC BATCH SPAWN WITH ROTATIONS ==="));
+    UE_LOG(LogTemp, Warning, TEXT("Processing %d meshes with locations and rotations"), MeshDataArray.Num());
 
     SpawnedActors.Reserve(MeshDataArray.Num());
     int32 SuccessCount = 0;
-    
+
     for (int32 i = 0; i < MeshDataArray.Num(); ++i)
     {
-        UE_LOG(LogTemp, Warning, TEXT("🎯 Spawning mesh %d '%s' at location %s"),
-            i, *MeshDataArray[i].ElementName, *SpawnLocations[i].ToString());
-            
-        AActor* SpawnedActor = SpawnRealtimeMeshAtLocation(MeshDataArray[i], SpawnLocations[i]);
-        SpawnedActors.Add(SpawnedActor);
+        // Convert ParaView rotation to UE rotation if needed
+        FRotator UERotation = ConvertParaViewToUERotation(FinalRotations[i]);
         
+        UE_LOG(LogTemp, Warning, TEXT("🎯 Spawning mesh %d '%s' at location %s with rotation %s"),
+               i, *MeshDataArray[i].ElementName, *SpawnLocations[i].ToString(), *UERotation.ToString());
+
+        AActor* SpawnedActor = SpawnRealtimeMeshAtLocation(MeshDataArray[i], SpawnLocations[i], UERotation);
+        SpawnedActors.Add(SpawnedActor);
+
         if (SpawnedActor)
         {
             SuccessCount++;
-            UE_LOG(LogTemp, Warning, TEXT("✅ Successfully spawned at %s"),
-                *SpawnedActor->GetActorLocation().ToString());
+            UE_LOG(LogTemp, Warning, TEXT("✅ Successfully spawned at %s with rotation %s"),
+                   *SpawnedActor->GetActorLocation().ToString(), 
+                   *SpawnedActor->GetActorRotation().ToString());
         }
         else
         {
             UE_LOG(LogTemp, Error, TEXT("❌ Failed to spawn mesh %d"), i);
         }
     }
-    
+
     UE_LOG(LogTemp, Warning, TEXT("=== SYNC BATCH SPAWN COMPLETE: %d/%d successful ==="),
-        SuccessCount, MeshDataArray.Num());
-    
+           SuccessCount, MeshDataArray.Num());
     return SpawnedActors;
 }
+
+FRotator UJUSYNCBlueprintLibrary::ConvertParaViewToUERotation(const FRotator& ParaViewRotation)
+{
+    // ParaView typically uses different axis conventions than UE
+    // This conversion assumes ParaView uses Z-up while UE uses Z-up but different handedness
+    FRotator UERotation;
+    
+    // Common conversion for ParaView to UE coordinate systems:
+    // ParaView: X-right, Y-forward, Z-up (right-handed)
+    // UE: X-forward, Y-right, Z-up (left-handed)
+    
+    UERotation.Pitch = -ParaViewRotation.Pitch;  // Flip pitch for handedness
+    UERotation.Yaw = ParaViewRotation.Yaw + 90.0f;  // Rotate 90 degrees for axis alignment
+    UERotation.Roll = ParaViewRotation.Roll;
+    
+    UE_LOG(LogTemp, Log, TEXT("Converted ParaView rotation %s to UE rotation %s"),
+           *ParaViewRotation.ToString(), *UERotation.ToString());
+    
+    return UERotation;
+}
+
+// Generate default rotations
+TArray<FRotator> UJUSYNCBlueprintLibrary::GenerateDefaultRotations(int32 Count, const FRotator& BaseRotation)
+{
+    TArray<FRotator> Rotations;
+    Rotations.Reserve(Count);
+    
+    for (int32 i = 0; i < Count; ++i)
+    {
+        Rotations.Add(BaseRotation);
+    }
+    
+    return Rotations;
+}
+
+TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
+    const TArray<FJUSYNCMeshData>& MeshDataArray,
+    const TArray<FVector>& SpawnLocations,
+    const TArray<FRotator>& SpawnRotations,
+    UMaterialInterface* Material,
+    bool bUseAsyncSpawning,
+    int32 BatchSize,
+    float BatchDelay)
+{
+    // Validation
+    if (MeshDataArray.Num() != SpawnLocations.Num())
+    {
+        UE_LOG(LogTemp, Error, TEXT("❌ Array size mismatch! Meshes: %d, Locations: %d"),
+            MeshDataArray.Num(), SpawnLocations.Num());
+        return TArray<AActor*>();
+    }
+
+    // Create default rotations if not provided
+    TArray<FRotator> FinalRotations = SpawnRotations;
+    if (FinalRotations.Num() == 0)
+    {
+        FinalRotations = GenerateDefaultRotations(MeshDataArray.Num());
+    }
+    else if (FinalRotations.Num() != MeshDataArray.Num())
+    {
+        UE_LOG(LogTemp, Error, TEXT("❌ Rotation array size mismatch!"));
+        return TArray<AActor*>();
+    }
+
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogTemp, Error, TEXT("JUSYNC Subsystem not available"));
+        return TArray<AActor*>();
+    }
+
+    UWorld* World = Subsystem->GetWorld();
+    if (!World)
+    {
+        UE_LOG(LogTemp, Error, TEXT("No valid world context"));
+        return TArray<AActor*>();
+    }
+
+    TArray<AActor*> SpawnedActors;
+    SpawnedActors.Reserve(MeshDataArray.Num());
+
+    int32 SuccessCount = 0;
+    for (int32 i = 0; i < MeshDataArray.Num(); ++i)
+    {
+        // ✅ FIXED: Process mesh data to fix normals BEFORE spawning
+        FJUSYNCMeshData ProcessedMeshData = FixMeshDataForSpawning(MeshDataArray[i]);
+        
+        FRotator UERotation = ConvertParaViewToUERotation(FinalRotations[i]);
+        
+        // Spawn actor
+        FActorSpawnParameters SpawnParams;
+        SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+        AActor* SpawnedActor = World->SpawnActor<AActor>(SpawnParams);
+        
+        if (!SpawnedActor)
+        {
+            SpawnedActors.Add(nullptr);
+            continue;
+        }
+
+        // Create RealtimeMeshComponent
+        URealtimeMeshComponent* MeshComp = NewObject<URealtimeMeshComponent>(SpawnedActor);
+        SpawnedActor->SetRootComponent(MeshComp);
+        MeshComp->RegisterComponent();
+        
+        // Set transform
+        SpawnedActor->SetActorLocation(SpawnLocations[i]);
+        SpawnedActor->SetActorRotation(UERotation);
+
+        // ✅ FIXED: Apply material BEFORE creating mesh
+        if (Material)
+        {
+            MeshComp->SetMaterial(0, Material);
+        }
+        else
+        {
+            // Create a proper default double-sided material
+            UMaterial* DefaultMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
+            if (DefaultMaterial)
+            {
+                DefaultMaterial->TwoSided = true;
+                MeshComp->SetMaterial(0, DefaultMaterial);
+            }
+        }
+
+        // ✅ FIXED: Create mesh with processed data
+        bool bSuccess = Subsystem->CreateRealtimeMeshFromJUSYNC(ProcessedMeshData, MeshComp);
+        if (bSuccess)
+        {
+            SuccessCount++;
+            SpawnedActors.Add(SpawnedActor);
+        }
+        else
+        {
+            SpawnedActor->Destroy();
+            SpawnedActors.Add(nullptr);
+        }
+    }
+
+    UE_LOG(LogTemp, Warning, TEXT("=== BATCH SPAWN COMPLETE: %d/%d successful ==="),
+        SuccessCount, MeshDataArray.Num());
+
+    return SpawnedActors;
+}
+
+FJUSYNCMeshData UJUSYNCBlueprintLibrary::FixMeshDataForSpawning(const FJUSYNCMeshData& InputMeshData)
+{
+    FJUSYNCMeshData FixedData = InputMeshData;
+    
+    // ✅ FIXED: Recalculate normals if missing or invalid
+    if (!FixedData.HasNormals() || FixedData.Normals.Num() != FixedData.Vertices.Num())
+    {
+        FixedData.Normals.SetNum(FixedData.Vertices.Num());
+        for (int32 i = 0; i < FixedData.Normals.Num(); ++i)
+        {
+            FixedData.Normals[i] = FVector::ZeroVector;
+        }
+        
+        // Calculate face normals and accumulate
+        for (int32 i = 0; i < FixedData.Triangles.Num(); i += 3)
+        {
+            int32 i0 = FixedData.Triangles[i];
+            int32 i1 = FixedData.Triangles[i + 1];
+            int32 i2 = FixedData.Triangles[i + 2];
+            
+            if (i0 < FixedData.Vertices.Num() && i1 < FixedData.Vertices.Num() && i2 < FixedData.Vertices.Num())
+            {
+                FVector v0 = FixedData.Vertices[i0];
+                FVector v1 = FixedData.Vertices[i1];
+                FVector v2 = FixedData.Vertices[i2];
+                
+                FVector FaceNormal = FVector::CrossProduct(v1 - v0, v2 - v0).GetSafeNormal();
+                
+                FixedData.Normals[i0] += FaceNormal;
+                FixedData.Normals[i1] += FaceNormal;
+                FixedData.Normals[i2] += FaceNormal;
+            }
+        }
+        
+        // Normalize accumulated normals
+        for (int32 i = 0; i < FixedData.Normals.Num(); ++i)
+        {
+            FixedData.Normals[i] = FixedData.Normals[i].GetSafeNormal();
+            if (FixedData.Normals[i].IsNearlyZero())
+            {
+                FixedData.Normals[i] = FVector::UpVector; // Fallback normal
+            }
+        }
+        
+        UE_LOG(LogTemp, Warning, TEXT("Recalculated normals for spawned mesh: %s"), *InputMeshData.ElementName);
+    }
+    
+    // ✅ FIXED: Validate and fix UV coordinates
+    if (FixedData.HasUVs())
+    {
+        for (int32 i = 0; i < FixedData.UVs.Num(); ++i)
+        {
+            FVector2D& UV = FixedData.UVs[i];
+            if (!FMath::IsFinite(UV.X) || !FMath::IsFinite(UV.Y))
+            {
+                UV = FVector2D::ZeroVector;
+            }
+        }
+    }
+    
+    return FixedData;
+}
+
+
 
 
 

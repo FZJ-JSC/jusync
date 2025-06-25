@@ -635,6 +635,54 @@ bool UJUSYNCSubsystem::GetGradientLineAsPNGBuffer(const TArray<uint8>& Buffer, T
     return false;
 }
 
+void RecalculateNormals(FJUSYNCMeshData& MeshData)
+{
+    if (MeshData.Vertices.Num() == 0 || MeshData.Triangles.Num() == 0)
+        return;
+
+    // Initialize normals array
+    MeshData.Normals.SetNum(MeshData.Vertices.Num());
+    for (int32 i = 0; i < MeshData.Normals.Num(); ++i)
+    {
+        MeshData.Normals[i] = FVector::ZeroVector;
+    }
+
+    // Calculate face normals with correct orientation for counter-clockwise winding
+    for (int32 i = 0; i < MeshData.Triangles.Num(); i += 3)
+    {
+        int32 i0 = MeshData.Triangles[i];
+        int32 i1 = MeshData.Triangles[i + 1];
+        int32 i2 = MeshData.Triangles[i + 2];
+        
+        if (i0 < MeshData.Vertices.Num() && i1 < MeshData.Vertices.Num() && i2 < MeshData.Vertices.Num())
+        {
+            FVector v0 = MeshData.Vertices[i0];
+            FVector v1 = MeshData.Vertices[i1];
+            FVector v2 = MeshData.Vertices[i2];
+            
+            // ✅ FIXED: Calculate normal for counter-clockwise winding (v2-v0 x v1-v0)
+            FVector FaceNormal = FVector::CrossProduct(v2 - v0, v1 - v0).GetSafeNormal();
+            
+            // Ensure normal points outward (you may need to flip this if still wrong)
+            MeshData.Normals[i0] += FaceNormal;
+            MeshData.Normals[i1] += FaceNormal;
+            MeshData.Normals[i2] += FaceNormal;
+        }
+    }
+
+    // Normalize accumulated normals
+    for (int32 i = 0; i < MeshData.Normals.Num(); ++i)
+    {
+        MeshData.Normals[i] = MeshData.Normals[i].GetSafeNormal();
+        if (MeshData.Normals[i].IsNearlyZero())
+        {
+            MeshData.Normals[i] = FVector::UpVector; // Fallback normal
+        }
+    }
+    
+    UE_LOG(LogTemp, Warning, TEXT("Recalculated normals with correct CCW winding"));
+}
+
 bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(const FJUSYNCMeshData& MeshData, URealtimeMeshComponent* RealtimeMeshComponent)
 {
     if (!RealtimeMeshComponent || !MeshData.IsValid())
@@ -643,10 +691,15 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(const FJUSYNCMeshData& MeshD
         return false;
     }
 
-    UE_LOG(LogTemp, Log, TEXT("Creating RealtimeMesh: %s (%d vertices, %d triangles)"),
-           *MeshData.ElementName, MeshData.GetVertexCount(), MeshData.GetTriangleCount());
+    // ✅ FIXED: Use enhanced normal calculation
+    FJUSYNCMeshData ProcessedMeshData = MeshData;
+    if (!ProcessedMeshData.HasNormals() || ProcessedMeshData.Normals.Num() != ProcessedMeshData.Vertices.Num())
+    {
+        RecalculateNormals(ProcessedMeshData);
+        UE_LOG(LogTemp, Warning, TEXT("Recalculated normals with CCW winding for mesh: %s"), *MeshData.ElementName);
+    }
 
-    // ✅ USE THE EXACT API FROM YOUR EXAMPLE
+    // ✅ FIXED: Explicit template parameter
     URealtimeMeshSimple* RealtimeMesh = RealtimeMeshComponent->InitializeRealtimeMesh<URealtimeMeshSimple>();
     if (!RealtimeMesh)
     {
@@ -654,73 +707,99 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(const FJUSYNCMeshData& MeshD
         return false;
     }
 
-    // ✅ SETUP MATERIAL SLOT (from your example)
+    // ✅ ENHANCED: Better material setup
     RealtimeMesh->SetupMaterialSlot(0, TEXT("PrimaryMaterial"));
     if (RealtimeMeshComponent->GetMaterial(0) == nullptr)
     {
         UMaterial* Material = UMaterial::GetDefaultMaterial(MD_Surface);
         if (Material)
         {
-            Material->TwoSided = true;
-            RealtimeMeshComponent->SetMaterial(0, Material);
+            UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(Material, RealtimeMeshComponent);
+            if (DynamicMaterial)
+            {
+                RealtimeMeshComponent->SetMaterial(0, DynamicMaterial);
+            }
         }
     }
 
-    // ✅ CREATE STREAM SET AND BUILDER (from your example)
+    // ✅ FIXED: Correct builder initialization
     RealtimeMesh::FRealtimeMeshStreamSet StreamSet;
-    RealtimeMesh::TRealtimeMeshBuilderLocal<uint16, FPackedNormal, FVector2DHalf, 1> Builder(StreamSet);
+    auto Builder = RealtimeMesh::TRealtimeMeshBuilderLocal<uint16>(StreamSet);
 
-    // ✅ ENABLE FEATURES (from your example)
     Builder.EnableTangents();
     Builder.EnableTexCoords();
     Builder.EnableColors();
     Builder.EnablePolyGroups();
 
-    // ✅ ADD VERTICES (adapted from your example)
-    for (int32 i = 0; i < MeshData.Vertices.Num(); i++)
+    // ✅ ADD VERTICES WITH ENHANCED NORMAL VALIDATION
+    for (int32 i = 0; i < ProcessedMeshData.Vertices.Num(); i++)
     {
-        // Convert FVector to FVector3f if needed
-        FVector3f Vertex = FVector3f(MeshData.Vertices[i]);
+        FVector3f Vertex = FVector3f(ProcessedMeshData.Vertices[i]);
         Builder.AddVertex(Vertex);
-        
-        if (MeshData.HasNormals() && MeshData.Normals.IsValidIndex(i))
+
+        // ✅ ENHANCED: Robust normal handling with validation
+        if (ProcessedMeshData.HasNormals() && ProcessedMeshData.Normals.IsValidIndex(i))
         {
-            FVector3f Normal = FVector3f(MeshData.Normals[i]);
-            Builder.SetNormal(i, Normal);
+            FVector3f Normal = FVector3f(ProcessedMeshData.Normals[i]);
+            if (FMath::IsFinite(Normal.X) && FMath::IsFinite(Normal.Y) && FMath::IsFinite(Normal.Z) && !Normal.IsNearlyZero())
+            {
+                Normal.Normalize();
+                Builder.SetNormal(i, Normal);
+            }
+            else
+            {
+                Builder.SetNormal(i, FVector3f::UpVector);
+            }
         }
-        
-        if (MeshData.HasUVs() && MeshData.UVs.IsValidIndex(i))
+        else
         {
-            FVector2f UV = FVector2f(MeshData.UVs[i]);
-            Builder.SetTexCoord(i, 0, FVector2DHalf(UV));
+            Builder.SetNormal(i, FVector3f::UpVector);
+        }
+
+        // UV processing
+        if (ProcessedMeshData.HasUVs() && ProcessedMeshData.UVs.IsValidIndex(i))
+        {
+            FVector2f UV = FVector2f(ProcessedMeshData.UVs[i]);
+            if (FMath::IsFinite(UV.X) && FMath::IsFinite(UV.Y))
+            {
+                Builder.SetTexCoord(i, 0, FVector2DHalf(UV));
+            }
+            else
+            {
+                Builder.SetTexCoord(i, 0, FVector2DHalf(FVector2f::ZeroVector));
+            }
         }
     }
 
-    // ✅ ADD TRIANGLES (from your example)
-    const int32 NumTris = MeshData.Triangles.Num() / 3;
+    // ✅ FIXED: Counter-clockwise triangle winding
+    const int32 NumTris = ProcessedMeshData.Triangles.Num() / 3;
     for (int32 tri = 0; tri < NumTris; tri++)
     {
-        Builder.AddTriangle(
-            MeshData.Triangles[tri * 3],
-            MeshData.Triangles[tri * 3 + 1],
-            MeshData.Triangles[tri * 3 + 2]
-        );
+        int32 i0 = ProcessedMeshData.Triangles[tri * 3];
+        int32 i1 = ProcessedMeshData.Triangles[tri * 3 + 1];
+        int32 i2 = ProcessedMeshData.Triangles[tri * 3 + 2];
+        
+        if (i0 < ProcessedMeshData.Vertices.Num() && i1 < ProcessedMeshData.Vertices.Num() && i2 < ProcessedMeshData.Vertices.Num())
+        {
+            // ✅ CRITICAL FIX: Counter-clockwise winding for RMC
+            Builder.AddTriangle(i0, i2, i1);  // Swapped i1 and i2
+        }
     }
 
-    // ✅ CREATE SECTION GROUP (from your example)
     const FRealtimeMeshSectionGroupKey GroupKey = FRealtimeMeshSectionGroupKey::Create(0, FName(TEXT("USDGroup")));
     const FRealtimeMeshSectionKey SectionKey = FRealtimeMeshSectionKey::CreateForPolyGroup(GroupKey, 0);
-
+    
     RealtimeMesh->CreateSectionGroup(GroupKey, StreamSet);
-    RealtimeMesh->UpdateSectionConfig(SectionKey, FRealtimeMeshSectionConfig(0));
+    
+    FRealtimeMeshSectionConfig SectionConfig(0);
+    SectionConfig.bIsVisible = true;
+    SectionConfig.bCastsShadow = true;
+    RealtimeMesh->UpdateSectionConfig(SectionKey, SectionConfig);
 
-    // ✅ MARK RENDER STATE DIRTY (from your example)
     RealtimeMeshComponent->MarkRenderStateDirty();
-
-    UE_LOG(LogTemp, Warning, TEXT("✅ RealtimeMesh created successfully: %s"), *MeshData.ElementName);
+    UE_LOG(LogTemp, Warning, TEXT("✅ RealtimeMesh created with CCW winding: %s"), *ProcessedMeshData.ElementName);
     return true;
 }
-
 
 
 bool UJUSYNCSubsystem::BatchCreateRealtimeMeshesFromJUSYNC(const TArray<FJUSYNCMeshData>& MeshDataArray, const TArray<URealtimeMeshComponent*>& MeshComponents)
@@ -903,40 +982,53 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtActor(const FJUSYNCMeshData&
 TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocations(
     const TArray<FJUSYNCMeshData>& MeshDataArray,
     const TArray<FVector>& SpawnLocations,
+    const TArray<FRotator>& SpawnRotations,
     bool bUseAsyncSpawning,
     int32 BatchSize,
     float BatchDelay)
 {
-    // Your existing validation
+    // Enhanced validation with rotation support
     UE_LOG(LogTemp, Warning, TEXT("=== BATCH SPAWN DEBUG ==="));
     UE_LOG(LogTemp, Warning, TEXT("MeshDataArray.Num(): %d"), MeshDataArray.Num());
     UE_LOG(LogTemp, Warning, TEXT("SpawnLocations.Num(): %d"), SpawnLocations.Num());
+    UE_LOG(LogTemp, Warning, TEXT("SpawnRotations.Num(): %d"), SpawnRotations.Num());
     UE_LOG(LogTemp, Warning, TEXT("Async Mode: %s"), bUseAsyncSpawning ? TEXT("YES") : TEXT("NO"));
 
     if (MeshDataArray.Num() != SpawnLocations.Num())
     {
-        UE_LOG(LogTemp, Error, TEXT("❌ Array size mismatch!"));
+        UE_LOG(LogTemp, Error, TEXT("❌ Array size mismatch! Meshes: %d, Locations: %d"), 
+               MeshDataArray.Num(), SpawnLocations.Num());
         return TArray<AActor*>();
     }
 
-    // If not async, use your existing synchronous method
-    if (!bUseAsyncSpawning)
+    // Create default rotations if not provided
+    TArray<FRotator> FinalRotations = SpawnRotations;
+    if (FinalRotations.Num() == 0)
     {
-        return BatchSpawnRealtimeMeshesAtLocationsSync(MeshDataArray, SpawnLocations);
+        FinalRotations = GenerateDefaultRotations(MeshDataArray.Num());
+        UE_LOG(LogTemp, Warning, TEXT("Generated %d default rotations"), FinalRotations.Num());
+    }
+    else if (FinalRotations.Num() != MeshDataArray.Num())
+    {
+        UE_LOG(LogTemp, Error, TEXT("❌ Rotation array size mismatch! Expected: %d, Got: %d"), 
+               MeshDataArray.Num(), FinalRotations.Num());
+        return TArray<AActor*>();
     }
 
-    // NEW: Async spawning logic
-    UE_LOG(LogTemp, Warning, TEXT("🚀 Starting ASYNC batch spawn"));
-    
-    // Create a shared pointer to store results
+    // If not async, use synchronous method
+    if (!bUseAsyncSpawning)
+    {
+        return BatchSpawnRealtimeMeshesAtLocationsSync(MeshDataArray, SpawnLocations, FinalRotations);
+    }
+
+    // Async spawning logic
+    UE_LOG(LogTemp, Warning, TEXT("🚀 Starting ASYNC batch spawn with rotations"));
     TSharedPtr<TArray<AActor*>> SharedSpawnedActors = MakeShared<TArray<AActor*>>();
     SharedSpawnedActors->Reserve(MeshDataArray.Num());
 
-    // Start async batching
-    AsyncBatchSpawnInternal(MeshDataArray, SpawnLocations, SharedSpawnedActors, 
+    AsyncBatchSpawnInternal(MeshDataArray, SpawnLocations, FinalRotations, SharedSpawnedActors,
                            0, BatchSize, BatchDelay);
 
-    // Return empty array for async mode (results come via callbacks)
     return TArray<AActor*>();
 }
 

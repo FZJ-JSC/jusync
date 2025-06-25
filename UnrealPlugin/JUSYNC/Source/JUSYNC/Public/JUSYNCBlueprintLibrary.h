@@ -92,10 +92,11 @@ public:
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnBatchSpawnComplete, 
 		const TArray<AActor*>&, SpawnedActors, bool, bSuccess);
 	
-    UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning", CallInEditor)
+	UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning", CallInEditor)
 	static TArray<AActor*> BatchSpawnRealtimeMeshesAtLocations(
 		const TArray<FJUSYNCMeshData>& MeshDataArray,
 		const TArray<FVector>& SpawnLocations,
+		const TArray<FRotator>& SpawnRotations,  // Remove default parameter here
 		bool bUseAsyncSpawning = false,
 		int32 BatchSize = 5,
 		float BatchDelay = 0.016f
@@ -147,14 +148,33 @@ public:
     UFUNCTION(BlueprintPure, Category = "JUSYNC|Helpers")
     static UJUSYNCSubsystem* GetJUSYNCSubsystem();
 
+	UFUNCTION(BlueprintCallable, Category = "JUSYNC|Utilities")
+	static FRotator ConvertParaViewToUERotation(const FRotator& ParaViewRotation);
+
+	UFUNCTION(BlueprintCallable, Category = "JUSYNC|Utilities")
+	static TArray<FRotator> GenerateDefaultRotations(int32 Count, const FRotator& BaseRotation = FRotator::ZeroRotator);
+
 	// ========== Async ===============
 	// Add this declaration in the public section
-	UFUNCTION(BlueprintCallable, Category = "JUSYNC")
+	UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning")
 	static TArray<AActor*> BatchSpawnRealtimeMeshesAtLocationsSync(
 		const TArray<FJUSYNCMeshData>& MeshDataArray,
-		const TArray<FVector>& SpawnLocations
+		const TArray<FVector>& SpawnLocations,
+		const TArray<FRotator>& SpawnRotations  // Remove default parameter here
 	);
 
+	UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning", CallInEditor)
+	static TArray<AActor*> BatchSpawnRealtimeMeshesWithMaterial(
+		const TArray<FJUSYNCMeshData>& MeshDataArray,
+		const TArray<FVector>& SpawnLocations,
+		const TArray<FRotator>& SpawnRotations,
+		UMaterialInterface* Material,
+		bool bUseAsyncSpawning = false,
+		int32 BatchSize = 5,
+		float BatchDelay = 0.016f
+	);
+
+	static FJUSYNCMeshData FixMeshDataForSpawning(const FJUSYNCMeshData& InputMeshData);
 
     // Internal storage for received data (public for subsystem access)
     static TArray<FJUSYNCFileData> ReceivedFiles;
@@ -168,11 +188,12 @@ private:
     static FString ExtractUSDAPreview(const TArray<uint8>& Buffer, int32 MaxLines);
 
 	static void AsyncBatchSpawnInternal(
-	const TArray<FJUSYNCMeshData>& MeshDataArray,
-	const TArray<FVector>& SpawnLocations,
-	TSharedPtr<TArray<AActor*>> SharedResults,
-	int32 CurrentBatch,
-	int32 BatchSize,
-	float BatchDelay
-);
+			const TArray<FJUSYNCMeshData>& MeshDataArray,
+			const TArray<FVector>& SpawnLocations,
+			const TArray<FRotator>& SpawnRotations,
+			TSharedPtr<TArray<AActor*>> SharedResults,
+			int32 CurrentBatch,
+			int32 BatchSize,
+			float BatchDelay
+		);
 };
