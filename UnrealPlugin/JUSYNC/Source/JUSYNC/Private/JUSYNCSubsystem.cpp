@@ -751,6 +751,7 @@ bool UJUSYNCSubsystem::BatchCreateRealtimeMeshesFromJUSYNC(const TArray<FJUSYNCM
     return bAllSuccessful;
 }
 
+
 FJUSYNCRealtimeMeshData UJUSYNCSubsystem::ConvertToRealtimeMeshFormat(const FJUSYNCMeshData& StandardMesh)
 {
     FJUSYNCRealtimeMeshData RealtimeMesh;
@@ -900,54 +901,43 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtActor(const FJUSYNCMeshData&
 }
 
 TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocations(
-    const TArray<FJUSYNCMeshData>& MeshDataArray, 
-    const TArray<FVector>& SpawnLocations)
+    const TArray<FJUSYNCMeshData>& MeshDataArray,
+    const TArray<FVector>& SpawnLocations,
+    bool bUseAsyncSpawning,
+    int32 BatchSize,
+    float BatchDelay)
 {
-    TArray<AActor*> SpawnedActors;
-    
-    // 🔍 DEBUG: Log input arrays
+    // Your existing validation
     UE_LOG(LogTemp, Warning, TEXT("=== BATCH SPAWN DEBUG ==="));
     UE_LOG(LogTemp, Warning, TEXT("MeshDataArray.Num(): %d"), MeshDataArray.Num());
     UE_LOG(LogTemp, Warning, TEXT("SpawnLocations.Num(): %d"), SpawnLocations.Num());
-    
-    for (int32 i = 0; i < SpawnLocations.Num(); ++i)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("SpawnLocation[%d]: %s"), i, *SpawnLocations[i].ToString());
-    }
-    
+    UE_LOG(LogTemp, Warning, TEXT("Async Mode: %s"), bUseAsyncSpawning ? TEXT("YES") : TEXT("NO"));
+
     if (MeshDataArray.Num() != SpawnLocations.Num())
     {
-        UE_LOG(LogTemp, Error, TEXT("❌ Array size mismatch! Meshes: %d, Locations: %d"), 
-               MeshDataArray.Num(), SpawnLocations.Num());
-        return SpawnedActors;
+        UE_LOG(LogTemp, Error, TEXT("❌ Array size mismatch!"));
+        return TArray<AActor*>();
     }
 
-    SpawnedActors.Reserve(MeshDataArray.Num());
-    int32 SuccessCount = 0;
-    
-    for (int32 i = 0; i < MeshDataArray.Num(); ++i)
+    // If not async, use your existing synchronous method
+    if (!bUseAsyncSpawning)
     {
-        UE_LOG(LogTemp, Warning, TEXT("🎯 Spawning mesh %d '%s' at location %s"), 
-               i, *MeshDataArray[i].ElementName, *SpawnLocations[i].ToString());
-               
-        AActor* SpawnedActor = SpawnRealtimeMeshAtLocation(MeshDataArray[i], SpawnLocations[i]);
-        SpawnedActors.Add(SpawnedActor);
-        
-        if (SpawnedActor)
-        {
-            SuccessCount++;
-            UE_LOG(LogTemp, Warning, TEXT("✅ Successfully spawned at %s"), 
-                   *SpawnedActor->GetActorLocation().ToString());
-        }
-        else
-        {
-            UE_LOG(LogTemp, Error, TEXT("❌ Failed to spawn mesh %d"), i);
-        }
+        return BatchSpawnRealtimeMeshesAtLocationsSync(MeshDataArray, SpawnLocations);
     }
 
-    UE_LOG(LogTemp, Warning, TEXT("=== BATCH SPAWN COMPLETE: %d/%d successful ==="), 
-           SuccessCount, MeshDataArray.Num());
-    return SpawnedActors;
+    // NEW: Async spawning logic
+    UE_LOG(LogTemp, Warning, TEXT("🚀 Starting ASYNC batch spawn"));
+    
+    // Create a shared pointer to store results
+    TSharedPtr<TArray<AActor*>> SharedSpawnedActors = MakeShared<TArray<AActor*>>();
+    SharedSpawnedActors->Reserve(MeshDataArray.Num());
+
+    // Start async batching
+    AsyncBatchSpawnInternal(MeshDataArray, SpawnLocations, SharedSpawnedActors, 
+                           0, BatchSize, BatchDelay);
+
+    // Return empty array for async mode (results come via callbacks)
+    return TArray<AActor*>();
 }
 
 

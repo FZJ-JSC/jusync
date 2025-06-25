@@ -85,9 +85,21 @@ public:
     static AActor* SpawnRealtimeMeshAtActor(const FJUSYNCMeshData& MeshData, 
                                            AActor* TargetActor);
 
+
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnBatchSpawnProgress, 
+	const TArray<AActor*>&, SpawnedActors, float, Progress);
+
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnBatchSpawnComplete, 
+		const TArray<AActor*>&, SpawnedActors, bool, bSuccess);
+	
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning", CallInEditor)
-    static TArray<AActor*> BatchSpawnRealtimeMeshesAtLocations(const TArray<FJUSYNCMeshData>& MeshDataArray,
-                                                              const TArray<FVector>& SpawnLocations);
+	static TArray<AActor*> BatchSpawnRealtimeMeshesAtLocations(
+		const TArray<FJUSYNCMeshData>& MeshDataArray,
+		const TArray<FVector>& SpawnLocations,
+		bool bUseAsyncSpawning = false,
+		int32 BatchSize = 5,
+		float BatchDelay = 0.016f
+	);
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning")
     static TArray<FVector> GetSpawnPointLocations(const FString& TagFilter = TEXT("USDSpawnPoint"));
@@ -134,7 +146,15 @@ public:
     // ========== HELPER FUNCTIONS ==========
     UFUNCTION(BlueprintPure, Category = "JUSYNC|Helpers")
     static UJUSYNCSubsystem* GetJUSYNCSubsystem();
-	
+
+	// ========== Async ===============
+	// Add this declaration in the public section
+	UFUNCTION(BlueprintCallable, Category = "JUSYNC")
+	static TArray<AActor*> BatchSpawnRealtimeMeshesAtLocationsSync(
+		const TArray<FJUSYNCMeshData>& MeshDataArray,
+		const TArray<FVector>& SpawnLocations
+	);
+
 
     // Internal storage for received data (public for subsystem access)
     static TArray<FJUSYNCFileData> ReceivedFiles;
@@ -146,4 +166,13 @@ private:
     static bool ValidateBufferSize(const TArray<uint8>& Buffer, const FString& Context);
     static bool ValidateFilePath(const FString& FilePath, const FString& Context);
     static FString ExtractUSDAPreview(const TArray<uint8>& Buffer, int32 MaxLines);
+
+	static void AsyncBatchSpawnInternal(
+	const TArray<FJUSYNCMeshData>& MeshDataArray,
+	const TArray<FVector>& SpawnLocations,
+	TSharedPtr<TArray<AActor*>> SharedResults,
+	int32 CurrentBatch,
+	int32 BatchSize,
+	float BatchDelay
+);
 };

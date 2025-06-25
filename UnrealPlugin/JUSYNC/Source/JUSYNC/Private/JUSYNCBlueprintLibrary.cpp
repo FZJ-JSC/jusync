@@ -744,4 +744,117 @@ FString UJUSYNCBlueprintLibrary::ExtractUSDAPreview(const TArray<uint8>& Buffer,
     return Preview;
 }
 
+void UJUSYNCBlueprintLibrary::AsyncBatchSpawnInternal(
+    const TArray<FJUSYNCMeshData>& MeshDataArray,
+    const TArray<FVector>& SpawnLocations,
+    TSharedPtr<TArray<AActor*>> SharedResults,
+    int32 CurrentBatch,
+    int32 BatchSize,
+    float BatchDelay)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogTemp, Error, TEXT("No subsystem for async spawn"));
+        return;
+    }
+
+    UWorld* World = Subsystem->GetWorld();
+    if (!World)
+    {
+        UE_LOG(LogTemp, Error, TEXT("No world for async spawn"));
+        return;
+    }
+
+    // Calculate batch range
+    int32 StartIndex = CurrentBatch * BatchSize;
+    int32 EndIndex = FMath::Min(StartIndex + BatchSize, MeshDataArray.Num());
+    
+    UE_LOG(LogTemp, Warning, TEXT("📦 Processing async batch %d: indices %d-%d"), 
+        CurrentBatch, StartIndex, EndIndex - 1);
+
+    // Process current batch
+    for (int32 i = StartIndex; i < EndIndex; ++i)
+    {
+        AActor* SpawnedActor = SpawnRealtimeMeshAtLocation(
+            MeshDataArray[i], SpawnLocations[i]);
+        SharedResults->Add(SpawnedActor);
+        
+        if (SpawnedActor)
+        {
+            UE_LOG(LogTemp, Log, TEXT("✅ Async spawned mesh %d at %s"), 
+                i, *SpawnLocations[i].ToString());
+        }
+    }
+
+    // Check if we're done
+    if (EndIndex >= MeshDataArray.Num())
+    {
+        // All batches complete
+        UE_LOG(LogTemp, Warning, TEXT("🎉 Async batch spawn complete: %d/%d successful"), 
+            SharedResults->Num(), MeshDataArray.Num());
+        
+        // Broadcast completion (you can add delegate broadcasting here)
+        return;
+    }
+
+    // Schedule next batch
+    FTimerHandle TimerHandle;
+    World->GetTimerManager().SetTimer(TimerHandle, 
+        FTimerDelegate::CreateLambda([=]()
+        {
+            AsyncBatchSpawnInternal(MeshDataArray, SpawnLocations, SharedResults, 
+                                  CurrentBatch + 1, BatchSize, BatchDelay);
+        }), 
+        BatchDelay, false);
+}
+
+TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocationsSync(
+    const TArray<FJUSYNCMeshData>& MeshDataArray,
+    const TArray<FVector>& SpawnLocations)
+{
+    TArray<AActor*> SpawnedActors;
+    
+    // Debug logging
+    UE_LOG(LogTemp, Warning, TEXT("=== SYNC BATCH SPAWN DEBUG ==="));
+    UE_LOG(LogTemp, Warning, TEXT("MeshDataArray.Num(): %d"), MeshDataArray.Num());
+    UE_LOG(LogTemp, Warning, TEXT("SpawnLocations.Num(): %d"), SpawnLocations.Num());
+
+    if (MeshDataArray.Num() != SpawnLocations.Num())
+    {
+        UE_LOG(LogTemp, Error, TEXT("❌ Array size mismatch! Meshes: %d, Locations: %d"),
+            MeshDataArray.Num(), SpawnLocations.Num());
+        return SpawnedActors;
+    }
+
+    SpawnedActors.Reserve(MeshDataArray.Num());
+    int32 SuccessCount = 0;
+    
+    for (int32 i = 0; i < MeshDataArray.Num(); ++i)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("🎯 Spawning mesh %d '%s' at location %s"),
+            i, *MeshDataArray[i].ElementName, *SpawnLocations[i].ToString());
+            
+        AActor* SpawnedActor = SpawnRealtimeMeshAtLocation(MeshDataArray[i], SpawnLocations[i]);
+        SpawnedActors.Add(SpawnedActor);
+        
+        if (SpawnedActor)
+        {
+            SuccessCount++;
+            UE_LOG(LogTemp, Warning, TEXT("✅ Successfully spawned at %s"),
+                *SpawnedActor->GetActorLocation().ToString());
+        }
+        else
+        {
+            UE_LOG(LogTemp, Error, TEXT("❌ Failed to spawn mesh %d"), i);
+        }
+    }
+    
+    UE_LOG(LogTemp, Warning, TEXT("=== SYNC BATCH SPAWN COMPLETE: %d/%d successful ==="),
+        SuccessCount, MeshDataArray.Num());
+    
+    return SpawnedActors;
+}
+
+
 

@@ -100,6 +100,7 @@ public:
 
     UFUNCTION()
     void HandleMessageReceivedForLibrary(const FString& Message);
+    
 
 private:
 #ifdef WITH_ANARI_USD_MIDDLEWARE
