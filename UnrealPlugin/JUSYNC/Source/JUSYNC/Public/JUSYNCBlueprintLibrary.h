@@ -5,6 +5,7 @@
 #include "Engine/Texture2D.h"
 #include "JUSYNCTypes.h"
 #include "JUSYNCSubsystem.h"
+#include "TimerManager.h"
 #include "JUSYNCBlueprintLibrary.generated.h"
 
 // Forward declarations

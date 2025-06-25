@@ -8,6 +8,8 @@
 #include "Mesh/RealtimeMeshBasicShapeTools.h"
 #include "Materials/Material.h"
 #include "MaterialDomain.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Materials/MaterialInterface.h"
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
 #include "AnariUsdMiddleware.h"

@@ -4,7 +4,6 @@ build/
 build_linux/
 out/
 bin/
-lib/
 UnrealPlugin/JUSYNC/Config/
 UnrealPlugin/JUSYNC/Binaries/
 cmake-build-debug/

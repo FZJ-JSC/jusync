@@ -6,10 +6,13 @@
 	"Description": "Real-time USD data synchronization plugin for ANARI rendering pipeline",
 	"Category": "Rendering",
 	"CreatedBy": "Thomas George @ JSC",
+	"CreatedByURL": "https://github.com/staticx-g7",
+	"DocsURL": "https://github.com/staticx-g7",
+	"MarketplaceURL": "",
+	"SupportURL": "https://github.com/staticx-g7",
+	"EngineVersion": "5.5.0",
 	"CanContainContent": true,
-	"IsBetaVersion": false,
-	"IsExperimentalVersion": false,
-	"Installed": false,
+	"Installed": true,
 	"Modules": [
 		{
 			"Name": "JUSYNC",
@@ -25,9 +28,5 @@
 			"Name": "RealtimeMeshComponent",
 			"Enabled": true
 		}
-	],
-	"CreatedByURL": "https://github.com/staticx-g7",
-	"DocsURL": "https://github.com/staticx-g7",
-	"MarketplaceURL": "",
-	"SupportURL": "https://github.com/staticx-g7"
+	]
 }
