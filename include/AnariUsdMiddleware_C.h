@@ -21,7 +21,7 @@ extern "C" {
     #endif
 #endif
 
-// C-compatible structures (no STL)
+// C-compatible structures
 typedef struct {
     char filename[256];
     unsigned char* data;

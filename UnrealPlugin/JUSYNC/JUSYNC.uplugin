@@ -1,0 +1,33 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0.0",
+	"FriendlyName": "JUSYNC",
+	"Description": "Real-time USD data synchronization plugin for ANARI rendering pipeline",
+	"Category": "Rendering",
+	"CreatedBy": "Thomas George @ JSC",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "JUSYNC",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [
+				"Win64"
+			]
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "RealtimeMeshComponent",
+			"Enabled": true
+		}
+	],
+	"CreatedByURL": "https://github.com/staticx-g7",
+	"DocsURL": "https://github.com/staticx-g7",
+	"MarketplaceURL": "",
+	"SupportURL": "https://github.com/staticx-g7"
+}

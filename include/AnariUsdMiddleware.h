@@ -238,7 +238,7 @@ public:
     std::string getStatusInfo() const;
 
 private:
-    // Forward declaration of implementation class (Pimpl idiom)
+
     class Impl;
     std::unique_ptr<Impl> pImpl;
 
