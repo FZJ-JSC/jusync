@@ -4,7 +4,8 @@ build/
 build_linux/
 out/
 bin/
-lib/
+UnrealPlugin/JUSYNC/Config/
+UnrealPlugin/JUSYNC/Binaries/
 cmake-build-debug/
 cmake-build-release/
 test_output/
@@ -36,13 +37,13 @@ compile_commands.json
 *.so
 *.so.*
 *.dylib
-*.dll
+
 
 # Compiled Static libraries
 *.lai
 *.la
 *.a
-*.lib
+
 
 # Executables
 *.exe
@@ -60,6 +61,9 @@ compile_commands.json
 *.user
 *.user.*
 .cache/
+
+#Other files
+structure.txt
 
 # OS specific
 .DS_Store
