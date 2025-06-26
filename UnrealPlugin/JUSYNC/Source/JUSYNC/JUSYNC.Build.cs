@@ -28,9 +28,9 @@ public class JUSYNC : ModuleRules
         {
             "Slate",
             "SlateCore",
-            "RenderCore",            
-            "RHI",                   
-            "GameplayTasks"           
+            "RenderCore",
+            "RHI",
+            "GameplayTasks"
         });
 
         // Critical STL linking definitions
@@ -41,8 +41,8 @@ public class JUSYNC : ModuleRules
             "_CRT_SECURE_NO_WARNINGS=1",
             "_SCL_SECURE_NO_WARNINGS=1",
             "ANARI_USD_MIDDLEWARE_SAFE_MODE=1",
-            "_ITERATOR_DEBUG_LEVEL=0",  
-            "_HAS_EXCEPTIONS=1"         
+            "_ITERATOR_DEBUG_LEVEL=0",
+            "_HAS_EXCEPTIONS=1"
         });
 
         if (Target.Platform == UnrealTargetPlatform.Win64)
@@ -63,16 +63,12 @@ public class JUSYNC : ModuleRules
                 "odbc32.lib",
                 "odbccp32.lib"
             });
-        }
 
-        // Third-party library integration
-        string ThirdPartyPath = Path.Combine(ModuleDirectory, "..", "ThirdParty");
-        string AnariUsdPath = Path.Combine(ThirdPartyPath, "AnariUsdMiddleware");
+            // Third-party library integration
+            string ThirdPartyPath = Path.Combine(ModuleDirectory, "..", "ThirdParty");
+            string AnariUsdPath = Path.Combine(ThirdPartyPath, "AnariUsdMiddleware");
+            PublicIncludePaths.Add(Path.Combine(AnariUsdPath, "Include"));
 
-        PublicIncludePaths.Add(Path.Combine(AnariUsdPath, "Include"));
-
-        if (Target.Platform == UnrealTargetPlatform.Win64)
-        {
             string LibPath = Path.Combine(AnariUsdPath, "Lib", "Win64");
             string LibFile = Path.Combine(LibPath, "anari_usd_middleware.lib");
 
@@ -80,13 +76,28 @@ public class JUSYNC : ModuleRules
             {
                 PublicAdditionalLibraries.Add(LibFile);
 
-                RuntimeDependencies.Add(Path.Combine(LibPath, "anari_usd_middleware.dll"));
-                RuntimeDependencies.Add(Path.Combine(LibPath, "libzmq-v143-mt-4_3_6.dll"));
-                RuntimeDependencies.Add(Path.Combine(LibPath, "libcrypto-3-x64.dll"));
-                RuntimeDependencies.Add(Path.Combine(LibPath, "libssl-3-x64.dll"));
+                // List of DLLs to copy
+                string[] Dlls = new string[]
+                {
+                    "anari_usd_middleware.dll",
+                    "libzmq-v143-mt-4_3_6.dll",
+                    "libcrypto-3-x64.dll",
+                    "libssl-3-x64.dll"
+                };
+
+                foreach (string Dll in Dlls)
+                {
+                    // Source: ThirdParty/AnariUsdMiddleware/Lib/Win64/DLL
+                    string SourceDll = Path.Combine(LibPath, Dll);
+                    // Destination: Plugins/JUSYNC/Binaries/Win64/DLL
+                    string DestDll = Path.Combine(ModuleDirectory, "../../Binaries/Win64", Dll);
+
+                    // Register for runtime & packaging, and copy to Binaries/Win64
+                    RuntimeDependencies.Add(DestDll, SourceDll);
+                }
 
                 PublicDefinitions.Add("WITH_ANARI_USD_MIDDLEWARE=1");
-                System.Console.WriteLine("JUSYNC: Middleware libraries linked successfully");
+                System.Console.WriteLine("JUSYNC: Middleware libraries linked and DLLs set for runtime copy.");
             }
             else
             {
