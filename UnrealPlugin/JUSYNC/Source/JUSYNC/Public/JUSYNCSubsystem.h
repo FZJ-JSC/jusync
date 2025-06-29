@@ -83,8 +83,12 @@ public:
 
     // RealtimeMesh Integration
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Mesh")
-    bool CreateRealtimeMeshFromJUSYNC(const FJUSYNCMeshData& MeshData, URealtimeMeshComponent* RealtimeMeshComponent);
-
+    bool CreateRealtimeMeshFromJUSYNC(
+        const FJUSYNCMeshData& MeshData, 
+        URealtimeMeshComponent* RealtimeMeshComponent
+    );
+    
+    
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Mesh")
     bool BatchCreateRealtimeMeshesFromJUSYNC(const TArray<FJUSYNCMeshData>& MeshDataArray, const TArray<URealtimeMeshComponent*>& MeshComponents);
 
