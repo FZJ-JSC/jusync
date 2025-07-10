@@ -667,48 +667,155 @@ public:
 
 private:
     // CRITICAL: Add the missing convertMeshData method
-    bool convertMeshData(const UsdProcessor::MeshData& processorMeshData,
+bool convertMeshData(const UsdProcessor::MeshData& processorMeshData,
                     AnariUsdMiddleware::MeshData& publicMeshData) {
-        try {
-            publicMeshData.elementName = processorMeshData.elementName;
-            publicMeshData.typeName = processorMeshData.typeName;
+    try {
+        publicMeshData.elementName = processorMeshData.elementName;
+        publicMeshData.typeName = processorMeshData.typeName;
 
-            // FIXED: Convert glm::vec3 points to flat float array
-            publicMeshData.points.clear();
-            publicMeshData.points.reserve(processorMeshData.points.size() * 3);
-            for (const auto& point : processorMeshData.points) {
-                publicMeshData.points.push_back(point.x);
-                publicMeshData.points.push_back(point.y);
-                publicMeshData.points.push_back(point.z);
-            }
+        // Calculate counts for interpolation detection
+        size_t pointCount = processorMeshData.points.size();
+        size_t faceCount = processorMeshData.indices.size() / 3;
+        size_t colorCount = processorMeshData.vertex_colors.size();
 
-            // Direct copy for indices (both are std::vector<uint32_t>)
-            publicMeshData.indices = processorMeshData.indices;
+        bool bVertexInterp = (colorCount == pointCount);
+        bool bUniformInterp = (colorCount == faceCount);
 
-            // FIXED: Convert glm::vec3 normals to flat float array
-            publicMeshData.normals.clear();
-            publicMeshData.normals.reserve(processorMeshData.normals.size() * 3);
-            for (const auto& normal : processorMeshData.normals) {
-                publicMeshData.normals.push_back(normal.x);
-                publicMeshData.normals.push_back(normal.y);
-                publicMeshData.normals.push_back(normal.z);
-            }
+        MIDDLEWARE_LOG_INFO("convertMeshData: %zu colors, %zu vertices, %zu faces - Mode: %s",
+            colorCount, pointCount, faceCount,
+            bVertexInterp ? "VERTEX" : (bUniformInterp ? "UNIFORM" : "UNKNOWN"));
 
-            // FIXED: Convert glm::vec2 UVs to flat float array
-            publicMeshData.uvs.clear();
-            publicMeshData.uvs.reserve(processorMeshData.uvs.size() * 2);
-            for (const auto& uv : processorMeshData.uvs) {
-                publicMeshData.uvs.push_back(uv.x);
-                publicMeshData.uvs.push_back(uv.y);
-            }
-
-            return publicMeshData.isValid();
-        } catch (const std::exception& e) {
-            MIDDLEWARE_LOG_ERROR("Exception in convertMeshData: %s", e.what());
-            return false;
+        // Convert points (glm::vec3 → flat float array)
+        publicMeshData.points.clear();
+        publicMeshData.points.reserve(pointCount * 3);
+        for (const auto& point : processorMeshData.points) {
+            publicMeshData.points.push_back(point.x);
+            publicMeshData.points.push_back(point.y);
+            publicMeshData.points.push_back(point.z);
         }
-    }
 
+        // Direct copy for indices
+        publicMeshData.indices = processorMeshData.indices;
+
+        // Convert normals (glm::vec3 → flat float array)
+        publicMeshData.normals.clear();
+        publicMeshData.normals.reserve(processorMeshData.normals.size() * 3);
+        for (const auto& normal : processorMeshData.normals) {
+            publicMeshData.normals.push_back(normal.x);
+            publicMeshData.normals.push_back(normal.y);
+            publicMeshData.normals.push_back(normal.z);
+        }
+
+        // Convert UVs (glm::vec2 → flat float array)
+        publicMeshData.uvs.clear();
+        publicMeshData.uvs.reserve(processorMeshData.uvs.size() * 2);
+        for (const auto& uv : processorMeshData.uvs) {
+            publicMeshData.uvs.push_back(uv.x);
+            publicMeshData.uvs.push_back(uv.y);
+        }
+
+        // ✅ ENHANCED: Vertex color conversion with interpolation handling
+        publicMeshData.vertex_colors.clear();
+        if (!processorMeshData.vertex_colors.empty()) {
+
+            if (bVertexInterp) {
+                // Direct per-vertex mapping
+                MIDDLEWARE_LOG_INFO("Using VERTEX interpolation - direct color mapping");
+                publicMeshData.vertex_colors.reserve(colorCount * 4);
+                for (const auto& color : processorMeshData.vertex_colors) {
+                    publicMeshData.vertex_colors.push_back(color.r);
+                    publicMeshData.vertex_colors.push_back(color.g);
+                    publicMeshData.vertex_colors.push_back(color.b);
+                    publicMeshData.vertex_colors.push_back(color.a);
+                }
+            }
+            else if (bUniformInterp) {
+                // Expand uniform (per-face) colors to per-vertex
+                MIDDLEWARE_LOG_INFO("Using UNIFORM interpolation - expanding face colors to vertices");
+                publicMeshData.vertex_colors.reserve(pointCount * 4);
+
+                // Create per-vertex colors by mapping face colors to vertices
+                std::vector<glm::vec4> vertexColors(pointCount, glm::vec4(1.0f)); // Default white
+
+                for (size_t faceIdx = 0; faceIdx < faceCount; ++faceIdx) {
+                    if (faceIdx >= colorCount) break;
+
+                    const auto& faceColor = processorMeshData.vertex_colors[faceIdx];
+
+                    // Get the three vertex indices for this face
+                    size_t i0 = processorMeshData.indices[faceIdx * 3 + 0];
+                    size_t i1 = processorMeshData.indices[faceIdx * 3 + 1];
+                    size_t i2 = processorMeshData.indices[faceIdx * 3 + 2];
+
+                    // Assign face color to all three vertices
+                    if (i0 < pointCount) vertexColors[i0] = faceColor;
+                    if (i1 < pointCount) vertexColors[i1] = faceColor;
+                    if (i2 < pointCount) vertexColors[i2] = faceColor;
+                }
+
+                // Flatten to float array
+                for (const auto& color : vertexColors) {
+                    publicMeshData.vertex_colors.push_back(color.r);
+                    publicMeshData.vertex_colors.push_back(color.g);
+                    publicMeshData.vertex_colors.push_back(color.b);
+                    publicMeshData.vertex_colors.push_back(color.a);
+                }
+
+                MIDDLEWARE_LOG_INFO("Expanded %zu face colors to %zu vertex colors",
+                    colorCount, vertexColors.size());
+            }
+            else {
+                // Fallback: treat as vertex colors with padding/truncation
+                MIDDLEWARE_LOG_WARNING("Color count mismatch - using fallback vertex mapping");
+                publicMeshData.vertex_colors.reserve(pointCount * 4);
+
+                for (size_t i = 0; i < pointCount; ++i) {
+                    if (i < colorCount) {
+                        const auto& color = processorMeshData.vertex_colors[i];
+                        publicMeshData.vertex_colors.push_back(color.r);
+                        publicMeshData.vertex_colors.push_back(color.g);
+                        publicMeshData.vertex_colors.push_back(color.b);
+                        publicMeshData.vertex_colors.push_back(color.a);
+                    } else {
+                        // Default white for missing colors
+                        publicMeshData.vertex_colors.push_back(1.0f);
+                        publicMeshData.vertex_colors.push_back(1.0f);
+                        publicMeshData.vertex_colors.push_back(1.0f);
+                        publicMeshData.vertex_colors.push_back(1.0f);
+                    }
+                }
+            }
+
+            // Debug logging for first few colors
+            MIDDLEWARE_LOG_INFO("First few converted colors:");
+            for (size_t i = 0; i < std::min<size_t>(5, publicMeshData.vertex_colors.size() / 4); ++i) {
+                size_t idx = i * 4;
+                MIDDLEWARE_LOG_INFO("  Color[%zu]: (%.3f, %.3f, %.3f, %.3f)", i,
+                    publicMeshData.vertex_colors[idx],
+                    publicMeshData.vertex_colors[idx + 1],
+                    publicMeshData.vertex_colors[idx + 2],
+                    publicMeshData.vertex_colors[idx + 3]);
+            }
+        }
+
+        // Validate the converted mesh data
+        bool isValid = publicMeshData.isValid();
+        if (!isValid) {
+            MIDDLEWARE_LOG_ERROR("Converted mesh data failed validation for: %s",
+                processorMeshData.elementName.c_str());
+        } else {
+            MIDDLEWARE_LOG_INFO("Successfully converted mesh: %s (%zu vertices, %zu faces, %zu colors)",
+                processorMeshData.elementName.c_str(), pointCount, faceCount,
+                publicMeshData.vertex_colors.size() / 4);
+        }
+
+        return isValid;
+
+    } catch (const std::exception& e) {
+        MIDDLEWARE_LOG_ERROR("Exception in convertMeshData: %s", e.what());
+        return false;
+    }
+}
 
     // Helper methods
     void cleanup() {

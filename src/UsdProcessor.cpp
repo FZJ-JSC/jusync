@@ -930,7 +930,6 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
                                   MeshData& outMeshData,
                                   const glm::mat4& worldTransform) {
     MIDDLEWARE_VALIDATE_POINTER(mesh, "ExtractMeshData");
-
     if (!validateTransform(worldTransform)) {
         MIDDLEWARE_LOG_ERROR("Invalid world transform in ExtractMeshData");
         return false;
@@ -957,7 +956,6 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         // Transform and validate points
         outMeshData.points.clear();
         outMeshData.points.reserve(points.size());
-
         for (const auto& pt : points) {
             // Validate input point
             if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z)) {
@@ -968,7 +966,6 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             glm::vec3 vertex(static_cast<float>(pt.x),
                            static_cast<float>(pt.y),
                            static_cast<float>(pt.z));
-
             glm::vec4 transformedVertex = worldTransform * glm::vec4(vertex, 1.0f);
 
             // Validate transformed vertex
@@ -990,7 +987,6 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         // Extract and triangulate faces
         auto faceVertexCounts = geomMesh->get_faceVertexCounts();
         auto faceVertexIndices = geomMesh->get_faceVertexIndices();
-
         if (faceVertexCounts.empty() || faceVertexIndices.empty()) {
             MIDDLEWARE_LOG_WARNING("Mesh has no face data: %s", outMeshData.elementName.c_str());
             return false;
@@ -999,10 +995,8 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         // Triangulate with validation
         std::vector<uint32_t> triangulatedIndices;
         size_t indexOffset = 0;
-
         for (size_t faceIdx = 0; faceIdx < faceVertexCounts.size(); faceIdx++) {
             int32_t numVertsInFace = faceVertexCounts[faceIdx];
-
             if (numVertsInFace < 3) {
                 MIDDLEWARE_LOG_WARNING("Face %zu has less than 3 vertices, skipping", faceIdx);
                 indexOffset += numVertsInFace;
@@ -1051,7 +1045,7 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
 
         if (triangulatedIndices.size() > safety::MAX_MESH_INDICES) {
             MIDDLEWARE_LOG_ERROR("Too many indices generated: %zu (max: %zu)",
-                                triangulatedIndices.size(), safety::MAX_MESH_INDICES);
+                               triangulatedIndices.size(), safety::MAX_MESH_INDICES);
             return false;
         }
 
@@ -1066,7 +1060,6 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             } else {
                 outMeshData.normals.clear();
                 outMeshData.normals.reserve(normals.size());
-
                 glm::mat3 normalMatrix = glm::mat3(worldTransform);
 
                 for (const auto& nrm : normals) {
@@ -1079,7 +1072,6 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
                     glm::vec3 normalVec(static_cast<float>(nrm.x),
                                       static_cast<float>(nrm.y),
                                       static_cast<float>(nrm.z));
-
                     glm::vec3 transformedNormal = normalMatrix * normalVec;
 
                     // Validate and normalize
@@ -1106,20 +1098,176 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         // Extract UV coordinates
         extractUVCoordinates(geomMesh, outMeshData);
 
-        MIDDLEWARE_LOG_DEBUG("Successfully extracted mesh: %zu vertices, %zu triangles, %zu normals, %zu UVs",
+        // ✅ NEW: Extract vertex colors from primvars:color.timeSamples
+        extractVertexColors(geomMesh, outMeshData);
+
+        MIDDLEWARE_LOG_DEBUG("Successfully extracted mesh: %zu vertices, %zu triangles, %zu normals, %zu UVs, %zu colors",
                            outMeshData.points.size(),
                            outMeshData.indices.size() / 3,
                            outMeshData.normals.size(),
-                           outMeshData.uvs.size());
+                           outMeshData.uvs.size(),
+                           outMeshData.vertex_colors.size() / 4);
 
         return true;
-
     } catch (const std::exception& e) {
         MIDDLEWARE_LOG_ERROR("Exception in ExtractMeshData: %s", e.what());
         stats.processingErrors.fetch_add(1);
         return false;
     }
 }
+
+    void UsdProcessor::extractVertexColors(tinyusdz::GeomMesh* mesh, MeshData& meshData) {
+    if (!mesh) return;
+
+    try {
+        // Clear any existing vertex colors
+        meshData.vertex_colors.clear();
+
+        // Try to get vertex colors from primvars:color
+        tinyusdz::GeomPrimvar colorPrimvar;
+        std::string primvarErr;
+
+        // Try different color attribute names
+        const std::vector<std::string> colorNames = {
+            "primvars:color", "color", "primvars:displayColor", "displayColor",
+            "primvars:Cd", "Cd"  // Common in Houdini/Maya
+        };
+
+        bool foundColors = false;
+        for (const auto& name : colorNames) {
+            if (mesh->get_primvar(name, &colorPrimvar, &primvarErr)) {
+                // Try to get color values as different types
+                std::vector<tinyusdz::value::color3f> color3fValues;
+                std::vector<tinyusdz::value::color4f> color4fValues;
+                std::vector<tinyusdz::value::float3> float3Values;
+                std::vector<tinyusdz::value::float4> float4Values;
+
+                // Try color4f first (RGBA)
+                if (colorPrimvar.get_value(&color4fValues)) {
+                    MIDDLEWARE_LOG_DEBUG("Found %zu RGBA vertex colors in primvar: %s",
+                                       color4fValues.size(), name.c_str());
+
+                    meshData.vertex_colors.reserve(color4fValues.size());
+                    for (const auto& color : color4fValues) {
+                        // Validate color values
+                        if (std::isfinite(color.r) && std::isfinite(color.g) &&
+                            std::isfinite(color.b) && std::isfinite(color.a)) {
+                            meshData.vertex_colors.push_back(glm::vec4(
+                                static_cast<float>(color.r),
+                                static_cast<float>(color.g),
+                                static_cast<float>(color.b),
+                                static_cast<float>(color.a)
+                            ));
+                        } else {
+                            // Default white color for invalid values
+                            meshData.vertex_colors.push_back(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+                        }
+                    }
+                    foundColors = true;
+                    break;
+                }
+                // Try color3f (RGB, add alpha)
+                else if (colorPrimvar.get_value(&color3fValues)) {
+                    MIDDLEWARE_LOG_DEBUG("Found %zu RGB vertex colors in primvar: %s",
+                                       color3fValues.size(), name.c_str());
+
+                    meshData.vertex_colors.reserve(color3fValues.size());
+                    for (const auto& color : color3fValues) {
+                        // Validate color values
+                        if (std::isfinite(color.r) && std::isfinite(color.g) && std::isfinite(color.b)) {
+                            meshData.vertex_colors.push_back(glm::vec4(
+                                static_cast<float>(color.r),
+                                static_cast<float>(color.g),
+                                static_cast<float>(color.b),
+                                1.0f  // Default alpha
+                            ));
+                        } else {
+                            // Default white color for invalid values
+                            meshData.vertex_colors.push_back(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+                        }
+                    }
+                    foundColors = true;
+                    break;
+                }
+                // Try float4 (generic RGBA)
+                else if (colorPrimvar.get_value(&float4Values)) {
+                    MIDDLEWARE_LOG_DEBUG("Found %zu float4 vertex colors in primvar: %s",
+                                       float4Values.size(), name.c_str());
+
+                    meshData.vertex_colors.reserve(float4Values.size());
+                    for (const auto& color : float4Values) {
+                        // Validate color values
+                        if (std::isfinite(color[0]) && std::isfinite(color[1]) &&
+                            std::isfinite(color[2]) && std::isfinite(color[3])) {
+                            meshData.vertex_colors.push_back(glm::vec4(
+                                static_cast<float>(color[0]),
+                                static_cast<float>(color[1]),
+                                static_cast<float>(color[2]),
+                                static_cast<float>(color[3])
+                            ));
+                        } else {
+                            // Default white color for invalid values
+                            meshData.vertex_colors.push_back(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+                        }
+                    }
+                    foundColors = true;
+                    break;
+                }
+                // Try float3 (generic RGB)
+                else if (colorPrimvar.get_value(&float3Values)) {
+                    MIDDLEWARE_LOG_DEBUG("Found %zu float3 vertex colors in primvar: %s",
+                                       float3Values.size(), name.c_str());
+
+                    meshData.vertex_colors.reserve(float3Values.size());
+                    for (const auto& color : float3Values) {
+                        // Validate color values
+                        if (std::isfinite(color[0]) && std::isfinite(color[1]) && std::isfinite(color[2])) {
+                            meshData.vertex_colors.push_back(glm::vec4(
+                                static_cast<float>(color[0]),
+                                static_cast<float>(color[1]),
+                                static_cast<float>(color[2]),
+                                1.0f  // Default alpha
+                            ));
+                        } else {
+                            // Default white color for invalid values
+                            meshData.vertex_colors.push_back(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+                        }
+                    }
+                    foundColors = true;
+                    break;
+                }
+            }
+        }
+
+        if (foundColors) {
+            // Validate that color count matches vertex count
+            if (meshData.vertex_colors.size() != meshData.points.size()) {
+                MIDDLEWARE_LOG_WARNING("Vertex color count (%zu) doesn't match vertex count (%zu) for mesh: %s",
+                                     meshData.vertex_colors.size(), meshData.points.size(), meshData.elementName.c_str());
+
+                // Resize to match vertex count
+                if (meshData.vertex_colors.size() > meshData.points.size()) {
+                    meshData.vertex_colors.resize(meshData.points.size());
+                } else {
+                    // Fill missing colors with white
+                    while (meshData.vertex_colors.size() < meshData.points.size()) {
+                        meshData.vertex_colors.push_back(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+                    }
+                }
+            }
+
+            MIDDLEWARE_LOG_INFO("Successfully extracted %zu vertex colors for mesh: %s",
+                              meshData.vertex_colors.size(), meshData.elementName.c_str());
+        } else {
+            MIDDLEWARE_LOG_DEBUG("No vertex colors found for mesh: %s", meshData.elementName.c_str());
+        }
+
+    } catch (const std::exception& e) {
+        MIDDLEWARE_LOG_ERROR("Exception extracting vertex colors: %s", e.what());
+        meshData.vertex_colors.clear(); // Clear on error
+    }
+}
+
 
 glm::mat4 UsdProcessor::GetLocalTransform(void* prim) {
     MIDDLEWARE_VALIDATE_POINTER(prim, "GetLocalTransform");

@@ -3,6 +3,8 @@
 
 A high-performance C++ middleware library that provides seamless communication between ANARI (ANAlytic Rendering Interface) applications and USD (Universal Scene Description) data streams via ZeroMQ messaging. This middleware enables real-time streaming of USD files, textures, and mesh data over network connections, making it ideal for collaborative workflows, live preview systems, and distributed rendering pipelines.
 
+We gratefully acknowledge the Bundesministerium für Forschung, Technologie und Raumfahrt (BMFTR) and Ministerium für Kultur und Wissenschaft des Landes Nordrhein-Westfalen (MWK-NRW) for funding this work in the project InHPC-DE through the Gauss Centre for Supercomputing e.V. (www.gauss-centre.eu).
+
 ## Overview
 
 The JUSYNC Middleware acts as a bridge between USD content creation tools and ANARI-based rendering applications. It implements a robust ZeroMQ ROUTER/DEALER communication pattern to handle file transfers with hash verification, automatic USD format conversion, and comprehensive mesh data extraction capabilities.
