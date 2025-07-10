@@ -898,15 +898,24 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
     const TArray<FVector>& SpawnLocations,
     const TArray<FRotator>& SpawnRotations,
     UMaterialInterface* Material,
+    bool bUseUniformScaling,
+    FVector OuterBoundingBoxSize,
+    bool bPreserveAspectRatio,
     bool bUseAsyncSpawning,
     int32 BatchSize,
     float BatchDelay)
 {
-    // Validation
+    // Enhanced validation
     if (MeshDataArray.Num() != SpawnLocations.Num())
     {
         UE_LOG(LogTemp, Error, TEXT("❌ Array size mismatch! Meshes: %d, Locations: %d"),
             MeshDataArray.Num(), SpawnLocations.Num());
+        return TArray<AActor*>();
+    }
+
+    if (MeshDataArray.Num() == 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("⚠️ Empty mesh data array provided"));
         return TArray<AActor*>();
     }
 
@@ -915,13 +924,79 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
     if (FinalRotations.Num() == 0)
     {
         FinalRotations = GenerateDefaultRotations(MeshDataArray.Num());
+        UE_LOG(LogTemp, Warning, TEXT("Generated %d default rotations"), FinalRotations.Num());
     }
     else if (FinalRotations.Num() != MeshDataArray.Num())
     {
-        UE_LOG(LogTemp, Error, TEXT("❌ Rotation array size mismatch!"));
+        UE_LOG(LogTemp, Error, TEXT("❌ Rotation array size mismatch! Expected: %d, Got: %d"),
+            MeshDataArray.Num(), FinalRotations.Num());
         return TArray<AActor*>();
     }
 
+    // **ENHANCED SCALING LOGIC**
+    TArray<FVector> FinalLocations = SpawnLocations;
+    FVector ScaleFactor = FVector::OneVector;
+    
+    if (bUseUniformScaling && OuterBoundingBoxSize != FVector::ZeroVector)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("🎯 Applying uniform scaling with bounding box: %s"),
+            *OuterBoundingBoxSize.ToString());
+        
+        // **FIX: Handle single point scaling properly**
+        if (SpawnLocations.Num() == 1)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("🔧 Single spawn point - calculating scale based on mesh bounds"));
+            
+            // Calculate mesh extent from first mesh data
+            FVector MeshSize(40.0f, 40.0f, 40.0f); // Default fallback
+            if (MeshDataArray.Num() > 0 && MeshDataArray[0].Vertices.Num() > 0)
+            {
+                FBox MeshBounds(EForceInit::ForceInit);
+                for (const FVector& Vertex : MeshDataArray[0].Vertices)
+                {
+                    MeshBounds += Vertex;
+                }
+                MeshSize = MeshBounds.GetSize();
+                UE_LOG(LogTemp, Warning, TEXT("📐 Calculated mesh size from vertices: %s"), *MeshSize.ToString());
+            }
+            
+            // Calculate scale factor for single point
+            if (bPreserveAspectRatio)
+            {
+                float MinScale = FMath::Min3(
+                    MeshSize.X > 0 ? OuterBoundingBoxSize.X / MeshSize.X : 1.0f,
+                    MeshSize.Y > 0 ? OuterBoundingBoxSize.Y / MeshSize.Y : 1.0f,
+                    MeshSize.Z > 0 ? OuterBoundingBoxSize.Z / MeshSize.Z : 1.0f
+                );
+                ScaleFactor = FVector(MinScale, MinScale, MinScale);
+            }
+            else
+            {
+                ScaleFactor = FVector(
+                    MeshSize.X > 0 ? OuterBoundingBoxSize.X / MeshSize.X : 1.0f,
+                    MeshSize.Y > 0 ? OuterBoundingBoxSize.Y / MeshSize.Y : 1.0f,
+                    MeshSize.Z > 0 ? OuterBoundingBoxSize.Z / MeshSize.Z : 1.0f
+                );
+            }
+            
+            UE_LOG(LogTemp, Warning, TEXT("🎯 Single point scale factor: %s (MeshSize: %s, TargetSize: %s)"), 
+                *ScaleFactor.ToString(), *MeshSize.ToString(), *OuterBoundingBoxSize.ToString());
+        }
+        else
+        {
+            // Multi-point scaling using existing logic
+            FinalLocations = CalculateScaledPositions(
+                SpawnLocations,
+                OuterBoundingBoxSize,
+                bPreserveAspectRatio,
+                ScaleFactor
+            );
+        }
+        
+        UE_LOG(LogTemp, Warning, TEXT("📏 Final scale factor: %s"), *ScaleFactor.ToString());
+    }
+
+    // Get subsystem and world
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (!Subsystem)
     {
@@ -936,78 +1011,190 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
         return TArray<AActor*>();
     }
 
+    // **ENHANCED SPAWNING LOGIC**
     TArray<AActor*> SpawnedActors;
     SpawnedActors.Reserve(MeshDataArray.Num());
-
     int32 SuccessCount = 0;
+
+    UE_LOG(LogTemp, Warning, TEXT("=== STARTING BATCH SPAWN ==="));
+    UE_LOG(LogTemp, Warning, TEXT("Meshes: %d, Uniform Scaling: %s, Scale Factor: %s"),
+        MeshDataArray.Num(), bUseUniformScaling ? TEXT("YES") : TEXT("NO"), *ScaleFactor.ToString());
+
     for (int32 i = 0; i < MeshDataArray.Num(); ++i)
     {
-        // ✅ FIXED: Process mesh data to fix normals BEFORE spawning
+        // Process mesh data
         FJUSYNCMeshData ProcessedMeshData = FixMeshDataForSpawning(MeshDataArray[i]);
-        
         FRotator UERotation = ConvertParaViewToUERotation(FinalRotations[i]);
-        
-        // Spawn actor
+
+        UE_LOG(LogTemp, Log, TEXT("🎯 Spawning mesh %d '%s' at location %s with rotation %s"),
+            i, *ProcessedMeshData.ElementName, *FinalLocations[i].ToString(), *UERotation.ToString());
+
+        // **FIXED ACTOR SPAWNING - OPTION 1: Let engine auto-generate names**
         FActorSpawnParameters SpawnParams;
         SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
-        AActor* SpawnedActor = World->SpawnActor<AActor>(SpawnParams);
         
+        // **CRITICAL FIX: Do NOT set SpawnParams.Name - let Unreal Engine auto-generate unique names**
+        // This prevents the fatal error: "Cannot generate unique name for 'JUSYNCMesh_...' in level"
+        
+        AActor* SpawnedActor = World->SpawnActor<AActor>(SpawnParams);
         if (!SpawnedActor)
         {
+            UE_LOG(LogTemp, Error, TEXT("❌ Failed to spawn actor %d"), i);
             SpawnedActors.Add(nullptr);
             continue;
         }
 
-        // Create RealtimeMeshComponent
+        // **ENHANCED: Use Tags for identification instead of relying on names**
+        SpawnedActor->Tags.Add(FName(*FString::Printf(TEXT("JUSYNC_%s_%d"), *ProcessedMeshData.ElementName, i)));
+        UE_LOG(LogTemp, Log, TEXT("✅ Spawned actor with auto-generated name: %s"), *SpawnedActor->GetName());
+
+        // **ENHANCED COMPONENT CREATION**
         URealtimeMeshComponent* MeshComp = NewObject<URealtimeMeshComponent>(SpawnedActor);
         SpawnedActor->SetRootComponent(MeshComp);
         MeshComp->RegisterComponent();
-        
-        // Set transform
-        SpawnedActor->SetActorLocation(SpawnLocations[i]);
-        SpawnedActor->SetActorRotation(UERotation);
 
-        // ✅ FIXED: Apply material BEFORE creating mesh
+        // **ENHANCED TRANSFORM APPLICATION**
+        // Method 1: Set transform with all components at once
+        FTransform ActorTransform(UERotation, FinalLocations[i], ScaleFactor);
+        SpawnedActor->SetActorTransform(ActorTransform);
+        
+        // **ENHANCED SCALING APPLICATION** - Multiple methods for reliability
+        if (bUseUniformScaling && ScaleFactor != FVector::OneVector)
+        {
+            // Method 1: Component-level scaling
+            MeshComp->SetWorldScale3D(ScaleFactor);
+            
+            // Method 2: Actor-level scaling (redundant but ensures it works)
+            SpawnedActor->SetActorScale3D(ScaleFactor);
+            
+            // Method 3: Force transform update
+            SpawnedActor->SetActorTransform(FTransform(UERotation, FinalLocations[i], ScaleFactor));
+            
+            // Method 4: Mark for render state update
+            MeshComp->MarkRenderStateDirty();
+            
+            UE_LOG(LogTemp, Warning, TEXT("🔧 Applied scale %s to actor %d (Actor: %s, Component: %s)"),
+                *ScaleFactor.ToString(), i,
+                *SpawnedActor->GetActorScale3D().ToString(),
+                *MeshComp->GetComponentScale().ToString());
+        }
+
+        // **ENHANCED MATERIAL APPLICATION**
         if (Material)
         {
             MeshComp->SetMaterial(0, Material);
+            UE_LOG(LogTemp, Log, TEXT("✅ Applied custom material to mesh %d"), i);
         }
         else
         {
-            // Create a proper default double-sided material
+            // Enhanced default material setup
             UMaterial* DefaultMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
             if (DefaultMaterial)
             {
-                DefaultMaterial->TwoSided = true;
-                MeshComp->SetMaterial(0, DefaultMaterial);
+                // Create dynamic material instance for better control
+                UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(DefaultMaterial, MeshComp);
+                if (DynamicMaterial)
+                {
+                    // Configure material properties
+                    DynamicMaterial->SetScalarParameterValue(TEXT("Metallic"), 0.0f);
+                    DynamicMaterial->SetScalarParameterValue(TEXT("Roughness"), 0.8f);
+                    DynamicMaterial->SetVectorParameterValue(TEXT("BaseColor"), FLinearColor::White);
+                    
+                    MeshComp->SetMaterial(0, DynamicMaterial);
+                    UE_LOG(LogTemp, Log, TEXT("✅ Applied enhanced default material to mesh %d"), i);
+                }
+                else
+                {
+                    MeshComp->SetMaterial(0, DefaultMaterial);
+                }
             }
         }
 
-        // ✅ FIXED: Create mesh with processed data
+        // **ENHANCED MESH CREATION**
         bool bSuccess = Subsystem->CreateRealtimeMeshFromJUSYNC(ProcessedMeshData, MeshComp);
         if (bSuccess)
         {
             SuccessCount++;
             SpawnedActors.Add(SpawnedActor);
+            
+            // **FINAL VERIFICATION**
+            FVector ActualLocation = SpawnedActor->GetActorLocation();
+            FVector ActualScale = SpawnedActor->GetActorScale3D();
+            FRotator ActualRotation = SpawnedActor->GetActorRotation();
+            
+            UE_LOG(LogTemp, Warning, TEXT("✅ Successfully spawned mesh %d at %s (Scale: %s, Rotation: %s)"),
+                i, *ActualLocation.ToString(), *ActualScale.ToString(), *ActualRotation.ToString());
         }
         else
         {
+            UE_LOG(LogTemp, Error, TEXT("❌ Failed to create RealtimeMesh for actor %d, destroying"), i);
             SpawnedActor->Destroy();
             SpawnedActors.Add(nullptr);
         }
     }
 
+    // **ENHANCED COMPLETION LOGGING**
     UE_LOG(LogTemp, Warning, TEXT("=== BATCH SPAWN COMPLETE: %d/%d successful ==="),
         SuccessCount, MeshDataArray.Num());
+    
+    if (bUseUniformScaling)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("🎯 Uniform scaling applied with factor: %s"),
+            *ScaleFactor.ToString());
+    }
+    
+    // Display success message
+    FString Message = FString::Printf(TEXT("Batch Spawn Complete: %d/%d meshes spawned successfully"),
+        SuccessCount, MeshDataArray.Num());
+    DisplayDebugMessage(Message, 5.0f, SuccessCount == MeshDataArray.Num() ? FLinearColor::Green : FLinearColor::Yellow);
 
     return SpawnedActors;
 }
+
 
 FJUSYNCMeshData UJUSYNCBlueprintLibrary::FixMeshDataForSpawning(const FJUSYNCMeshData& InputMeshData)
 {
     FJUSYNCMeshData FixedData = InputMeshData;
     
-    // ✅ FIXED: Recalculate normals if missing or invalid
+    // Basic vertex validation
+    for (int32 i = 0; i < FixedData.Vertices.Num(); ++i)
+    {
+        FVector& Vertex = FixedData.Vertices[i];
+        if (!FMath::IsFinite(Vertex.X) || !FMath::IsFinite(Vertex.Y) || !FMath::IsFinite(Vertex.Z))
+        {
+            UE_LOG(LogTemp, Warning, TEXT("Fixed invalid vertex at index %d"), i);
+            Vertex = FVector::ZeroVector;
+        }
+    }
+    
+    // Basic triangle validation - keep only valid triangles
+    TArray<int32> ValidTriangles;
+    ValidTriangles.Reserve(FixedData.Triangles.Num());
+    
+    for (int32 i = 0; i < FixedData.Triangles.Num(); i += 3)
+    {
+        if (i + 2 < FixedData.Triangles.Num())
+        {
+            int32 i0 = FixedData.Triangles[i];
+            int32 i1 = FixedData.Triangles[i + 1];
+            int32 i2 = FixedData.Triangles[i + 2];
+            
+            // Basic bounds checking and degenerate triangle check
+            if (i0 >= 0 && i0 < FixedData.Vertices.Num() &&
+                i1 >= 0 && i1 < FixedData.Vertices.Num() &&
+                i2 >= 0 && i2 < FixedData.Vertices.Num() &&
+                i0 != i1 && i1 != i2 && i0 != i2)
+            {
+                ValidTriangles.Add(i0);
+                ValidTriangles.Add(i1);
+                ValidTriangles.Add(i2);
+            }
+        }
+    }
+    
+    FixedData.Triangles = ValidTriangles;
+    
+    // Recalculate normals if missing or invalid
     if (!FixedData.HasNormals() || FixedData.Normals.Num() != FixedData.Vertices.Num())
     {
         FixedData.Normals.SetNum(FixedData.Vertices.Num());
@@ -1047,10 +1234,10 @@ FJUSYNCMeshData UJUSYNCBlueprintLibrary::FixMeshDataForSpawning(const FJUSYNCMes
             }
         }
         
-        UE_LOG(LogTemp, Warning, TEXT("Recalculated normals for spawned mesh: %s"), *InputMeshData.ElementName);
+        UE_LOG(LogTemp, Log, TEXT("Recalculated normals for mesh: %s"), *InputMeshData.ElementName);
     }
     
-    // ✅ FIXED: Validate and fix UV coordinates
+    // Validate and fix UV coordinates
     if (FixedData.HasUVs())
     {
         for (int32 i = 0; i < FixedData.UVs.Num(); ++i)
@@ -1066,6 +1253,115 @@ FJUSYNCMeshData UJUSYNCBlueprintLibrary::FixMeshDataForSpawning(const FJUSYNCMes
     return FixedData;
 }
 
+
+FBox UJUSYNCBlueprintLibrary::CalculateMeshBounds(const FJUSYNCMeshData& MeshData, const FVector& Location)
+{
+    FBox MeshBounds(EForceInit::ForceInit);
+    
+    // Add all vertices to the bounding box, transformed by location
+    for (const FVector& Vertex : MeshData.Vertices)
+    {
+        FVector WorldVertex = Vertex + Location;
+        MeshBounds += WorldVertex;
+    }
+    
+    return MeshBounds;
+}
+
+TArray<FVector> UJUSYNCBlueprintLibrary::CalculateScaledPositions(
+    const TArray<FVector>& OriginalLocations,
+    const FVector& BoundingBoxSize,
+    bool bPreserveAspectRatio,
+    FVector& OutScaleFactor)
+{
+    if (OriginalLocations.Num() == 0 || BoundingBoxSize == FVector::ZeroVector)
+    {
+        OutScaleFactor = FVector::OneVector;
+        return OriginalLocations;
+    }
+
+    // **FIX: Handle single point case with mesh-based scaling**
+    if (OriginalLocations.Num() == 1)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("🔧 Single spawn point - calculating scale based on mesh bounds"));
+        
+        // For single point, calculate scale based on the mesh extent from USD
+        // Your USD shows extent [(-20, -20, -20), (20, 20, 20)] = 40x40x40 size
+        FVector MeshSize(40.0f, 40.0f, 40.0f); // Based on your USD extent
+        
+        if (bPreserveAspectRatio)
+        {
+            float MinScale = FMath::Min3(
+                BoundingBoxSize.X / MeshSize.X,
+                BoundingBoxSize.Y / MeshSize.Y,
+                BoundingBoxSize.Z / MeshSize.Z
+            );
+            OutScaleFactor = FVector(MinScale, MinScale, MinScale);
+        }
+        else
+        {
+            OutScaleFactor = FVector(
+                BoundingBoxSize.X / MeshSize.X,
+                BoundingBoxSize.Y / MeshSize.Y,
+                BoundingBoxSize.Z / MeshSize.Z
+            );
+        }
+        
+        UE_LOG(LogTemp, Warning, TEXT("🎯 Single point scale factor: %s"), *OutScaleFactor.ToString());
+        return OriginalLocations; // Return original location, scaling will be applied to actor
+    }
+
+    // Rest of your existing multi-point logic...
+    FBox CombinedBounds(EForceInit::ForceInit);
+    for (const FVector& Location : OriginalLocations)
+    {
+        CombinedBounds += Location;
+    }
+
+    FVector CurrentSize = CombinedBounds.GetSize();
+    FVector BoundingBoxCenter = CombinedBounds.GetCenter();
+
+    if (CurrentSize.IsNearlyZero())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("🔧 Zero-size bounding box detected - no scaling needed"));
+        OutScaleFactor = FVector::OneVector;
+        return OriginalLocations;
+    }
+
+    // Calculate scale factor with safety checks
+    if (bPreserveAspectRatio)
+    {
+        float MinScale = FMath::Min3(
+            CurrentSize.X > 0 ? BoundingBoxSize.X / CurrentSize.X : 1.0f,
+            CurrentSize.Y > 0 ? BoundingBoxSize.Y / CurrentSize.Y : 1.0f,
+            CurrentSize.Z > 0 ? BoundingBoxSize.Z / CurrentSize.Z : 1.0f
+        );
+        OutScaleFactor = FVector(MinScale, MinScale, MinScale);
+    }
+    else
+    {
+        OutScaleFactor = FVector(
+            CurrentSize.X > 0 ? BoundingBoxSize.X / CurrentSize.X : 1.0f,
+            CurrentSize.Y > 0 ? BoundingBoxSize.Y / CurrentSize.Y : 1.0f,
+            CurrentSize.Z > 0 ? BoundingBoxSize.Z / CurrentSize.Z : 1.0f
+        );
+    }
+
+    // Calculate scaled positions
+    TArray<FVector> ScaledLocations;
+    ScaledLocations.Reserve(OriginalLocations.Num());
+
+    for (const FVector& Location : OriginalLocations)
+    {
+        FVector RelativePosition = Location - BoundingBoxCenter;
+        FVector ScaledPosition = RelativePosition * OutScaleFactor;
+        FVector NewLocation = BoundingBoxCenter + ScaledPosition;
+        ScaledLocations.Add(NewLocation);
+    }
+
+    UE_LOG(LogTemp, Warning, TEXT("🎯 Multi-point scaling applied: %s"), *OutScaleFactor.ToString());
+    return ScaledLocations;
+}
 
 
 

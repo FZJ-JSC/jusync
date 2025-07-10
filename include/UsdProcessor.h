@@ -45,6 +45,7 @@ public:
         std::vector<uint32_t> indices;  ///< Triangle indices (validated)
         std::vector<glm::vec3> normals; ///< Normal vectors (normalized)
         std::vector<glm::vec2> uvs;     ///< Texture coordinates (clamped)
+        std::vector<glm::vec4> vertex_colors; ///vertex colors
 
         // Validation methods
         bool isValid() const {
@@ -470,6 +471,13 @@ private:
      * @return True if successful
      */
     bool loadReferencedFile(const std::string& filePath, std::vector<MeshData>& outMeshData);
+
+    /**
+         * Extract vertex colors from USD primvars
+         * @param mesh Pointer to TinyUSDZ GeomMesh
+         * @param meshData Output mesh data to populate with colors
+         */
+    void extractVertexColors(tinyusdz::GeomMesh* mesh, MeshData& meshData);
 };
 
 } // namespace anari_usd_middleware

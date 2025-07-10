@@ -164,18 +164,30 @@ public:
 		const TArray<FRotator>& SpawnRotations  // Remove default parameter here
 	);
 
-	UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning", CallInEditor)
-	static TArray<AActor*> BatchSpawnRealtimeMeshesWithMaterial(
-		const TArray<FJUSYNCMeshData>& MeshDataArray,
-		const TArray<FVector>& SpawnLocations,
-		const TArray<FRotator>& SpawnRotations,
-		UMaterialInterface* Material,
-		bool bUseAsyncSpawning = false,
-		int32 BatchSize = 5,
-		float BatchDelay = 0.016f
-	);
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning", CallInEditor)
+    static TArray<AActor*> BatchSpawnRealtimeMeshesWithMaterial(
+        const TArray<FJUSYNCMeshData>& MeshDataArray,
+        const TArray<FVector>& SpawnLocations,
+        const TArray<FRotator>& SpawnRotations,
+        UMaterialInterface* Material,
+        bool bUseUniformScaling = false,
+        FVector OuterBoundingBoxSize = FVector::ZeroVector,
+        bool bPreserveAspectRatio = true,
+        bool bUseAsyncSpawning = false,
+        int32 BatchSize = 5,
+        float BatchDelay = 0.016f
+    );
 
-	static FJUSYNCMeshData FixMeshDataForSpawning(const FJUSYNCMeshData& InputMeshData);
+    static FBox CalculateMeshBounds(const FJUSYNCMeshData& MeshData, const FVector& Location);
+
+    static FJUSYNCMeshData FixMeshDataForSpawning(const FJUSYNCMeshData& InputMeshData);
+    
+    static TArray<FVector> CalculateScaledPositions(
+        const TArray<FVector>& OriginalLocations,
+        const FVector& BoundingBoxSize,
+        bool bPreserveAspectRatio,
+        FVector& OutScaleFactor
+    );
 
     // Internal storage for received data (public for subsystem access)
     static TArray<FJUSYNCFileData> ReceivedFiles;
