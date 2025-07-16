@@ -36,17 +36,24 @@ FJUSYNCRealtimeMeshData FJUSYNCRealtimeMeshData::FromStandardMesh(const FJUSYNCM
             Vertex.UV = FVector2D::ZeroVector; // Default UV
         }
 
-        // Default color for RealtimeMeshComponent
-        Vertex.Color = FColor::White;
+        // ✅ NEW: Vertex color from your middleware's vertex color data
+        if (i < StandardMesh.VertexColors.Num())
+        {
+            Vertex.Color = StandardMesh.VertexColors[i];
+        }
+        else
+        {
+            Vertex.Color = FColor::White; // Default color
+        }
 
         RealtimeMesh.Vertices.Add(Vertex);
     }
 
     // Copy triangle indices directly (compatible format)
     RealtimeMesh.Triangles = StandardMesh.Triangles;
-
     return RealtimeMesh;
 }
+
 
 FJUSYNCMeshData FJUSYNCRealtimeMeshData::ToStandardMesh() const
 {

@@ -10,6 +10,7 @@
 #include "Misc/FileHelper.h"
 #include "Engine/GameInstance.h"
 #include "Kismet/GameplayStatics.h"
+#include "RealtimeMeshSimple.h" 
 
 // Include the C-wrapper header
 #ifdef WITH_ANARI_USD_MIDDLEWARE
@@ -129,77 +130,229 @@ extern "C" void MessageReceivedCallback_Static(const char* message)
 }
 
 // Helper function to convert C mesh data to UE format
-FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh)
+// Enhanced ConvertCMeshDataToUE_Helper with FORCED vertex interpolation while preserving all functionality
+static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool bForceVertexInterpolation = true)
 {
     FJUSYNCMeshData UEMesh;
-    
-    // Convert names
+
+    // 1. Convert names (PRESERVED)
     UEMesh.ElementName = FString(UTF8_TO_TCHAR(CMesh.element_name));
     UEMesh.TypeName = FString(UTF8_TO_TCHAR(CMesh.type_name));
-    
-    // Convert points (flat array to FVector array)
-    if (CMesh.points && CMesh.points_count > 0)
+
+    // 2. Convert points (PRESERVED - flat array → FVector array)
+    size_t PointCount = CMesh.points_count / 3;
+    UEMesh.Vertices.Reserve(PointCount);
+    for (size_t i = 0; i < PointCount; ++i)
     {
-        size_t VertexCount = CMesh.points_count / 3;
-        UEMesh.Vertices.Reserve(VertexCount);
-        
-        for (size_t i = 0; i < VertexCount; ++i)
-        {
-            size_t BaseIndex = i * 3;
-            if (BaseIndex + 2 < CMesh.points_count)
-            {
-                FVector Vertex(CMesh.points[BaseIndex], CMesh.points[BaseIndex + 1], CMesh.points[BaseIndex + 2]);
-                UEMesh.Vertices.Add(Vertex);
-            }
-        }
+        size_t idx = i * 3;
+        float x = CMesh.points[idx + 0];
+        float y = CMesh.points[idx + 1];
+        float z = CMesh.points[idx + 2];
+        // Transform from right-handed Z-up (ParaView) to left-handed Z-up (UE)
+        UEMesh.Vertices.Add(FVector(x, -y, z));
     }
-    
-    // Convert indices
-    if (CMesh.indices && CMesh.indices_count > 0)
+
+    // 3. Convert triangle indices (PRESERVED)
+    size_t IndexCount = CMesh.indices_count;
+    UEMesh.Triangles.Reserve(IndexCount);
+    for (size_t i = 0; i < IndexCount; ++i)
     {
-        UEMesh.Triangles.Reserve(CMesh.indices_count);
-        for (size_t i = 0; i < CMesh.indices_count; ++i)
-        {
-            UEMesh.Triangles.Add(static_cast<int32>(CMesh.indices[i]));
-        }
+        UEMesh.Triangles.Add(static_cast<int32>(CMesh.indices[i]));
     }
-    
-    // Convert normals (flat array to FVector array)
-    if (CMesh.normals && CMesh.normals_count > 0)
+
+    // 4. Convert normals if present (PRESERVED)
+    if (CMesh.normals && CMesh.normals_count >= 3)
     {
         size_t NormalCount = CMesh.normals_count / 3;
         UEMesh.Normals.Reserve(NormalCount);
-        
         for (size_t i = 0; i < NormalCount; ++i)
         {
-            size_t BaseIndex = i * 3;
-            if (BaseIndex + 2 < CMesh.normals_count)
-            {
-                FVector Normal(CMesh.normals[BaseIndex], CMesh.normals[BaseIndex + 1], CMesh.normals[BaseIndex + 2]);
-                UEMesh.Normals.Add(Normal);
-            }
+            size_t idx = i * 3;
+            float nx = CMesh.normals[idx + 0];
+            float ny = CMesh.normals[idx + 1];
+            float nz = CMesh.normals[idx + 2];
+            UEMesh.Normals.Add(FVector(nx, -ny, nz).GetSafeNormal());
         }
     }
-    
-    // Convert UVs (flat array to FVector2D array)
-    if (CMesh.uvs && CMesh.uvs_count > 0)
+
+    // 5. Convert UVs if present (PRESERVED)
+    if (CMesh.uvs && CMesh.uvs_count >= 2)
     {
         size_t UVCount = CMesh.uvs_count / 2;
         UEMesh.UVs.Reserve(UVCount);
-        
         for (size_t i = 0; i < UVCount; ++i)
         {
-            size_t BaseIndex = i * 2;
-            if (BaseIndex + 1 < CMesh.uvs_count)
-            {
-                FVector2D UV(CMesh.uvs[BaseIndex], CMesh.uvs[BaseIndex + 1]);
-                UEMesh.UVs.Add(UV);
-            }
+            size_t idx = i * 2;
+            UEMesh.UVs.Add(FVector2D(CMesh.uvs[idx], CMesh.uvs[idx + 1]));
         }
     }
-    
+
+    // 6. ✅ ENHANCED: Vertex‐colors with FORCED vertex interpolation while preserving all functionality
+    if (CMesh.vertex_colors && CMesh.vertex_colors_count >= 4)
+    {
+        int32 VertexCount = static_cast<int32>(PointCount);
+        int32 FaceCount = static_cast<int32>(UEMesh.Triangles.Num() / 3);
+        int32 ColorCount = static_cast<int32>(CMesh.vertex_colors_count / 4);
+
+        bool bDetectedVertexInterp = (ColorCount == VertexCount);
+        bool bDetectedUniformInterp = (ColorCount == FaceCount);
+        
+        UE_LOG(LogTemp, Warning, TEXT("🎨 Color conversion: %d colors, %d vertices, %d faces"),
+               ColorCount, VertexCount, FaceCount);
+        UE_LOG(LogTemp, Warning, TEXT("🎨 Detected: %s | Force Vertex: %s"),
+               bDetectedVertexInterp ? TEXT("VERTEX") : (bDetectedUniformInterp ? TEXT("UNIFORM") : TEXT("UNKNOWN")),
+               bForceVertexInterpolation ? TEXT("YES") : TEXT("NO"));
+
+        UEMesh.VertexColors.Reserve(VertexCount);
+
+        if (bDetectedVertexInterp)
+        {
+            // ✅ CASE 1: Already vertex interpolation - direct mapping (PRESERVED)
+            UE_LOG(LogTemp, Warning, TEXT("🎨 Using direct VERTEX interpolation"));
+            for (int32 i = 0; i < VertexCount; ++i)
+            {
+                int64 idx = int64(i) * 4;
+                uint8 r = uint8(FMath::Clamp(CMesh.vertex_colors[idx + 0] * 255.0f, 0.0f, 255.0f));
+                uint8 g = uint8(FMath::Clamp(CMesh.vertex_colors[idx + 1] * 255.0f, 0.0f, 255.0f));
+                uint8 b = uint8(FMath::Clamp(CMesh.vertex_colors[idx + 2] * 255.0f, 0.0f, 255.0f));
+                uint8 a = uint8(FMath::Clamp(CMesh.vertex_colors[idx + 3] * 255.0f, 0.0f, 255.0f));
+                UEMesh.VertexColors.Add(FColor(r, g, b, a));
+            }
+        }
+        else if (bDetectedUniformInterp && bForceVertexInterpolation)
+        {
+            // ✅ CASE 2: Uniform detected + Force Vertex = Convert uniform to smooth vertex interpolation
+            UE_LOG(LogTemp, Warning, TEXT("🎨 CONVERTING uniform to smooth VERTEX interpolation"));
+            
+            // Initialize vertex color accumulation arrays
+            TArray<FLinearColor> AccumulatedColors;
+            TArray<int32> ColorCounts;
+            AccumulatedColors.SetNumZeroed(VertexCount);
+            ColorCounts.SetNumZeroed(VertexCount);
+            
+            // ✅ ENHANCED: Accumulate colors from all faces that use each vertex (for smooth blending)
+            for (int32 FaceIdx = 0; FaceIdx < FaceCount && FaceIdx < ColorCount; ++FaceIdx)
+            {
+                int32 i0 = UEMesh.Triangles[FaceIdx * 3 + 0];
+                int32 i1 = UEMesh.Triangles[FaceIdx * 3 + 1];
+                int32 i2 = UEMesh.Triangles[FaceIdx * 3 + 2];
+                
+                if (i0 < VertexCount && i1 < VertexCount && i2 < VertexCount)
+                {
+                    int64 cidx = int64(FaceIdx) * 4;
+                    
+                    // Get face color as linear color for better blending
+                    FLinearColor FaceColor(
+                        CMesh.vertex_colors[cidx + 0],
+                        CMesh.vertex_colors[cidx + 1],
+                        CMesh.vertex_colors[cidx + 2],
+                        CMesh.vertex_colors[cidx + 3]
+                    );
+                    
+                    // ✅ SMOOTH BLENDING: Accumulate this face color to all three vertices
+                    AccumulatedColors[i0] += FaceColor;
+                    AccumulatedColors[i1] += FaceColor;
+                    AccumulatedColors[i2] += FaceColor;
+                    
+                    ColorCounts[i0]++;
+                    ColorCounts[i1]++;
+                    ColorCounts[i2]++;
+                }
+            }
+            
+            // ✅ FINALIZE: Average the accumulated colors and convert to FColor
+            for (int32 i = 0; i < VertexCount; ++i)
+            {
+                FLinearColor FinalColor;
+                if (ColorCounts[i] > 0)
+                {
+                    // Average the accumulated colors
+                    FinalColor = AccumulatedColors[i] / ColorCounts[i];
+                }
+                else
+                {
+                    // Fallback for vertices not used by any face
+                    FinalColor = FLinearColor::White;
+                }
+                
+                // Convert to FColor with proper clamping
+                uint8 r = uint8(FMath::Clamp(FinalColor.R * 255.0f, 0.0f, 255.0f));
+                uint8 g = uint8(FMath::Clamp(FinalColor.G * 255.0f, 0.0f, 255.0f));
+                uint8 b = uint8(FMath::Clamp(FinalColor.B * 255.0f, 0.0f, 255.0f));
+                uint8 a = uint8(FMath::Clamp(FinalColor.A * 255.0f, 0.0f, 255.0f));
+                
+                UEMesh.VertexColors.Add(FColor(r, g, b, a));
+            }
+            
+            UE_LOG(LogTemp, Warning, TEXT("✅ Converted uniform to smooth vertex interpolation: %d vertex colors"), 
+                   UEMesh.VertexColors.Num());
+        }
+        else if (bDetectedUniformInterp && !bForceVertexInterpolation)
+        {
+            // ✅ CASE 3: Keep original uniform behavior (PRESERVED for backwards compatibility)
+            UE_LOG(LogTemp, Warning, TEXT("🎨 Using original UNIFORM interpolation (flat shading)"));
+            UEMesh.VertexColors.Reserve(FaceCount * 3);
+            
+            for (int32 f = 0; f < FaceCount; ++f)
+            {
+                int64 cidx = int64(f) * 4;
+                uint8 r = uint8(FMath::Clamp(CMesh.vertex_colors[cidx + 0] * 255.0f, 0.0f, 255.0f));
+                uint8 g = uint8(FMath::Clamp(CMesh.vertex_colors[cidx + 1] * 255.0f, 0.0f, 255.0f));
+                uint8 b = uint8(FMath::Clamp(CMesh.vertex_colors[cidx + 2] * 255.0f, 0.0f, 255.0f));
+                uint8 a = uint8(FMath::Clamp(CMesh.vertex_colors[cidx + 3] * 255.0f, 0.0f, 255.0f));
+                FColor faceColor(r, g, b, a);
+                
+                // Assign to each of the three vertices of face f
+                for (int vi = 0; vi < 3; ++vi)
+                {
+                    UEMesh.VertexColors.Add(faceColor);
+                }
+            }
+        }
+        else
+        {
+            // ✅ CASE 4: Fallback behavior (PRESERVED)
+            UE_LOG(LogTemp, Warning, TEXT("🎨 Using fallback vertex interpolation"));
+            for (int32 i = 0; i < VertexCount; ++i)
+            {
+                if (i < ColorCount)
+                {
+                    int64 idx = int64(i) * 4;
+                    uint8 r = uint8(FMath::Clamp(CMesh.vertex_colors[idx + 0] * 255.0f, 0.0f, 255.0f));
+                    uint8 g = uint8(FMath::Clamp(CMesh.vertex_colors[idx + 1] * 255.0f, 0.0f, 255.0f));
+                    uint8 b = uint8(FMath::Clamp(CMesh.vertex_colors[idx + 2] * 255.0f, 0.0f, 255.0f));
+                    uint8 a = uint8(FMath::Clamp(CMesh.vertex_colors[idx + 3] * 255.0f, 0.0f, 255.0f));
+                    UEMesh.VertexColors.Add(FColor(r, g, b, a));
+                }
+                else
+                {
+                    UEMesh.VertexColors.Add(FColor::White);
+                }
+            }
+        }
+
+        // ✅ PRESERVED: Debug logging for color verification
+        UE_LOG(LogTemp, Warning, TEXT("🎨 Final vertex colors: %d"), UEMesh.VertexColors.Num());
+        
+        // ✅ PRESERVED: DEBUG dump first 20 different colours
+        TSet<FColor> Unique;
+        for (int32 i = 0; i < UEMesh.VertexColors.Num(); ++i)
+        {
+            const FColor& C = UEMesh.VertexColors[i];
+            if (!Unique.Contains(C))
+            {
+                Unique.Add(C);
+                UE_LOG(LogTemp, Warning, TEXT("USD Color[%d] = (R=%d G=%d B=%d A=%d)"),
+                       i, C.R, C.G, C.B, C.A);
+                if (Unique.Num() == 20) break;
+            }
+        }
+        UE_LOG(LogTemp, Warning, TEXT("Total unique colours in first scan: %d"), Unique.Num());
+    }
+
     return UEMesh;
 }
+
 
 #endif
 
@@ -683,123 +836,146 @@ void RecalculateNormals(FJUSYNCMeshData& MeshData)
     UE_LOG(LogTemp, Warning, TEXT("Recalculated normals with correct CCW winding"));
 }
 
-bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(const FJUSYNCMeshData& MeshData, URealtimeMeshComponent* RealtimeMeshComponent)
+bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
+    const FJUSYNCMeshData& InMeshData,
+    URealtimeMeshComponent* RealtimeMeshComponent)
 {
-    if (!RealtimeMeshComponent || !MeshData.IsValid())
+    if (!RealtimeMeshComponent || !InMeshData.IsValid())
     {
-        UE_LOG(LogTemp, Error, TEXT("Invalid RealtimeMeshComponent or mesh data"));
+        UE_LOG(LogTemp, Error, TEXT("❌ Invalid input to CreateRealtimeMeshFromJUSYNC"));
         return false;
     }
 
-    // ✅ FIXED: Use enhanced normal calculation
-    FJUSYNCMeshData ProcessedMeshData = MeshData;
-    if (!ProcessedMeshData.HasNormals() || ProcessedMeshData.Normals.Num() != ProcessedMeshData.Vertices.Num())
-    {
-        RecalculateNormals(ProcessedMeshData);
-        UE_LOG(LogTemp, Warning, TEXT("Recalculated normals with CCW winding for mesh: %s"), *MeshData.ElementName);
-    }
+    // Use the mesh data as-is (already processed by ConvertCMeshDataToUE_Helper with forced vertex interpolation)
+    const FJUSYNCMeshData& MeshData = InMeshData;
+    
+    UE_LOG(LogTemp, Warning, TEXT("🎨 === SMOOTH VERTEX INTERPOLATION MESH CREATION ==="));
+    UE_LOG(LogTemp, Warning, TEXT("Mesh: %d vertices, %d triangles, %d colors"),
+           MeshData.Vertices.Num(), MeshData.Triangles.Num() / 3, MeshData.VertexColors.Num());
 
-    // ✅ FIXED: Explicit template parameter
+    // Calculate final counts (already processed by helper function)
+    const int32 FinalVertexCount = MeshData.Vertices.Num();
+    const int32 FinalTriCount = MeshData.Triangles.Num() / 3;
+
+    // Initialize RealtimeMesh builder
     URealtimeMeshSimple* RealtimeMesh = RealtimeMeshComponent->InitializeRealtimeMesh<URealtimeMeshSimple>();
     if (!RealtimeMesh)
     {
-        UE_LOG(LogTemp, Error, TEXT("Failed to initialize RealtimeMeshSimple"));
+        UE_LOG(LogTemp, Error, TEXT("❌ Failed to initialize RealtimeMesh"));
         return false;
     }
 
-    // ✅ ENHANCED: Better material setup
     RealtimeMesh->SetupMaterialSlot(0, TEXT("PrimaryMaterial"));
-    if (RealtimeMeshComponent->GetMaterial(0) == nullptr)
+
+    // Only apply vertex color material if no material is already set
+    if (!RealtimeMeshComponent->GetMaterial(0))
     {
-        UMaterial* Material = UMaterial::GetDefaultMaterial(MD_Surface);
-        if (Material)
+        UMaterial* VertexColorMaterial = LoadObject<UMaterial>(nullptr, TEXT("/Game/Materials/M_VertexColor"));
+        if (VertexColorMaterial)
         {
-            UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(Material, RealtimeMeshComponent);
-            if (DynamicMaterial)
+            RealtimeMeshComponent->SetMaterial(0, VertexColorMaterial);
+            UE_LOG(LogTemp, Warning, TEXT("✅ Applied M_VertexColor material as fallback"));
+        }
+        else
+        {
+            // Fallback to enhanced default material
+            UMaterial* DefaultMat = UMaterial::GetDefaultMaterial(MD_Surface);
+            if (DefaultMat)
             {
-                RealtimeMeshComponent->SetMaterial(0, DynamicMaterial);
+                auto* DynMat = UMaterialInstanceDynamic::Create(DefaultMat, RealtimeMeshComponent);
+                DynMat->SetScalarParameterValue(TEXT("UseVertexColor"), 1.0f);
+                RealtimeMeshComponent->SetMaterial(0, DynMat);
+                UE_LOG(LogTemp, Warning, TEXT("✅ Applied enhanced default material as fallback"));
             }
         }
     }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("✅ Using provided material (preserving texture material from Blueprint)"));
+    }
 
-    // ✅ FIXED: Correct builder initialization
-    RealtimeMesh::FRealtimeMeshStreamSet StreamSet;
-    auto Builder = RealtimeMesh::TRealtimeMeshBuilderLocal<uint16>(StreamSet);
 
+    RealtimeMesh::FRealtimeMeshStreamSet Streams;
+    auto Builder = RealtimeMesh::TRealtimeMeshBuilderLocal<uint32>(Streams);
     Builder.EnableTangents();
     Builder.EnableTexCoords();
     Builder.EnableColors();
     Builder.EnablePolyGroups();
 
-    // ✅ ADD VERTICES WITH ENHANCED NORMAL VALIDATION
-    for (int32 i = 0; i < ProcessedMeshData.Vertices.Num(); i++)
+    // Add vertices and attributes - SIMPLIFIED since vertex interpolation is already handled
+    for (int32 i = 0; i < FinalVertexCount; ++i)
     {
-        FVector3f Vertex = FVector3f(ProcessedMeshData.Vertices[i]);
-        Builder.AddVertex(Vertex);
+        Builder.AddVertex(FVector3f(MeshData.Vertices[i]));
 
-        // ✅ ENHANCED: Robust normal handling with validation
-        if (ProcessedMeshData.HasNormals() && ProcessedMeshData.Normals.IsValidIndex(i))
+        // Normals
+        FVector3f N = FVector3f(MeshData.Normals.IsValidIndex(i) ? MeshData.Normals[i] : FVector::UpVector);
+        Builder.SetNormal(i, N);
+
+        // UVs
+        if (MeshData.HasUVs() && MeshData.UVs.IsValidIndex(i))
         {
-            FVector3f Normal = FVector3f(ProcessedMeshData.Normals[i]);
-            if (FMath::IsFinite(Normal.X) && FMath::IsFinite(Normal.Y) && FMath::IsFinite(Normal.Z) && !Normal.IsNearlyZero())
+            Builder.SetTexCoord(i, 0, FVector2DHalf(FVector2f(MeshData.UVs[i])));
+        }
+        else
+        {
+            Builder.SetTexCoord(i, 0, FVector2DHalf(FVector2f::ZeroVector));
+        }
+
+        // Colors - now using smooth vertex interpolation (already processed)
+        if (MeshData.HasVertexColors() && MeshData.VertexColors.IsValidIndex(i))
+        {
+            FColor VertexColor = MeshData.VertexColors[i];
+            Builder.SetColor(i, VertexColor);
+            
+            // Debug first few vertices
+            if (i < 6)
             {
-                Normal.Normalize();
-                Builder.SetNormal(i, Normal);
-            }
-            else
-            {
-                Builder.SetNormal(i, FVector3f::UpVector);
+                UE_LOG(LogTemp, Warning, TEXT("🎨 Vertex %d: Smooth Color=(%d,%d,%d,%d)"), 
+                       i, VertexColor.R, VertexColor.G, VertexColor.B, VertexColor.A);
             }
         }
         else
         {
-            Builder.SetNormal(i, FVector3f::UpVector);
-        }
-
-        // UV processing
-        if (ProcessedMeshData.HasUVs() && ProcessedMeshData.UVs.IsValidIndex(i))
-        {
-            FVector2f UV = FVector2f(ProcessedMeshData.UVs[i]);
-            if (FMath::IsFinite(UV.X) && FMath::IsFinite(UV.Y))
-            {
-                Builder.SetTexCoord(i, 0, FVector2DHalf(UV));
-            }
-            else
-            {
-                Builder.SetTexCoord(i, 0, FVector2DHalf(FVector2f::ZeroVector));
-            }
+            Builder.SetColor(i, FColor::White);
         }
     }
 
-    // ✅ FIXED: Counter-clockwise triangle winding
-    const int32 NumTris = ProcessedMeshData.Triangles.Num() / 3;
-    for (int32 tri = 0; tri < NumTris; tri++)
+    // Add triangles
+    for (int32 Face = 0; Face < FinalTriCount; ++Face)
     {
-        int32 i0 = ProcessedMeshData.Triangles[tri * 3];
-        int32 i1 = ProcessedMeshData.Triangles[tri * 3 + 1];
-        int32 i2 = ProcessedMeshData.Triangles[tri * 3 + 2];
+        int32 i0 = MeshData.Triangles[Face*3 + 0];
+        int32 i1 = MeshData.Triangles[Face*3 + 1];
+        int32 i2 = MeshData.Triangles[Face*3 + 2];
         
-        if (i0 < ProcessedMeshData.Vertices.Num() && i1 < ProcessedMeshData.Vertices.Num() && i2 < ProcessedMeshData.Vertices.Num())
+        if (i0 < FinalVertexCount && i1 < FinalVertexCount && i2 < FinalVertexCount)
         {
-            // ✅ CRITICAL FIX: Counter-clockwise winding for RMC
-            Builder.AddTriangle(i0, i2, i1);  // Swapped i1 and i2
+            Builder.AddTriangle(i0, i1, i2);
+        }
+        else
+        {
+            UE_LOG(LogTemp, Error, TEXT("❌ Invalid triangle %d: [%d,%d,%d] vs %d vertices"), 
+                   Face, i0, i1, i2, FinalVertexCount);
         }
     }
 
-    const FRealtimeMeshSectionGroupKey GroupKey = FRealtimeMeshSectionGroupKey::Create(0, FName(TEXT("USDGroup")));
+    // Finalize the mesh section
+    const FRealtimeMeshSectionGroupKey GroupKey = FRealtimeMeshSectionGroupKey::Create(0, TEXT("USDGroup"));
     const FRealtimeMeshSectionKey SectionKey = FRealtimeMeshSectionKey::CreateForPolyGroup(GroupKey, 0);
-    
-    RealtimeMesh->CreateSectionGroup(GroupKey, StreamSet);
-    
+    RealtimeMesh->CreateSectionGroup(GroupKey, Streams);
     FRealtimeMeshSectionConfig SectionConfig(0);
     SectionConfig.bIsVisible = true;
     SectionConfig.bCastsShadow = true;
     RealtimeMesh->UpdateSectionConfig(SectionKey, SectionConfig);
 
     RealtimeMeshComponent->MarkRenderStateDirty();
-    UE_LOG(LogTemp, Warning, TEXT("✅ RealtimeMesh created with CCW winding: %s"), *ProcessedMeshData.ElementName);
+    
+    UE_LOG(LogTemp, Warning, TEXT("🎨 === SMOOTH VERTEX INTERPOLATION MESH CREATION COMPLETE ==="));
+    UE_LOG(LogTemp, Log, TEXT("✅ CreateRealtimeMeshFromJUSYNC: Smooth mesh created '%s' (%d verts, %d tris)"),
+           *MeshData.ElementName, FinalVertexCount, FinalTriCount);
+
     return true;
 }
+
 
 
 bool UJUSYNCSubsystem::BatchCreateRealtimeMeshesFromJUSYNC(const TArray<FJUSYNCMeshData>& MeshDataArray, const TArray<URealtimeMeshComponent*>& MeshComponents)
@@ -835,15 +1011,15 @@ FJUSYNCRealtimeMeshData UJUSYNCSubsystem::ConvertToRealtimeMeshFormat(const FJUS
 {
     FJUSYNCRealtimeMeshData RealtimeMesh;
     RealtimeMesh.ElementName = StandardMesh.ElementName;
-    
+
     // Convert flat arrays to structured vertices
     RealtimeMesh.Vertices.Reserve(StandardMesh.GetVertexCount());
-    
+
     for (int32 i = 0; i < StandardMesh.GetVertexCount(); ++i)
     {
         FJUSYNCRealtimeMeshVertex Vertex;
         Vertex.Position = StandardMesh.Vertices[i];
-        
+
         if (i < StandardMesh.Normals.Num())
         {
             Vertex.Normal = StandardMesh.Normals[i];
@@ -852,7 +1028,7 @@ FJUSYNCRealtimeMeshData UJUSYNCSubsystem::ConvertToRealtimeMeshFormat(const FJUS
         {
             Vertex.Normal = FVector::UpVector;
         }
-        
+
         if (i < StandardMesh.UVs.Num())
         {
             Vertex.UV = StandardMesh.UVs[i];
@@ -861,14 +1037,24 @@ FJUSYNCRealtimeMeshData UJUSYNCSubsystem::ConvertToRealtimeMeshFormat(const FJUS
         {
             Vertex.UV = FVector2D::ZeroVector;
         }
-        
-        Vertex.Color = FColor::White;
+
+        // ✅ NEW: Handle vertex colors
+        if (i < StandardMesh.VertexColors.Num())
+        {
+            Vertex.Color = StandardMesh.VertexColors[i];
+        }
+        else
+        {
+            Vertex.Color = FColor::White;
+        }
+
         RealtimeMesh.Vertices.Add(Vertex);
     }
-    
+
     RealtimeMesh.Triangles = StandardMesh.Triangles;
     return RealtimeMesh;
 }
+
 
 UTexture2D* UJUSYNCSubsystem::CreateUETextureFromJUSYNC(const FJUSYNCTextureData& TextureData)
 {

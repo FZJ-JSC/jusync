@@ -694,12 +694,35 @@ FString UJUSYNCBlueprintLibrary::ExtractUSDAPreview(const TArray<uint8>& Buffer,
         return TEXT("Empty buffer");
     }
 
-    // Convert buffer to string safely
-    FString Content;
-    const int32 PreviewSize = FMath::Min(Buffer.Num(), 4096); // Limit preview to first 4KB
+    // Dynamic search size based on file size
+    int32 SearchSize;
+    if (Buffer.Num() < 1024 * 1024) // < 1MB
+    {
+        SearchSize = Buffer.Num(); // Search entire file
+    }
+    else if (Buffer.Num() < 10 * 1024 * 1024) // < 10MB
+    {
+        SearchSize = 2 * 1024 * 1024; // Search first 2MB
+    }
+    else if (Buffer.Num() < 100 * 1024 * 1024) // < 100MB
+    {
+        SearchSize = 10 * 1024 * 1024; // Search first 10MB
+    }
+    else
+    {
+        SearchSize = 50 * 1024 * 1024; // Search first 50MB for huge files
+    }
+    
+    SearchSize = FMath::Min(Buffer.Num(), SearchSize);
+    
+    UE_LOG(LogTemp, Log, TEXT("ExtractUSDAPreview: Searching %d bytes of %d total"), 
+           SearchSize, Buffer.Num());
 
-    // Convert bytes to string with safety checks
-    for (int32 i = 0; i < PreviewSize; ++i)
+    // Convert buffer to string with better handling
+    FString Content;
+    Content.Reserve(SearchSize / 2);
+    
+    for (int32 i = 0; i < SearchSize; ++i)
     {
         char Char = static_cast<char>(Buffer[i]);
         if (Char >= 32 && Char <= 126) // Printable ASCII
@@ -710,26 +733,25 @@ FString UJUSYNCBlueprintLibrary::ExtractUSDAPreview(const TArray<uint8>& Buffer,
         {
             Content.AppendChar(Char);
         }
-        else
+        else if (Char == 0) // Null terminator
         {
-            Content.AppendChar('?'); // Replace non-printable with ?
+            Content.AppendChar(' '); // Replace with space to continue parsing
         }
+        // Skip non-printable characters instead of replacing with '?'
     }
 
-    // Extract first N lines
+    // Extract first N lines with better line handling
     TArray<FString> Lines;
     Content.ParseIntoArrayLines(Lines);
-
     FString Preview = TEXT("=== USD PREVIEW ===\n");
     int32 LinesToShow = FMath::Min(MaxLines, Lines.Num());
-
+    
     for (int32 i = 0; i < LinesToShow; ++i)
     {
-        // Truncate extremely long lines
         FString Line = Lines[i];
-        if (Line.Len() > 200)
+        if (Line.Len() > 500) // Increased line length limit
         {
-            Line = Line.Left(200) + TEXT("...");
+            Line = Line.Left(500) + TEXT("...");
         }
         Preview += FString::Printf(TEXT("Line %d: %s\n"), i + 1, *Line);
     }
@@ -740,8 +762,39 @@ FString UJUSYNCBlueprintLibrary::ExtractUSDAPreview(const TArray<uint8>& Buffer,
     }
 
     Preview += TEXT("=== END PREVIEW ===");
-
+    
+    // Debug logging
+    UE_LOG(LogTemp, Log, TEXT("ExtractUSDAPreview: Converted %d characters, %d lines"), 
+           Content.Len(), Lines.Num());
+    
+    bool bHasVertexColors = Content.Contains(TEXT("primvars:color.timeSamples"));
+    UE_LOG(LogTemp, Log, TEXT("ExtractUSDAPreview: Contains vertex colors: %s"), 
+           bHasVertexColors ? TEXT("YES") : TEXT("NO"));
+    
     return Preview;
+}
+
+
+void UJUSYNCBlueprintLibrary::ApplyEnhancedDefaultMaterial(URealtimeMeshComponent* MeshComp)
+{
+    if (!MeshComp)
+    {
+        return;
+    }
+
+    UMaterial* DefaultMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
+    if (DefaultMaterial)
+    {
+        UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(DefaultMaterial, MeshComp);
+        if (DynamicMaterial)
+        {
+            DynamicMaterial->SetScalarParameterValue(TEXT("Metallic"), 0.0f);
+            DynamicMaterial->SetScalarParameterValue(TEXT("Roughness"), 0.8f);
+            DynamicMaterial->SetVectorParameterValue(TEXT("BaseColor"), FLinearColor::White);
+            MeshComp->SetMaterial(0, DynamicMaterial);
+            UE_LOG(LogTemp, Log, TEXT("✅ Applied enhanced default material"));
+        }
+    }
 }
 
 // Update the async internal function
@@ -810,6 +863,60 @@ void UJUSYNCBlueprintLibrary::AsyncBatchSpawnInternal(
         BatchDelay, false);
 }
 
+// Add this function after your existing helper functions
+FString UJUSYNCBlueprintLibrary::DetectUSDContentType(const TArray<uint8>& Buffer)
+{
+    FString Content = ExtractUSDAPreview(Buffer, 200);
+    
+    UE_LOG(LogTemp, Warning, TEXT("=== USD CONTENT TYPE DETECTION DEBUG ==="));
+    UE_LOG(LogTemp, Warning, TEXT("Buffer size: %d bytes"), Buffer.Num());
+    UE_LOG(LogTemp, Warning, TEXT("Content length: %d characters"), Content.Len());
+    
+    // Look for primvars:color.timeSamples
+    bool bHasPrimvarsColor = Content.Contains(TEXT("primvars:color.timeSamples"));
+    UE_LOG(LogTemp, Warning, TEXT("Contains 'primvars:color.timeSamples': %s"), 
+           bHasPrimvarsColor ? TEXT("YES") : TEXT("NO"));
+    
+    if (bHasPrimvarsColor)
+    {
+        // Look for actual color data patterns FIRST
+        bool bHasActualColorData = Content.Contains(TEXT("0: [(0.")) ||
+                                  Content.Contains(TEXT("0: [(1.")) ||
+                                  Content.Contains(TEXT("), (0.")) ||
+                                  Content.Contains(TEXT("), (1.")) ||
+                                  (Content.Contains(TEXT("0: [(")) && Content.Contains(TEXT("), (")));
+        
+        UE_LOG(LogTemp, Warning, TEXT("Contains actual color data patterns: %s"), 
+               bHasActualColorData ? TEXT("YES") : TEXT("NO"));
+        
+        // CRITICAL FIX: Prioritize actual color data over "None"
+        if (bHasActualColorData)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("🎨 DETECTED: VERTEX_COLORS (actual color data found)"));
+            return TEXT("VERTEX_COLORS");
+        }
+        else if (Content.Contains(TEXT("0: None")))
+        {
+            UE_LOG(LogTemp, Warning, TEXT("🎨 DETECTED: TEXTURES (None values found, no color data)"));
+            return TEXT("TEXTURES");
+        }
+    }
+    
+    // Check for explicit texture references
+    if (Content.Contains(TEXT("asset inputs:file")) ||
+        Content.Contains(TEXT("UsdUVTexture")) ||
+        Content.Contains(TEXT(".jpg")) ||
+        Content.Contains(TEXT(".png")))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("🎨 DETECTED: TEXTURES (explicit references)"));
+        return TEXT("TEXTURES");
+    }
+    
+    UE_LOG(LogTemp, Warning, TEXT("🎨 DETECTED: GEOMETRY_ONLY"));
+    return TEXT("GEOMETRY_ONLY");
+}
+
+
 TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocationsSync(
     const TArray<FJUSYNCMeshData>& MeshDataArray,
     const TArray<FVector>& SpawnLocations,
@@ -861,17 +968,13 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocationsSync
 
 FRotator UJUSYNCBlueprintLibrary::ConvertParaViewToUERotation(const FRotator& ParaViewRotation)
 {
-    // ParaView typically uses different axis conventions than UE
-    // This conversion assumes ParaView uses Z-up while UE uses Z-up but different handedness
+    // ParaView and UE both use Z-up, but ParaView is right-handed, UE is left-handed
     FRotator UERotation;
     
-    // Common conversion for ParaView to UE coordinate systems:
-    // ParaView: X-right, Y-forward, Z-up (right-handed)
-    // UE: X-forward, Y-right, Z-up (left-handed)
-    
-    UERotation.Pitch = -ParaViewRotation.Pitch;  // Flip pitch for handedness
-    UERotation.Yaw = ParaViewRotation.Yaw + 90.0f;  // Rotate 90 degrees for axis alignment
-    UERotation.Roll = ParaViewRotation.Roll;
+    // For Z-up to Z-up conversion with handedness flip:
+    UERotation.Pitch = ParaViewRotation.Pitch;  // Keep pitch
+    UERotation.Yaw = -ParaViewRotation.Yaw;     // Flip yaw for handedness
+    UERotation.Roll = ParaViewRotation.Roll;    // Keep roll
     
     UE_LOG(LogTemp, Log, TEXT("Converted ParaView rotation %s to UE rotation %s"),
            *ParaViewRotation.ToString(), *UERotation.ToString());
@@ -898,6 +1001,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
     const TArray<FVector>& SpawnLocations,
     const TArray<FRotator>& SpawnRotations,
     UMaterialInterface* Material,
+    const TArray<uint8>& USDBuffer,
     bool bUseUniformScaling,
     FVector OuterBoundingBoxSize,
     bool bPreserveAspectRatio,
@@ -909,7 +1013,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
     if (MeshDataArray.Num() != SpawnLocations.Num())
     {
         UE_LOG(LogTemp, Error, TEXT("❌ Array size mismatch! Meshes: %d, Locations: %d"),
-            MeshDataArray.Num(), SpawnLocations.Num());
+               MeshDataArray.Num(), SpawnLocations.Num());
         return TArray<AActor*>();
     }
 
@@ -929,7 +1033,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
     else if (FinalRotations.Num() != MeshDataArray.Num())
     {
         UE_LOG(LogTemp, Error, TEXT("❌ Rotation array size mismatch! Expected: %d, Got: %d"),
-            MeshDataArray.Num(), FinalRotations.Num());
+               MeshDataArray.Num(), FinalRotations.Num());
         return TArray<AActor*>();
     }
 
@@ -940,8 +1044,8 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
     if (bUseUniformScaling && OuterBoundingBoxSize != FVector::ZeroVector)
     {
         UE_LOG(LogTemp, Warning, TEXT("🎯 Applying uniform scaling with bounding box: %s"),
-            *OuterBoundingBoxSize.ToString());
-        
+               *OuterBoundingBoxSize.ToString());
+               
         // **FIX: Handle single point scaling properly**
         if (SpawnLocations.Num() == 1)
         {
@@ -959,7 +1063,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
                 MeshSize = MeshBounds.GetSize();
                 UE_LOG(LogTemp, Warning, TEXT("📐 Calculated mesh size from vertices: %s"), *MeshSize.ToString());
             }
-            
+
             // Calculate scale factor for single point
             if (bPreserveAspectRatio)
             {
@@ -978,9 +1082,9 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
                     MeshSize.Z > 0 ? OuterBoundingBoxSize.Z / MeshSize.Z : 1.0f
                 );
             }
-            
-            UE_LOG(LogTemp, Warning, TEXT("🎯 Single point scale factor: %s (MeshSize: %s, TargetSize: %s)"), 
-                *ScaleFactor.ToString(), *MeshSize.ToString(), *OuterBoundingBoxSize.ToString());
+
+            UE_LOG(LogTemp, Warning, TEXT("🎯 Single point scale factor: %s (MeshSize: %s, TargetSize: %s)"),
+                   *ScaleFactor.ToString(), *MeshSize.ToString(), *OuterBoundingBoxSize.ToString());
         }
         else
         {
@@ -992,7 +1096,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
                 ScaleFactor
             );
         }
-        
+
         UE_LOG(LogTemp, Warning, TEXT("📏 Final scale factor: %s"), *ScaleFactor.ToString());
     }
 
@@ -1018,7 +1122,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
 
     UE_LOG(LogTemp, Warning, TEXT("=== STARTING BATCH SPAWN ==="));
     UE_LOG(LogTemp, Warning, TEXT("Meshes: %d, Uniform Scaling: %s, Scale Factor: %s"),
-        MeshDataArray.Num(), bUseUniformScaling ? TEXT("YES") : TEXT("NO"), *ScaleFactor.ToString());
+           MeshDataArray.Num(), bUseUniformScaling ? TEXT("YES") : TEXT("NO"), *ScaleFactor.ToString());
 
     for (int32 i = 0; i < MeshDataArray.Num(); ++i)
     {
@@ -1027,15 +1131,13 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
         FRotator UERotation = ConvertParaViewToUERotation(FinalRotations[i]);
 
         UE_LOG(LogTemp, Log, TEXT("🎯 Spawning mesh %d '%s' at location %s with rotation %s"),
-            i, *ProcessedMeshData.ElementName, *FinalLocations[i].ToString(), *UERotation.ToString());
+               i, *ProcessedMeshData.ElementName, *FinalLocations[i].ToString(), *UERotation.ToString());
 
-        // **FIXED ACTOR SPAWNING - OPTION 1: Let engine auto-generate names**
+        // **FIXED ACTOR SPAWNING - Let engine auto-generate names**
         FActorSpawnParameters SpawnParams;
         SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
-        
         // **CRITICAL FIX: Do NOT set SpawnParams.Name - let Unreal Engine auto-generate unique names**
-        // This prevents the fatal error: "Cannot generate unique name for 'JUSYNCMesh_...' in level"
-        
+
         AActor* SpawnedActor = World->SpawnActor<AActor>(SpawnParams);
         if (!SpawnedActor)
         {
@@ -1054,59 +1156,61 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
         MeshComp->RegisterComponent();
 
         // **ENHANCED TRANSFORM APPLICATION**
-        // Method 1: Set transform with all components at once
         FTransform ActorTransform(UERotation, FinalLocations[i], ScaleFactor);
         SpawnedActor->SetActorTransform(ActorTransform);
-        
+
         // **ENHANCED SCALING APPLICATION** - Multiple methods for reliability
         if (bUseUniformScaling && ScaleFactor != FVector::OneVector)
         {
             // Method 1: Component-level scaling
             MeshComp->SetWorldScale3D(ScaleFactor);
-            
             // Method 2: Actor-level scaling (redundant but ensures it works)
             SpawnedActor->SetActorScale3D(ScaleFactor);
-            
             // Method 3: Force transform update
             SpawnedActor->SetActorTransform(FTransform(UERotation, FinalLocations[i], ScaleFactor));
-            
             // Method 4: Mark for render state update
             MeshComp->MarkRenderStateDirty();
-            
+
             UE_LOG(LogTemp, Warning, TEXT("🔧 Applied scale %s to actor %d (Actor: %s, Component: %s)"),
-                *ScaleFactor.ToString(), i,
-                *SpawnedActor->GetActorScale3D().ToString(),
-                *MeshComp->GetComponentScale().ToString());
+                   *ScaleFactor.ToString(), i,
+                   *SpawnedActor->GetActorScale3D().ToString(),
+                   *MeshComp->GetComponentScale().ToString());
         }
 
         // **ENHANCED MATERIAL APPLICATION**
         if (Material)
         {
+            // Always use the provided material (your texture material from Blueprint)
             MeshComp->SetMaterial(0, Material);
-            UE_LOG(LogTemp, Log, TEXT("✅ Applied custom material to mesh %d"), i);
+            UE_LOG(LogTemp, Warning, TEXT("✅ Applied PROVIDED material to mesh %d (prioritizing over auto-detection)"), i);
         }
         else
         {
-            // Enhanced default material setup
-            UMaterial* DefaultMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
-            if (DefaultMaterial)
+            // Only use automatic detection if NO material is provided
+            FString ContentType = DetectUSDContentType(USDBuffer);
+            UE_LOG(LogTemp, Warning, TEXT("🎨 USD Content Type: %s"), *ContentType);
+            
+            if (ContentType == TEXT("VERTEX_COLORS"))
             {
-                // Create dynamic material instance for better control
-                UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(DefaultMaterial, MeshComp);
-                if (DynamicMaterial)
+                UMaterial* VertexColorMaterial = LoadObject<UMaterial>(nullptr, TEXT("/Game/Materials/M_VertexColor"));
+                if (VertexColorMaterial)
                 {
-                    // Configure material properties
-                    DynamicMaterial->SetScalarParameterValue(TEXT("Metallic"), 0.0f);
-                    DynamicMaterial->SetScalarParameterValue(TEXT("Roughness"), 0.8f);
-                    DynamicMaterial->SetVectorParameterValue(TEXT("BaseColor"), FLinearColor::White);
-                    
-                    MeshComp->SetMaterial(0, DynamicMaterial);
-                    UE_LOG(LogTemp, Log, TEXT("✅ Applied enhanced default material to mesh %d"), i);
+                    MeshComp->SetMaterial(0, VertexColorMaterial);
+                    UE_LOG(LogTemp, Warning, TEXT("✅ Applied M_VertexColor material (auto-detected)"));
                 }
-                else
+            }
+            else if (ContentType == TEXT("TEXTURES"))
+            {
+                UMaterial* TextureMaterial = LoadObject<UMaterial>(nullptr, TEXT("/Game/Materials/M_BaseMaterial"));
+                if (TextureMaterial)
                 {
-                    MeshComp->SetMaterial(0, DefaultMaterial);
+                    MeshComp->SetMaterial(0, TextureMaterial);
+                    UE_LOG(LogTemp, Log, TEXT("✅ Applied texture material to mesh %d (auto-detected)"), i);
                 }
+            }
+            else
+            {
+                ApplyEnhancedDefaultMaterial(MeshComp);
             }
         }
 
@@ -1116,14 +1220,14 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
         {
             SuccessCount++;
             SpawnedActors.Add(SpawnedActor);
-            
+
             // **FINAL VERIFICATION**
             FVector ActualLocation = SpawnedActor->GetActorLocation();
             FVector ActualScale = SpawnedActor->GetActorScale3D();
             FRotator ActualRotation = SpawnedActor->GetActorRotation();
-            
+
             UE_LOG(LogTemp, Warning, TEXT("✅ Successfully spawned mesh %d at %s (Scale: %s, Rotation: %s)"),
-                i, *ActualLocation.ToString(), *ActualScale.ToString(), *ActualRotation.ToString());
+                   i, *ActualLocation.ToString(), *ActualScale.ToString(), *ActualRotation.ToString());
         }
         else
         {
@@ -1135,17 +1239,16 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
 
     // **ENHANCED COMPLETION LOGGING**
     UE_LOG(LogTemp, Warning, TEXT("=== BATCH SPAWN COMPLETE: %d/%d successful ==="),
-        SuccessCount, MeshDataArray.Num());
-    
+           SuccessCount, MeshDataArray.Num());
     if (bUseUniformScaling)
     {
         UE_LOG(LogTemp, Warning, TEXT("🎯 Uniform scaling applied with factor: %s"),
-            *ScaleFactor.ToString());
+               *ScaleFactor.ToString());
     }
-    
+
     // Display success message
     FString Message = FString::Printf(TEXT("Batch Spawn Complete: %d/%d meshes spawned successfully"),
-        SuccessCount, MeshDataArray.Num());
+                                     SuccessCount, MeshDataArray.Num());
     DisplayDebugMessage(Message, 5.0f, SuccessCount == MeshDataArray.Num() ? FLinearColor::Green : FLinearColor::Yellow);
 
     return SpawnedActors;
@@ -1362,6 +1465,23 @@ TArray<FVector> UJUSYNCBlueprintLibrary::CalculateScaledPositions(
     UE_LOG(LogTemp, Warning, TEXT("🎯 Multi-point scaling applied: %s"), *OutScaleFactor.ToString());
     return ScaledLocations;
 }
+
+static void ApplyEnhancedDefaultMaterial(URealtimeMeshComponent* MeshComp)
+{
+    UMaterial* DefaultMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
+    if (DefaultMaterial)
+    {
+        UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(DefaultMaterial, MeshComp);
+        if (DynamicMaterial)
+        {
+            DynamicMaterial->SetScalarParameterValue(TEXT("Metallic"), 0.0f);
+            DynamicMaterial->SetScalarParameterValue(TEXT("Roughness"), 0.8f);
+            DynamicMaterial->SetVectorParameterValue(TEXT("BaseColor"), FLinearColor::White);
+            MeshComp->SetMaterial(0, DynamicMaterial);
+        }
+    }
+}
+
 
 
 
