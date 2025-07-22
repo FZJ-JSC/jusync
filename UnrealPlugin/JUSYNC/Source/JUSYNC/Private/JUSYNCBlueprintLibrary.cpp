@@ -29,11 +29,11 @@ bool UJUSYNCBlueprintLibrary::InitializeJUSYNCMiddleware(const FString& Endpoint
     if (bResult)
     {
         UE_LOG(LogTemp, Log, TEXT("JUSYNC Middleware initialized successfully"));
-        DisplayDebugMessage(TEXT("JUSYNC Middleware Connected"), 3.0f, FLinearColor::Green);
+        //DisplayDebugMessage(TEXT("JUSYNC Middleware Connected"), 3.0f, FLinearColor::Green);
     }
     else
     {
-        DisplayDebugMessage(TEXT("JUSYNC Middleware Failed to Connect"), 5.0f, FLinearColor::Red);
+        //DisplayDebugMessage(TEXT("JUSYNC Middleware Failed to Connect"), 5.0f, FLinearColor::Red);
     }
 
     return bResult;
@@ -46,7 +46,7 @@ void UJUSYNCBlueprintLibrary::ShutdownJUSYNCMiddleware()
     {
         Subsystem->ShutdownMiddleware();
         ClearReceivedData();
-        DisplayDebugMessage(TEXT("JUSYNC Middleware Disconnected"), 3.0f, FLinearColor::Yellow);
+        //DisplayDebugMessage(TEXT("JUSYNC Middleware Disconnected"), 3.0f, FLinearColor::Yellow);
     }
 }
 
@@ -85,7 +85,7 @@ bool UJUSYNCBlueprintLibrary::StartJUSYNCReceiving()
     bool bResult = Subsystem->StartReceiving();
     if (bResult)
     {
-        DisplayDebugMessage(TEXT("JUSYNC Started Receiving Data"), 3.0f, FLinearColor::Blue);
+        //DisplayDebugMessage(TEXT("JUSYNC Started Receiving Data"), 3.0f, FLinearColor::Blue);
     }
 
     return bResult;
@@ -98,7 +98,7 @@ void UJUSYNCBlueprintLibrary::StopJUSYNCReceiving()
     {
         Subsystem->StopReceiving();
         // Use FLinearColor constructor for Orange color
-        DisplayDebugMessage(TEXT("JUSYNC Stopped Receiving Data"), 3.0f, FLinearColor(1.0f, 0.5f, 0.0f, 1.0f));
+        //DisplayDebugMessage(TEXT("JUSYNC Stopped Receiving Data"), 3.0f, FLinearColor(1.0f, 0.5f, 0.0f, 1.0f));
     }
 }
 
@@ -126,12 +126,12 @@ bool UJUSYNCBlueprintLibrary::LoadUSDFromBuffer(const TArray<uint8>& Buffer, con
     if (bResult)
     {
         FString Message = FString::Printf(TEXT("Loaded USD: %s (%d meshes)"), *Filename, OutMeshData.Num());
-        DisplayDebugMessage(Message, 5.0f, FLinearColor::Green);
+        //DisplayDebugMessage(Message, 5.0f, FLinearColor::Green);
         UE_LOG(LogTemp, Log, TEXT("USD Preview:\n%s"), *OutPreview);
     }
     else
     {
-        DisplayDebugMessage(TEXT("Failed to load USD file"), 5.0f, FLinearColor::Red);
+        //DisplayDebugMessage(TEXT("Failed to load USD file"), 5.0f, FLinearColor::Red);
     }
 
     return bResult;
@@ -210,11 +210,11 @@ FJUSYNCTextureData UJUSYNCBlueprintLibrary::CreateTextureFromBuffer(const TArray
         FString Message = FString::Printf(TEXT("Created Texture: %dx%d (%d channels)"),
                                         Result.Width, Result.Height, Result.Channels);
         // Use FLinearColor constructor for Cyan color
-        DisplayDebugMessage(Message, 3.0f, FLinearColor(0.0f, 1.0f, 1.0f, 1.0f));
+        //DisplayDebugMessage(Message, 3.0f, FLinearColor(0.0f, 1.0f, 1.0f, 1.0f));
     }
     else
     {
-        DisplayDebugMessage(TEXT("Failed to create texture from buffer"), 3.0f, FLinearColor::Red);
+        //DisplayDebugMessage(TEXT("Failed to create texture from buffer"), 3.0f, FLinearColor::Red);
     }
 
     return Result;
@@ -240,7 +240,7 @@ UTexture2D* UJUSYNCBlueprintLibrary::CreateUETextureFromJUSYNC(const FJUSYNCText
     if (Result)
     {
         // Use FLinearColor constructor for Cyan color
-        DisplayDebugMessage(TEXT("UE Texture2D Created Successfully"), 3.0f, FLinearColor(0.0f, 1.0f, 1.0f, 1.0f));
+        //DisplayDebugMessage(TEXT("UE Texture2D Created Successfully"), 3.0f, FLinearColor(0.0f, 1.0f, 1.0f, 1.0f));
     }
 
     return Result;
@@ -270,11 +270,11 @@ bool UJUSYNCBlueprintLibrary::WriteGradientLineAsPNG(const TArray<uint8>& Buffer
     if (bResult)
     {
         FString Message = FString::Printf(TEXT("Gradient PNG saved: %s"), *OutputPath);
-        DisplayDebugMessage(Message, 3.0f, FLinearColor::Green);
+        //DisplayDebugMessage(Message, 3.0f, FLinearColor::Green);
     }
     else
     {
-        DisplayDebugMessage(TEXT("Failed to save gradient PNG"), 3.0f, FLinearColor::Red);
+        //DisplayDebugMessage(TEXT("Failed to save gradient PNG"), 3.0f, FLinearColor::Red);
     }
 
     return bResult;
@@ -299,11 +299,11 @@ bool UJUSYNCBlueprintLibrary::GetGradientLineAsPNGBuffer(const TArray<uint8>& Bu
     if (bResult)
     {
         FString Message = FString::Printf(TEXT("Gradient PNG buffer created: %d bytes"), OutPNGBuffer.Num());
-        DisplayDebugMessage(Message, 3.0f, FLinearColor::Green);
+        //DisplayDebugMessage(Message, 3.0f, FLinearColor::Green);
     }
     else
     {
-        DisplayDebugMessage(TEXT("Failed to create gradient PNG buffer"), 3.0f, FLinearColor::Red);
+        //DisplayDebugMessage(TEXT("Failed to create gradient PNG buffer"), 3.0f, FLinearColor::Red);
     }
 
     return bResult;
@@ -339,7 +339,7 @@ bool UJUSYNCBlueprintLibrary::CreateRealtimeMeshFromJUSYNC(const FJUSYNCMeshData
         FString Message = FString::Printf(TEXT("RealtimeMesh Created: %s (%d verts, %d tris)"),
                                         *MeshData.ElementName, MeshData.GetVertexCount(), MeshData.GetTriangleCount());
         // Use FLinearColor constructor for Cyan color
-        DisplayDebugMessage(Message, 5.0f, FLinearColor(0.0f, 1.0f, 1.0f, 1.0f));
+        //DisplayDebugMessage(Message, 5.0f, FLinearColor(0.0f, 1.0f, 1.0f, 1.0f));
     }
 
     return bResult;
@@ -372,7 +372,7 @@ bool UJUSYNCBlueprintLibrary::BatchCreateRealtimeMeshesFromJUSYNC(const TArray<F
     FString Message = FString::Printf(TEXT("Batch RealtimeMesh Creation: %d/%d successful"), SuccessCount, MeshDataArray.Num());
     // Use FLinearColor constructor for Cyan or Yellow color
     FLinearColor Color = bAllSuccessful ? FLinearColor(0.0f, 1.0f, 1.0f, 1.0f) : FLinearColor::Yellow;
-    DisplayDebugMessage(Message, 5.0f, Color);
+    //DisplayDebugMessage(Message, 5.0f, Color);
 
     return bAllSuccessful;
 }
@@ -405,7 +405,7 @@ bool UJUSYNCBlueprintLibrary::CheckForReceivedFiles(TArray<FJUSYNCFileData>& Out
             FString Message = FString::Printf(TEXT("Received File: %s (%d bytes, %s)"),
                                             *FileData.Filename, FileData.Data.Num(), *FileData.FileType);
             UE_LOG(LogTemp, Log, TEXT("%s"), *Message);
-            DisplayDebugMessage(Message, 5.0f, FLinearColor::Blue);
+            //DisplayDebugMessage(Message, 5.0f, FLinearColor::Blue);
         }
 
         return true;
@@ -427,7 +427,7 @@ bool UJUSYNCBlueprintLibrary::CheckForReceivedMessages(TArray<FString>& OutRecei
         {
             UE_LOG(LogTemp, Log, TEXT("Received Message: %s"), *Message);
             // Use FLinearColor constructor for Cyan color
-            DisplayDebugMessage(FString::Printf(TEXT("Message: %s"), *Message), 3.0f, FLinearColor(0.0f, 1.0f, 1.0f, 1.0f));
+            //DisplayDebugMessage(FString::Printf(TEXT("Message: %s"), *Message), 3.0f, FLinearColor(0.0f, 1.0f, 1.0f, 1.0f));
         }
 
         return true;
@@ -533,7 +533,7 @@ bool UJUSYNCBlueprintLibrary::LoadFileToBuffer(const FString& FilePath, TArray<u
     if (bResult)
     {
         FString Message = FString::Printf(TEXT("File loaded: %s (%d bytes)"), *FilePath, OutBuffer.Num());
-        DisplayDebugMessage(Message, 3.0f, FLinearColor::Green);
+        //DisplayDebugMessage(Message, 3.0f, FLinearColor::Green);
     }
 
     return bResult;
@@ -556,7 +556,7 @@ bool UJUSYNCBlueprintLibrary::SaveBufferToFile(const TArray<uint8>& Buffer, cons
     if (bResult)
     {
         FString Message = FString::Printf(TEXT("File saved: %s (%d bytes)"), *FilePath, Buffer.Num());
-        DisplayDebugMessage(Message, 3.0f, FLinearColor::Green);
+        //DisplayDebugMessage(Message, 3.0f, FLinearColor::Green);
     }
 
     return bResult;
@@ -566,10 +566,10 @@ bool UJUSYNCBlueprintLibrary::SaveBufferToFile(const TArray<uint8>& Buffer, cons
 
 void UJUSYNCBlueprintLibrary::DisplayDebugMessage(const FString& Message, float Duration, FLinearColor Color)
 {
-    if (GEngine)
+    /*if (GEngine)
     {
         GEngine->AddOnScreenDebugMessage(-1, Duration, Color.ToFColor(true), FString::Printf(TEXT("JUSYNC: %s"), *Message));
-    }
+    }*/
 
     UE_LOG(LogTemp, Log, TEXT("JUSYNC: %s"), *Message);
 }
@@ -579,12 +579,12 @@ void UJUSYNCBlueprintLibrary::LogJUSYNCMessage(const FString& Message, bool bIsE
     if (bIsError)
     {
         UE_LOG(LogTemp, Error, TEXT("JUSYNC: %s"), *Message);
-        DisplayDebugMessage(Message, 5.0f, FLinearColor::Red);
+        //DisplayDebugMessage(Message, 5.0f, FLinearColor::Red);
     }
     else
     {
         UE_LOG(LogTemp, Log, TEXT("JUSYNC: %s"), *Message);
-        DisplayDebugMessage(Message, 3.0f, FLinearColor::White);
+        //DisplayDebugMessage(Message, 3.0f, FLinearColor::White);
     }
 }
 
@@ -1249,7 +1249,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
     // Display success message
     FString Message = FString::Printf(TEXT("Batch Spawn Complete: %d/%d meshes spawned successfully"),
                                      SuccessCount, MeshDataArray.Num());
-    DisplayDebugMessage(Message, 5.0f, SuccessCount == MeshDataArray.Num() ? FLinearColor::Green : FLinearColor::Yellow);
+    //DisplayDebugMessage(Message, 5.0f, SuccessCount == MeshDataArray.Num() ? FLinearColor::Green : FLinearColor::Yellow);
 
     return SpawnedActors;
 }
@@ -1481,8 +1481,3 @@ static void ApplyEnhancedDefaultMaterial(URealtimeMeshComponent* MeshComp)
         }
     }
 }
-
-
-
-
-

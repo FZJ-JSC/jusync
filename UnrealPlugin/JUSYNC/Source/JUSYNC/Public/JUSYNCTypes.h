@@ -64,6 +64,14 @@ struct JUSYNC_API FJUSYNCMeshData
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
     TArray<FVector2D> UVs;
 
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+    TArray<FColor> VertexColors;  // ADD THIS LINE
+
+    // Update validation and helper functions
+    bool HasVertexColors() const {
+        return VertexColors.Num() > 0;
+    }
+
     FJUSYNCMeshData()
     {
         ElementName = TEXT("");

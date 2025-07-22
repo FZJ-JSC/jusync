@@ -164,19 +164,16 @@ public:
 		const TArray<FRotator>& SpawnRotations  // Remove default parameter here
 	);
 
-    UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning", CallInEditor)
-    static TArray<AActor*> BatchSpawnRealtimeMeshesWithMaterial(
-        const TArray<FJUSYNCMeshData>& MeshDataArray,
-        const TArray<FVector>& SpawnLocations,
-        const TArray<FRotator>& SpawnRotations,
-        UMaterialInterface* Material,
-        bool bUseUniformScaling = false,
-        FVector OuterBoundingBoxSize = FVector::ZeroVector,
-        bool bPreserveAspectRatio = true,
-        bool bUseAsyncSpawning = false,
-        int32 BatchSize = 5,
-        float BatchDelay = 0.016f
-    );
+UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning", CallInEditor)
+        static TArray<AActor*> BatchSpawnRealtimeMeshesWithMaterial(
+            const TArray<FJUSYNCMeshData>& MeshDataArray, const TArray<FVector>& SpawnLocations,
+            const TArray<FRotator>& SpawnRotations, UMaterialInterface* Material,
+            const TArray<uint8>& USDBuffer,  // ADD THIS LINE
+            bool bUseUniformScaling = false, FVector OuterBoundingBoxSize = FVector::ZeroVector,
+            bool bPreserveAspectRatio = true, bool bUseAsyncSpawning = false, int32 BatchSize = 5,
+            float BatchDelay = 0.016f
+        );
+
 
     static FBox CalculateMeshBounds(const FJUSYNCMeshData& MeshData, const FVector& Location);
 
@@ -193,6 +190,9 @@ public:
     static TArray<FJUSYNCFileData> ReceivedFiles;
     static TArray<FString> ReceivedMessages;
     static FCriticalSection DataMutex;
+
+    static void ApplyEnhancedDefaultMaterial(URealtimeMeshComponent* MeshComp);
+    static FString DetectUSDContentType(const TArray<uint8>& Buffer);
 
 private:
     // Internal helper functions
