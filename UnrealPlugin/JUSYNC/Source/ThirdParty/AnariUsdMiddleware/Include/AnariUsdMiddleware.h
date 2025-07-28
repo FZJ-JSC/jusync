@@ -66,17 +66,18 @@ public:
         std::vector<uint32_t> indices; // Triangle indices
         std::vector<float> normals;   // Flat array: [nx1,ny1,nz1, nx2,ny2,nz2, ...]
         std::vector<float> uvs;       // Flat array: [u1,v1, u2,v2, ...]
+        std::vector<float> vertex_colors; // (r,g,b,a,r,g,b,a...)
 
         // Validation method
         bool isValid() const {
             return !elementName.empty() &&
-                   points.size() <= safety::MAX_MESH_VERTICES * 3 &&
-                   indices.size() <= safety::MAX_MESH_INDICES &&
-                   normals.size() <= safety::MAX_MESH_VERTICES * 3 &&
-                   uvs.size() <= safety::MAX_MESH_VERTICES * 2 &&
+                   !points.empty() &&
+                   !indices.empty() &&
                    (points.size() % 3 == 0) &&
+                   (indices.size() % 3 == 0) &&
                    (normals.empty() || normals.size() % 3 == 0) &&
-                   (uvs.empty() || uvs.size() % 2 == 0);
+                   (uvs.empty() || uvs.size() % 2 == 0) &&
+                   (vertex_colors.empty() || vertex_colors.size() % 4 == 0);
         }
 
         size_t getVertexCount() const {
@@ -95,6 +96,7 @@ public:
             indices.clear();
             normals.clear();
             uvs.clear();
+            vertex_colors.clear();
         }
     };
 
@@ -137,7 +139,7 @@ public:
 
     /**
      * Initialize the middleware with enhanced error checking
-     * @param endpoint The ZeroMQ endpoint to bind to (e.g., "tcp://*:13456")
+     * @param endpoint The ZeroMQ endpoint to bind to (e.g., "tcp://[host]:13456")
      * @return True if initialization was successful, false otherwise
      */
     bool initialize(const char* endpoint = nullptr);
@@ -238,7 +240,7 @@ public:
     std::string getStatusInfo() const;
 
 private:
-    // Forward declaration of implementation class (Pimpl idiom)
+
     class Impl;
     std::unique_ptr<Impl> pImpl;
 

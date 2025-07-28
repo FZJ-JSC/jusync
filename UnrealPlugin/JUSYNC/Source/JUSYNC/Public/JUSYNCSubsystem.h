@@ -111,17 +111,17 @@ public:
 private:
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     TUniquePtr<anari_usd_middleware::AnariUsdMiddleware> Middleware;
-#endif
 
-    mutable FCriticalSection MiddlewareMutex;
-    std::atomic<bool> bIsInitialized{ false };
-
-    // Legacy callback handlers (kept for compatibility)
+    // Legacy callback handlers (wrapped for compatibility)
     void HandleFileReceived(const anari_usd_middleware::AnariUsdMiddleware::FileData& FileData);
     void HandleMessageReceived(const std::string& Message);
 
-    // Legacy conversion helpers (kept for compatibility)
+    // Legacy conversion helpers (wrapped for compatibility)
     FJUSYNCFileData ConvertFileData(const anari_usd_middleware::AnariUsdMiddleware::FileData& SourceData);
     FJUSYNCMeshData ConvertMeshData(const anari_usd_middleware::AnariUsdMiddleware::MeshData& SourceData);
     FJUSYNCTextureData ConvertTextureData(const anari_usd_middleware::AnariUsdMiddleware::TextureData& SourceData);
+#endif
+
+    mutable FCriticalSection MiddlewareMutex;
+    std::atomic<bool> bIsInitialized{false};
 };

@@ -139,7 +139,7 @@ public:
 
     /**
      * Initialize the middleware with enhanced error checking
-     * @param endpoint The ZeroMQ endpoint to bind to (e.g., "tcp://*:13456")
+     * @param endpoint The ZeroMQ endpoint to bind to (e.g., "tcp://[host]:13456")
      * @return True if initialization was successful, false otherwise
      */
     bool initialize(const char* endpoint = nullptr);
