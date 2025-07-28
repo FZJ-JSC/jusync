@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 ZeroMQ DEALER client for sending USD files and images to ANARI USD Middleware
 Compatible with the ROUTER socket pattern used in your test_middleware application
@@ -162,12 +162,12 @@ Commands:
     interactive          Interactive mode
 
 Examples:
-    python3 zmq_client.py send-file model.usd
-    python3 zmq_client.py send-file texture.png
-    python3 zmq_client.py --endpoint tcp://192.168.1.100:5556 send-file scene.usda
-    python3 zmq_client.py send-message "Hello from Python client"
-    python3 zmq_client.py test
-    python3 zmq_client.py interactive
+    python3 file_sender.py send-file model.usd
+    python3 file_sender.py send-file texture.png
+    python3 file_sender.py --endpoint tcp://192.168.1.100:5556 send-file scene.usda
+    python3 file_sender.py send-message "Hello from Python client"
+    python3 file_sender.py test
+    python3 file_sender.py interactive
     """)
 
 def run_test_sequence(client):
