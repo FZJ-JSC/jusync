@@ -124,7 +124,8 @@ src/AnariUsdMiddleware.cpp
 src/ZmqConnector.cpp
 src/HashVerifier.cpp
 src/UsdProcessor.cpp
-src/AnariUsdMiddleware_C.cpp # C-wrapper implementation
+src/AnariUsdMiddleware_C.cpp
+src/CollisionProcessor.cpp
 )
 
 # Add include directories

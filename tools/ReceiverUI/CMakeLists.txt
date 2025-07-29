@@ -244,16 +244,25 @@ endif()
 # ------------------------------
 # Build Configuration
 # ------------------------------
-add_executable(ReceiverUI main.cpp)
+
+# Define sources
+set(SOURCES
+    main.cpp
+    CollisionDebugWindow.cpp
+    3DViewer.cpp
+)
+
+add_executable(ReceiverUI ${SOURCES})
 
 # Link all dependencies using modern CMake targets
 target_link_libraries(ReceiverUI PRIVATE
-        ${MIDDLEWARE_TARGET}
-        imgui_interface
-        ${GLFW_TARGET}
-        ${GLEW_TARGET}
-        OpenGL::GL
+    ${MIDDLEWARE_TARGET}
+    imgui_interface
+    ${GLFW_TARGET}
+    ${GLEW_TARGET}
+    OpenGL::GL
 )
+
 
 # Platform-specific libraries
 if(WIN32)
