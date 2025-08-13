@@ -9,15 +9,17 @@
 #include "MiddlewareLogging.h"
 
 // Standard library includes
+#include <vector>
+#include <string>
+#include <memory>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
-#include <unordered_set>
-#include <queue>
-#include <atomic>  // ✅ FIX: Add missing atomic include
 
 // GLM for math operations - with experimental support enabled
-#include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtx/norm.hpp>  // Now this will work with GLM_ENABLE_EXPERIMENTAL
+#include <glm/glm.hpp>
+#include <glm/gtx/norm.hpp>
 
 namespace anari_usd_middleware {
 
@@ -29,8 +31,36 @@ CollisionProcessor::CollisionProcessor() {
 // Destructor
 CollisionProcessor::~CollisionProcessor() {
     MIDDLEWARE_LOG_INFO("CollisionProcessor destroyed - Generated %llu collisions with %llu errors",
-                        static_cast<unsigned long long>(collisionsGenerated_.load()),
-                        static_cast<unsigned long long>(generationErrors_.load()));
+        static_cast<unsigned long long>(collisionsGenerated_.load()),
+        static_cast<unsigned long long>(generationErrors_.load()));
+}
+
+// ✅ MISSING IMPLEMENTATIONS - Add these parameter setter methods
+void CollisionProcessor::setSimplificationRatio(float ratio) {
+    if (ratio > 0.0f && ratio <= 1.0f) {
+        simplificationRatio_ = ratio;
+        MIDDLEWARE_LOG_INFO("Collision simplification ratio set to: %.3f", ratio);
+    } else {
+        MIDDLEWARE_LOG_WARNING("Invalid simplification ratio: %.3f (must be 0.0-1.0)", ratio);
+    }
+}
+
+void CollisionProcessor::setConvexHullPrecision(float precision) {
+    if (precision > 0.0f && precision <= 1.0f) {
+        convexHullPrecision_ = precision;
+        MIDDLEWARE_LOG_INFO("Collision convex hull precision set to: %.6f", precision);
+    } else {
+        MIDDLEWARE_LOG_WARNING("Invalid convex hull precision: %.6f (must be 0.0-1.0)", precision);
+    }
+}
+
+void CollisionProcessor::setMaxConvexHulls(int maxHulls) {
+    if (maxHulls > 0 && maxHulls <= 64) {
+        maxConvexHulls_ = maxHulls;
+        MIDDLEWARE_LOG_INFO("Max convex hulls set to: %d", maxHulls);
+    } else {
+        MIDDLEWARE_LOG_WARNING("Invalid max convex hulls: %d (must be 1-64)", maxHulls);
+    }
 }
 
 bool CollisionProcessor::generateCollision(const std::vector<float>& vertices,
@@ -55,7 +85,7 @@ bool CollisionProcessor::generateCollision(const std::vector<float>& vertices,
 
     if (vertices.size() > safety::MAX_MESH_VERTICES * 3) {
         MIDDLEWARE_LOG_ERROR("Too many vertices for collision: %zu (max: %zu)",
-                            vertices.size() / 3, safety::MAX_MESH_VERTICES);
+            vertices.size() / 3, safety::MAX_MESH_VERTICES);
         generationErrors_.fetch_add(1);
         return false;
     }
@@ -71,9 +101,9 @@ bool CollisionProcessor::generateCollision(const std::vector<float>& vertices,
     outCollisionData.collisionType = complexity;
 
     MIDDLEWARE_LOG_INFO("Generating %s collision for %zu vertices, %zu triangles",
-                       getComplexityName(complexity).c_str(),
-                       vertices.size() / 3,
-                       indices.size() / 3);
+        getComplexityName(complexity).c_str(),
+        vertices.size() / 3,
+        indices.size() / 3);
 
     try {
         bool result = false;
@@ -83,27 +113,21 @@ bool CollisionProcessor::generateCollision(const std::vector<float>& vertices,
                 MIDDLEWARE_LOG_DEBUG("No collision generation requested");
                 result = true;
                 break;
-
             case ECollisionComplexity::Simple:
                 result = generateBoundingBoxCollision(vertices, outCollisionData);
                 break;
-
             case ECollisionComplexity::ConvexHull:
                 result = generateConvexHullCollision(vertices, indices, outCollisionData);
                 break;
-
             case ECollisionComplexity::Complex:
                 result = generateComplexCollision(vertices, indices, outCollisionData);
                 break;
-
             case ECollisionComplexity::Simplified:
                 result = generateSimplifiedCollision(vertices, indices, outCollisionData);
                 break;
-
             case ECollisionComplexity::ConvexDecomp:
                 result = generateConvexDecomposition(vertices, indices, outCollisionData);
                 break;
-
             default:
                 MIDDLEWARE_LOG_ERROR("Unhandled collision complexity: %d", static_cast<int>(complexity));
                 generationErrors_.fetch_add(1);
@@ -120,16 +144,15 @@ bool CollisionProcessor::generateCollision(const std::vector<float>& vertices,
 
             collisionsGenerated_.fetch_add(1);
             MIDDLEWARE_LOG_INFO("Successfully generated %s collision: %zu vertices, %zu triangles",
-                               getComplexityName(complexity).c_str(),
-                               outCollisionData.vertices.size() / 3,
-                               outCollisionData.indices.size() / 3);
+                getComplexityName(complexity).c_str(),
+                outCollisionData.vertices.size() / 3,
+                outCollisionData.indices.size() / 3);
         } else {
             MIDDLEWARE_LOG_ERROR("Failed to generate %s collision", getComplexityName(complexity).c_str());
             generationErrors_.fetch_add(1);
         }
 
         return result;
-
     } catch (const std::exception& e) {
         MIDDLEWARE_LOG_ERROR("Exception in generateCollision: %s", e.what());
         outCollisionData.clear();
@@ -146,7 +169,7 @@ bool CollisionProcessor::generateCollisionForMeshes(std::vector<MeshDataWithColl
     }
 
     MIDDLEWARE_LOG_INFO("Generating %s collision for %zu meshes",
-                       getComplexityName(complexity).c_str(), meshes.size());
+        getComplexityName(complexity).c_str(), meshes.size());
 
     bool allSuccessful = true;
     size_t processedCount = 0;
@@ -178,8 +201,7 @@ bool CollisionProcessor::generateCollisionForMeshes(std::vector<MeshDataWithColl
     }
 
     MIDDLEWARE_LOG_INFO("Collision generation complete: %zu/%zu meshes processed successfully",
-                       processedCount, meshes.size());
-
+        processedCount, meshes.size());
     return allSuccessful;
 }
 
@@ -191,13 +213,13 @@ bool CollisionProcessor::isValidComplexity(ECollisionComplexity complexity) {
 
 std::string CollisionProcessor::getComplexityName(ECollisionComplexity complexity) {
     switch (complexity) {
-        case ECollisionComplexity::None:        return "None";
-        case ECollisionComplexity::Simple:      return "Simple (Bounding Box)";
-        case ECollisionComplexity::ConvexHull:  return "Convex Hull";
-        case ECollisionComplexity::Complex:     return "Complex (Full Mesh)";
-        case ECollisionComplexity::Simplified:  return "Simplified";
+        case ECollisionComplexity::None: return "None";
+        case ECollisionComplexity::Simple: return "Simple (Bounding Box)";
+        case ECollisionComplexity::ConvexHull: return "Convex Hull";
+        case ECollisionComplexity::Complex: return "Complex (Full Mesh)";
+        case ECollisionComplexity::Simplified: return "Simplified";
         case ECollisionComplexity::ConvexDecomp: return "Convex Decomposition";
-        default:                                return "Unknown";
+        default: return "Unknown";
     }
 }
 
@@ -234,7 +256,6 @@ bool CollisionProcessor::generateBoundingBoxCollision(const std::vector<float>& 
         // Calculate sphere (optional - for additional simple collision)
         glm::vec3 center = (minBounds + maxBounds) * 0.5f;
         float radius = glm::length(maxBounds - center);
-
         outCollisionData.sphereCenter = center;
         outCollisionData.sphereRadius = radius;
 
@@ -253,7 +274,6 @@ bool CollisionProcessor::generateBoundingBoxCollision(const std::vector<float>& 
         // Convert to flat array
         outCollisionData.vertices.clear();
         outCollisionData.vertices.reserve(24); // 8 vertices * 3 components
-
         for (const auto& vertex : boxVertices) {
             outCollisionData.vertices.push_back(vertex.x);
             outCollisionData.vertices.push_back(vertex.y);
@@ -278,12 +298,11 @@ bool CollisionProcessor::generateBoundingBoxCollision(const std::vector<float>& 
 
         outCollisionData.indices = std::move(boxIndices);
 
-        MIDDLEWARE_LOG_DEBUG("Generated bounding box collision: min(%.2f,%.2f,%.2f) max(%.2f,%.2f,%.2f)",
-                           minBounds.x, minBounds.y, minBounds.z,
-                           maxBounds.x, maxBounds.y, maxBounds.z);
+        MIDDLEWARE_LOG_DEBUG("Generated bounding box collision: min(%.3f,%.3f,%.3f) max(%.3f,%.3f,%.3f)",
+            minBounds.x, minBounds.y, minBounds.z,
+            maxBounds.x, maxBounds.y, maxBounds.z);
 
         return true;
-
     } catch (const std::exception& e) {
         MIDDLEWARE_LOG_ERROR("Exception in generateBoundingBoxCollision: %s", e.what());
         return false;
@@ -293,186 +312,69 @@ bool CollisionProcessor::generateBoundingBoxCollision(const std::vector<float>& 
 bool CollisionProcessor::generateConvexHullCollision(const std::vector<float>& vertices,
                                                     const std::vector<uint32_t>& indices,
                                                     CollisionData& outCollisionData) {
-    // For now, implement a simple convex hull using existing vertices
-    // In a full implementation, you would use a proper convex hull algorithm like QuickHull
+    MIDDLEWARE_LOG_INFO("Convex hull collision generation not fully implemented - using simplified approach");
 
-    try {
-        MIDDLEWARE_LOG_INFO("Generating convex hull collision (simplified implementation)");
+    // For now, use a simplified approach - copy vertices and generate new indices
+    outCollisionData.vertices = vertices;
 
-        // For this implementation, we'll create a simplified convex hull
-        // by removing interior vertices and keeping only the outer shell
+    // Generate indices for the first few triangles (placeholder implementation)
+    outCollisionData.indices.clear();
+    size_t triangleCount = std::min(indices.size(), static_cast<size_t>(300)); // Limit for convex hull
 
-        // Step 1: Find extreme points in each direction
-        if (vertices.size() < 12) { // Need at least 4 vertices
-            MIDDLEWARE_LOG_ERROR("Not enough vertices for convex hull: %zu", vertices.size() / 3);
-            return false;
-        }
-
-        std::vector<size_t> extremePoints;
-
-        // Find min/max in each axis
-        size_t minX = 0, maxX = 0, minY = 0, maxY = 0, minZ = 0, maxZ = 0;
-
-        for (size_t i = 0; i < vertices.size(); i += 3) {
-            size_t vertexIndex = i / 3;
-
-            if (vertices[i] < vertices[minX * 3]) minX = vertexIndex;
-            if (vertices[i] > vertices[maxX * 3]) maxX = vertexIndex;
-            if (vertices[i + 1] < vertices[minY * 3 + 1]) minY = vertexIndex;
-            if (vertices[i + 1] > vertices[maxY * 3 + 1]) maxY = vertexIndex;
-            if (vertices[i + 2] < vertices[minZ * 3 + 2]) minZ = vertexIndex;
-            if (vertices[i + 2] > vertices[maxZ * 3 + 2]) maxZ = vertexIndex;
-        }
-
-        // Add extreme points to our hull (remove duplicates)
-        std::unordered_set<size_t> extremeSet = {minX, maxX, minY, maxY, minZ, maxZ};
-        extremePoints.assign(extremeSet.begin(), extremeSet.end());
-
-        // Copy extreme vertices
-        outCollisionData.convexVertices.clear();
-        outCollisionData.convexVertices.reserve(extremePoints.size() * 3);
-
-        for (size_t vertexIndex : extremePoints) {
-            size_t baseIndex = vertexIndex * 3;
-            outCollisionData.convexVertices.push_back(vertices[baseIndex]);
-            outCollisionData.convexVertices.push_back(vertices[baseIndex + 1]);
-            outCollisionData.convexVertices.push_back(vertices[baseIndex + 2]);
-        }
-
-        // For simplicity, we'll also copy these to the main collision mesh
-        outCollisionData.vertices = outCollisionData.convexVertices;
-
-        // Generate a simple hull by connecting extreme points
-        // This is a very simplified approach - a real convex hull would be more complex
-        if (extremePoints.size() >= 4) {
-            // Create tetrahedron-like structure from first 4 extreme points
-            outCollisionData.convexIndices = {
-                0, 1, 2,  0, 2, 3,  0, 3, 1,  1, 3, 2
-            };
-            outCollisionData.indices = outCollisionData.convexIndices;
-        }
-
-        MIDDLEWARE_LOG_INFO("Generated convex hull with %zu vertices and %zu triangles",
-                          outCollisionData.convexVertices.size() / 3,
-                          outCollisionData.convexIndices.size() / 3);
-
-        return true;
-
-    } catch (const std::exception& e) {
-        MIDDLEWARE_LOG_ERROR("Exception in generateConvexHullCollision: %s", e.what());
-        return false;
+    for (size_t i = 0; i < triangleCount; ++i) {
+        outCollisionData.indices.push_back(indices[i]);
     }
+
+    // Calculate bounding box as well
+    generateBoundingBoxCollision(vertices, outCollisionData);
+
+    return true;
 }
 
 bool CollisionProcessor::generateComplexCollision(const std::vector<float>& vertices,
                                                  const std::vector<uint32_t>& indices,
                                                  CollisionData& outCollisionData) {
-    try {
-        MIDDLEWARE_LOG_INFO("Generating complex collision (full mesh)");
+    // For complex collision, use the original mesh
+    outCollisionData.vertices = vertices;
+    outCollisionData.indices = indices;
 
-        // For complex collision, we use the full mesh geometry
-        // Validate the mesh first
-        if (!validateCollisionMesh(vertices, indices)) {
-            MIDDLEWARE_LOG_ERROR("Mesh validation failed for complex collision");
-            return false;
-        }
+    // Also calculate bounding primitives
+    generateBoundingBoxCollision(vertices, outCollisionData);
 
-        // Direct copy of vertices and indices
-        outCollisionData.vertices = vertices;
-        outCollisionData.indices = indices;
+    MIDDLEWARE_LOG_DEBUG("Generated complex collision: %zu vertices, %zu triangles",
+        vertices.size() / 3, indices.size() / 3);
 
-        MIDDLEWARE_LOG_INFO("Generated complex collision with %zu vertices and %zu triangles",
-                          vertices.size() / 3, indices.size() / 3);
-
-        return true;
-
-    } catch (const std::exception& e) {
-        MIDDLEWARE_LOG_ERROR("Exception in generateComplexCollision: %s", e.what());
-        return false;
-    }
+    return true;
 }
 
 bool CollisionProcessor::generateSimplifiedCollision(const std::vector<float>& vertices,
                                                     const std::vector<uint32_t>& indices,
                                                     CollisionData& outCollisionData) {
-    try {
-        MIDDLEWARE_LOG_INFO("Generating simplified collision (decimated mesh)");
+    // Simplify by using every nth triangle based on simplification ratio
+    std::vector<float> outVertices;
+    std::vector<uint32_t> outIndices;
 
-        // Validate inputs
-        if (!validateCollisionMesh(vertices, indices)) {
-            MIDDLEWARE_LOG_ERROR("Mesh validation failed for simplified collision");
-            return false;
-        }
+    if (decimateMesh(vertices, indices, simplificationRatio_, outVertices, outIndices)) {
+        outCollisionData.vertices = std::move(outVertices);
+        outCollisionData.indices = std::move(outIndices);
 
-        // Use mesh decimation to reduce triangle count
-        std::vector<float> decimatedVertices;
-        std::vector<uint32_t> decimatedIndices;
-
-        bool result = decimateMesh(vertices, indices, simplificationRatio_,
-                                  decimatedVertices, decimatedIndices);
-
-        if (!result) {
-            MIDDLEWARE_LOG_WARNING("Mesh decimation failed, using original mesh");
-            decimatedVertices = vertices;
-            decimatedIndices = indices;
-        }
-
-        outCollisionData.vertices = std::move(decimatedVertices);
-        outCollisionData.indices = std::move(decimatedIndices);
-
-        MIDDLEWARE_LOG_INFO("Generated simplified collision: %zu vertices, %zu triangles (%.1f%% of original)",
-                          outCollisionData.vertices.size() / 3,
-                          outCollisionData.indices.size() / 3,
-                          (float(outCollisionData.indices.size()) / float(indices.size())) * 100.0f);
+        // Calculate bounding primitives
+        generateBoundingBoxCollision(outCollisionData.vertices, outCollisionData);
 
         return true;
-
-    } catch (const std::exception& e) {
-        MIDDLEWARE_LOG_ERROR("Exception in generateSimplifiedCollision: %s", e.what());
-        return false;
     }
+
+    // Fallback to complex collision
+    return generateComplexCollision(vertices, indices, outCollisionData);
 }
 
 bool CollisionProcessor::generateConvexDecomposition(const std::vector<float>& vertices,
                                                     const std::vector<uint32_t>& indices,
                                                     CollisionData& outCollisionData) {
-    try {
-        MIDDLEWARE_LOG_INFO("Generating convex decomposition collision");
+    MIDDLEWARE_LOG_INFO("Convex decomposition not fully implemented - using convex hull approach");
 
-        // This is a placeholder for V-HACD integration
-        // For now, we'll create multiple convex hulls by splitting the mesh
-
-        MIDDLEWARE_LOG_WARNING("Convex decomposition not fully implemented - using simplified approach");
-
-        // Fall back to convex hull for now
-        return generateConvexHullCollision(vertices, indices, outCollisionData);
-
-    } catch (const std::exception& e) {
-        MIDDLEWARE_LOG_ERROR("Exception in generateConvexDecomposition: %s", e.what());
-        return false;
-    }
-}
-
-// Helper methods implementation
-void CollisionProcessor::calculateBoundingBox(const std::vector<float>& vertices,
-                                             glm::vec3& minBounds,
-                                             glm::vec3& maxBounds) {
-    if (vertices.size() < 3) {
-        minBounds = maxBounds = glm::vec3(0.0f);
-        return;
-    }
-
-    minBounds = glm::vec3(vertices[0], vertices[1], vertices[2]);
-    maxBounds = minBounds;
-
-    for (size_t i = 3; i < vertices.size(); i += 3) {
-        glm::vec3 vertex(vertices[i], vertices[i + 1], vertices[i + 2]);
-
-        if (std::isfinite(vertex.x) && std::isfinite(vertex.y) && std::isfinite(vertex.z)) {
-            minBounds = glm::min(minBounds, vertex);
-            maxBounds = glm::max(maxBounds, vertex);
-        }
-    }
+    // For now, fallback to convex hull
+    return generateConvexHullCollision(vertices, indices, outCollisionData);
 }
 
 bool CollisionProcessor::decimateMesh(const std::vector<float>& vertices,
@@ -480,64 +382,65 @@ bool CollisionProcessor::decimateMesh(const std::vector<float>& vertices,
                                      float ratio,
                                      std::vector<float>& outVertices,
                                      std::vector<uint32_t>& outIndices) {
-    if (ratio <= 0.0f || ratio >= 1.0f) {
-        MIDDLEWARE_LOG_ERROR("Invalid decimation ratio: %f", ratio);
+    if (ratio <= 0.0f || ratio > 1.0f) {
+        MIDDLEWARE_LOG_ERROR("Invalid decimation ratio: %.3f", ratio);
         return false;
     }
 
     try {
-        // Simple decimation: keep every Nth triangle
+        // Simple decimation: take every nth triangle
         size_t targetTriangles = static_cast<size_t>(indices.size() / 3 * ratio);
+        targetTriangles = std::max(targetTriangles, static_cast<size_t>(1)); // At least 1 triangle
+
         size_t step = indices.size() / 3 / targetTriangles;
+        step = std::max(step, static_cast<size_t>(1));
 
-        if (step < 1) step = 1;
+        // Collect used vertices
+        std::vector<bool> usedVertices(vertices.size() / 3, false);
+        outIndices.clear();
 
-        std::unordered_set<uint32_t> usedVertices;
-        std::vector<uint32_t> newIndices;
-
-        // Keep every 'step'th triangle
         for (size_t i = 0; i < indices.size(); i += step * 3) {
-            if (i + 2 >= indices.size()) break;
+            if (i + 2 < indices.size()) {
+                uint32_t idx1 = indices[i];
+                uint32_t idx2 = indices[i + 1];
+                uint32_t idx3 = indices[i + 2];
 
-            uint32_t i0 = indices[i];
-            uint32_t i1 = indices[i + 1];
-            uint32_t i2 = indices[i + 2];
+                if (idx1 < vertices.size() / 3 && idx2 < vertices.size() / 3 && idx3 < vertices.size() / 3) {
+                    usedVertices[idx1] = true;
+                    usedVertices[idx2] = true;
+                    usedVertices[idx3] = true;
 
-            // Validate indices
-            if (i0 * 3 + 2 >= vertices.size() ||
-                i1 * 3 + 2 >= vertices.size() ||
-                i2 * 3 + 2 >= vertices.size()) {
-                continue;
+                    outIndices.push_back(idx1);
+                    outIndices.push_back(idx2);
+                    outIndices.push_back(idx3);
+                }
             }
-
-            usedVertices.insert(i0);
-            usedVertices.insert(i1);
-            usedVertices.insert(i2);
-
-            newIndices.push_back(i0);
-            newIndices.push_back(i1);
-            newIndices.push_back(i2);
         }
 
-        // Copy used vertices (note: this is simplified - indices would need remapping in a full implementation)
+        // Copy used vertices
         outVertices.clear();
-        outVertices.reserve(usedVertices.size() * 3);
+        std::vector<uint32_t> vertexMapping(vertices.size() / 3);
+        uint32_t newIndex = 0;
 
-        for (uint32_t vertexIndex : usedVertices) {
-            size_t baseIndex = vertexIndex * 3;
-            outVertices.push_back(vertices[baseIndex]);
-            outVertices.push_back(vertices[baseIndex + 1]);
-            outVertices.push_back(vertices[baseIndex + 2]);
+        for (size_t i = 0; i < usedVertices.size(); ++i) {
+            if (usedVertices[i]) {
+                vertexMapping[i] = newIndex++;
+                outVertices.push_back(vertices[i * 3]);
+                outVertices.push_back(vertices[i * 3 + 1]);
+                outVertices.push_back(vertices[i * 3 + 2]);
+            }
         }
 
-        outIndices = std::move(newIndices);
+        // Update indices to use new vertex mapping
+        for (uint32_t& index : outIndices) {
+            index = vertexMapping[index];
+        }
 
         MIDDLEWARE_LOG_DEBUG("Decimated mesh: %zu -> %zu triangles (%.1f%%)",
-                           indices.size() / 3, outIndices.size() / 3,
-                           (float(outIndices.size()) / float(indices.size())) * 100.0f);
+            indices.size() / 3, outIndices.size() / 3,
+            (float(outIndices.size()) / float(indices.size())) * 100.0f);
 
         return true;
-
     } catch (const std::exception& e) {
         MIDDLEWARE_LOG_ERROR("Exception in decimateMesh: %s", e.what());
         return false;
