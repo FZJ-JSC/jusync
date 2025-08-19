@@ -72,3 +72,4 @@ Thumbs.db
 # Project specific temporary files
 # Add your project-specific temporary files here
 
+build_docker/

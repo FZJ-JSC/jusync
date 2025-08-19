@@ -78,29 +78,38 @@ public:
         middleware.stopReceiving();
     }
 
-    void run() {
-        std::cout << "🔄 ZMQ USD Processor running... Press 'q' + Enter to quit" << std::endl;
+ void run() {
+    std::cout << "🔄 ZMQ USD Processor running... Press 'q' + Enter to quit" << std::endl;
+    std::string line;
+    while (std::getline(std::cin, line) && !shutdownRequested.load()) {  // ✅ READ FULL LINE
+        std::istringstream iss(line);
+        std::string command;
+        iss >> command;  // Get first word
 
-        std::string input;
-        while (std::cin >> input && input != "q" && !shutdownRequested.load()) {
-            if (input == "status") {
-                printStatus();
-            } else if (input == "stats") {
-                printStatistics();
-            } else if (input.substr(0, 4) == "test") {
-                if (input.length() > 5) {
-                    std::string filepath = input.substr(5);
-                    if (testDiskLoading(filepath)) {
-                        std::cout << "✅ Test completed successfully" << std::endl;
-                    } else {
-                        std::cout << "❌ Test failed" << std::endl;
-                    }
+        if (command == "q") {
+            break;
+        } else if (command == "status") {
+            printStatus();
+        } else if (command == "stats") {
+            printStatistics();
+        } else if (command == "test") {
+            std::string filepath;
+            iss >> filepath;  // ✅ GET FILEPATH FROM SAME LINE
+            if (!filepath.empty()) {
+                if (testDiskLoading(filepath)) {
+                    std::cout << "✅ Test completed successfully" << std::endl;
+                } else {
+                    std::cout << "❌ Test failed" << std::endl;
                 }
             } else {
-                std::cout << "Commands: status, stats, test <filepath>, q" << std::endl;
+                std::cout << "Usage: test <filepath>" << std::endl;
             }
+        } else {
+            std::cout << "Commands: status, stats, test <filepath>, q" << std::endl;
         }
     }
+}
+
 
     bool testDiskLoading(const std::string& filePath) {
         std::cout << "🧪 Testing disk loading: " << filePath << std::endl;
