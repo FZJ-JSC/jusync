@@ -2,9 +2,9 @@ name: USD Middleware CI/CD
 
 on:
   push:
-    branches: [ main, develop ]
   pull_request:
-    branches: [ main ]
+    branches: [ main ] 
+
 
 jobs:
   # Job 1: Build the Docker image ONCE and save it as an artifact for all jobs
