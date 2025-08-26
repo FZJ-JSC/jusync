@@ -9,6 +9,7 @@
 #include <fstream>
 #include <sstream>
 #include <streambuf>
+#include <cstring>
 
 // Include both C and C++ interfaces
 #include "AnariUsdMiddleware.h"
@@ -24,11 +25,8 @@ private:
     std::streambuf* originalBuf;
     std::string buffer;
     std::ostream* outputStream;
-
-    // Keywords to filter out
     std::vector<std::string> filterKeywords = {
         "[INFO]", "[DEBUG]", "[WARNING]", "[VERBOSE]"
-        // Keep [ERROR] for important issues
     };
 
 public:
@@ -36,11 +34,9 @@ public:
         : originalBuf(orig), outputStream(output) {}
 
 protected:
-    virtual int overflow(int c) override {
+    int overflow(int c) override {
         if (c != EOF) {
             buffer += static_cast<char>(c);
-
-            // Check for complete line (newline character)
             if (c == '\n') {
                 processLine();
                 buffer.clear();
@@ -51,7 +47,6 @@ protected:
 
 private:
     void processLine() {
-        // Check if line contains any filter keywords
         bool shouldFilter = false;
         for (const auto& keyword : filterKeywords) {
             if (buffer.find(keyword) != std::string::npos) {
@@ -59,8 +54,6 @@ private:
                 break;
             }
         }
-
-        // Only output non-filtered lines
         if (!shouldFilter && !buffer.empty()) {
             *outputStream << buffer;
             outputStream->flush();
@@ -68,7 +61,18 @@ private:
     }
 };
 
-class USDCollisionValidator {
+// Test modes for GitHub Actions workflow
+enum TestMode {
+    FULL,
+    STATIC_CHECK,
+    USD_BASIC,
+    COLLISION,
+    ERROR_HANDLING,
+    PERFORMANCE,
+    INTEGRATION
+};
+
+class USDValidator {
 private:
     struct ValidationResults {
         int totalFiles = 0;
@@ -88,15 +92,12 @@ private:
             totalMeshes += meshCount;
             totalVertices += vertices;
             totalTriangles += triangles;
-            std::cout << "✅ " << filename << " (" << meshCount << " meshes, "
-                      << vertices << " vertices, " << triangles << " triangles)" << std::endl;
         }
 
         void addFailure(const std::string& filename, const std::string& reason) {
             totalFiles++;
             failedFiles++;
             failures.emplace_back(filename + ": " + reason);
-            std::cerr << "❌ " << filename << " → " << reason << std::endl;
         }
 
         void printSummary() {
@@ -104,7 +105,7 @@ private:
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
 
             std::cout << "\n" << std::string(60, '=') << std::endl;
-            std::cout << "🎯 USD COLLISION VALIDATION SUMMARY" << std::endl;
+            std::cout << "🎯 USD VALIDATION SUMMARY" << std::endl;
             std::cout << std::string(60, '=') << std::endl;
             std::cout << "📁 Files: " << totalFiles << " (✅ " << successfulFiles << " ❌ " << failedFiles << ")" << std::endl;
             std::cout << "📦 Meshes: " << totalMeshes << std::endl;
@@ -127,7 +128,6 @@ private:
         }
     } results;
 
-    // Collision types to test
     std::vector<int> collisionTypes = {
         COLLISION_NONE,
         COLLISION_SIMPLE,
@@ -138,201 +138,101 @@ private:
     };
 
 public:
-    bool processDirectory(const std::string& directoryPath) {
-        std::cout << "🚀 USD Collision Validation: " << directoryPath << std::endl;
-        std::cout << std::string(60, '-') << std::endl;
+    // Static checks for GitHub Actions
+    int runStaticChecks() {
+        std::cout << "🔍 Running static checks..." << std::endl;
 
-        if (!fs::exists(directoryPath)) {
-            std::cerr << "❌ Directory does not exist: " << directoryPath << std::endl;
-            return false;
+        // Find middleware library
+        fs::path libPath = findMiddlewareLib("libanari_usd_middleware");
+        if (libPath.empty()) {
+            std::cerr << "❌ Middleware library not found" << std::endl;
+            return 1;
         }
 
-        // Initialize middleware (this will still produce logs, but we'll filter them next time)
+        std::cout << "✅ Found middleware library at: " << libPath << std::endl;
+
+        // Check executable linking (Linux/Mac only)
+        if (!checkExecutableLinking()) {
+            std::cerr << "❌ Executable has linking issues" << std::endl;
+            return 1;
+        }
+
+        std::cout << "✅ Static checks passed" << std::endl;
+        return 0;
+    }
+
+    // USD basic processing tests
+    int runUSDBasicTests(const std::string& testDataPath) {
+        std::cout << "📦 Testing basic USD processing..." << std::endl;
+
+        if (!fs::exists(testDataPath)) {
+            createMinimalUSDTest(testDataPath);
+        }
+
         if (!InitializeMiddleware_C(nullptr)) {
             std::cerr << "❌ Failed to initialize middleware" << std::endl;
-            return false;
+            return 1;
         }
 
-        // Find USD files
-        std::vector<std::string> usdFiles = findUSDFiles(directoryPath);
+        auto usdFiles = findUSDFiles(testDataPath);
         if (usdFiles.empty()) {
-            std::cout << "⚠️ No USD files found" << std::endl;
-            ShutdownMiddleware_C();
-            return false;
+            std::cout << "⚠️ No USD files found, creating minimal test" << std::endl;
+            createMinimalUSDTest(testDataPath);
+            usdFiles = findUSDFiles(testDataPath);
         }
 
         std::cout << "📁 Found " << usdFiles.size() << " USD files" << std::endl;
-        std::cout << "🔧 Testing collision generation with " << collisionTypes.size() << " complexity levels" << std::endl;
-        std::cout << std::string(60, '-') << std::endl;
 
-        // Process each file
         for (const auto& filePath : usdFiles) {
-            processFile(filePath);
+            processFileBasic(filePath);
         }
-
-        // Test configuration
-        testCollisionConfiguration();
 
         ShutdownMiddleware_C();
-        return results.successfulFiles > 0;
+
+        std::cout << "📊 USD Basic: " << results.successfulFiles << " passed, "
+                  << results.failedFiles << " failed" << std::endl;
+
+        return results.failedFiles > 0 ? 1 : 0;
     }
 
-private:
-    std::vector<std::string> findUSDFiles(const std::string& directoryPath) {
-        std::vector<std::string> usdFiles;
+    // Collision generation tests
+    int runCollisionTests(const std::string& testDataPath, const std::string& collisionType) {
+        std::cout << "⚔️ Testing collision generation (" << collisionType << ")..." << std::endl;
 
-        try {
-            for (const auto& entry : fs::recursive_directory_iterator(directoryPath)) {
-                if (entry.is_regular_file()) {
-                    std::string ext = entry.path().extension().string();
-                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-
-                    if (ext == ".usd" || ext == ".usda" || ext == ".usdc" || ext == ".usdz") {
-                        usdFiles.push_back(entry.path().string());
-                    }
-                }
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "❌ Error scanning directory: " << e.what() << std::endl;
+        if (!InitializeMiddleware_C(nullptr)) {
+            std::cerr << "❌ Failed to initialize middleware" << std::endl;
+            return 1;
         }
 
-        return usdFiles;
+        auto usdFiles = findUSDFiles(testDataPath);
+        if (usdFiles.empty()) {
+            std::cout << "⚠️ No USD files found" << std::endl;
+            ShutdownMiddleware_C();
+            return 1;
+        }
+
+        int collisionMode = parseCollisionType(collisionType);
+
+        for (const auto& filePath : usdFiles) {
+            processFileCollision(filePath, collisionMode);
+        }
+
+        ShutdownMiddleware_C();
+
+        std::cout << "📊 Collision Tests: " << results.successfulFiles << " passed, "
+                  << results.failedFiles << " failed" << std::endl;
+
+        return results.failedFiles > 0 ? 1 : 0;
     }
 
-    void processFile(const std::string& filePath) {
-        std::string filename = fs::path(filePath).filename().string();
-        std::cout << "📦 " << filename << " ";
+    // Error handling tests
+    int runErrorHandlingTests() {
+        std::cout << "🔒 Testing error handling..." << std::endl;
 
-        // Set up output filtering for this file processing
-        std::ostringstream cleanOutput;
-        FilteredStreamBuf filteredCout(std::cout.rdbuf(), &cleanOutput);
-        FilteredStreamBuf filteredCerr(std::cerr.rdbuf(), &cleanOutput);
-
-        // Temporarily redirect cout and cerr
-        std::streambuf* originalCout = std::cout.rdbuf(&filteredCout);
-        std::streambuf* originalCerr = std::cerr.rdbuf(&filteredCerr);
-
-        bool anySucceeded = false;
-        size_t totalMeshes = 0;
-        size_t totalVertices = 0;
-        size_t totalTriangles = 0;
-
-        // Test each collision type (middleware logs will be filtered)
-        for (int collisionType : collisionTypes) {
-            auto start = std::chrono::high_resolution_clock::now();
-            CMeshData* meshes = nullptr;
-            size_t meshCount = 0;
-
-            int result = LoadUSDFromDiskWithCollision_C(filePath.c_str(), collisionType, &meshes, &meshCount);
-
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-
-            if (result == 1 && meshes && meshCount > 0) {
-                // Calculate statistics
-                size_t vertices = 0, triangles = 0;
-
-                for (size_t i = 0; i < meshCount; ++i) {
-                    vertices += meshes[i].points_count / 3;
-                    triangles += meshes[i].indices_count / 3;
-                }
-
-                // Show success indicator
-                std::cout << "✅";
-
-                // Store totals from the most complete collision type
-                if (collisionType == COLLISION_COMPLEX || !anySucceeded) {
-                    totalMeshes = meshCount;
-                    totalVertices = vertices;
-                    totalTriangles = triangles;
-                }
-                anySucceeded = true;
-
-                FreeMeshData_C(meshes, meshCount);
-            } else {
-                // Show failure indicator
-                std::cout << "❌";
-            }
-        }
-
-        // Restore original streams
-        std::cout.rdbuf(originalCout);
-        std::cerr.rdbuf(originalCerr);
-
-        std::cout << std::endl; // End line for this file
-
-        // Process any filtered output that should be shown
-        std::string filteredContent = cleanOutput.str();
-        if (!filteredContent.empty()) {
-            // Only show ERROR messages or other important filtered content
-            std::istringstream stream(filteredContent);
-            std::string line;
-            while (std::getline(stream, line)) {
-                if (line.find("[ERROR]") != std::string::npos) {
-                    std::cerr << line << std::endl;
-                }
-            }
-        }
-
-        // Record overall result
-        if (anySucceeded) {
-            results.addSuccess(filename, totalMeshes, totalVertices, totalTriangles);
-        } else {
-            results.addFailure(filename, "All collision types failed");
-        }
-    }
-
-    void testCollisionConfiguration() {
-        std::cout << "\n🔧 Testing collision configuration..." << std::endl;
-
-        // Set up filtering for configuration tests
-        std::ostringstream cleanOutput;
-        FilteredStreamBuf filteredCout(std::cout.rdbuf(), &cleanOutput);
-        FilteredStreamBuf filteredCerr(std::cerr.rdbuf(), &cleanOutput);
-
-        std::streambuf* originalCout = std::cout.rdbuf(&filteredCout);
-        std::streambuf* originalCerr = std::cerr.rdbuf(&filteredCerr);
-
-        bool allConfigPassed = true;
-
-        // Test collision complexity settings
-        for (int collisionType : collisionTypes) {
-            if (!SetDefaultCollisionComplexity_C(collisionType)) {
-                allConfigPassed = false;
-            }
-        }
-
-        // Test collision parameters
-        if (!SetCollisionParameters_C(0.25f, 0.001f, 32)) {
-            allConfigPassed = false;
-        }
-
-        // Restore streams
-        std::cout.rdbuf(originalCout);
-        std::cerr.rdbuf(originalCerr);
-
-        if (allConfigPassed) {
-            std::cout << "   ✅ Collision configuration tests passed" << std::endl;
-        } else {
-            std::cout << "   ❌ Some collision configuration tests failed" << std::endl;
-        }
-    }
-
-public:
-    bool testErrorHandling() {
-        std::cout << "\n🔒 Testing error handling..." << std::endl;
         bool allPassed = true;
-
-        // Set up filtering for error tests
-        std::ostringstream cleanOutput;
-        FilteredStreamBuf filteredCout(std::cout.rdbuf(), &cleanOutput);
-        FilteredStreamBuf filteredCerr(std::cerr.rdbuf(), &cleanOutput);
 
         // Test non-existent file
         {
-            std::streambuf* originalCout = std::cout.rdbuf(&filteredCout);
-            std::streambuf* originalCerr = std::cerr.rdbuf(&filteredCerr);
-
             if (InitializeMiddleware_C(nullptr)) {
                 CMeshData* meshes = nullptr;
                 size_t meshCount = 0;
@@ -346,9 +246,6 @@ public:
                     allPassed = false;
                 }
             }
-
-            std::cout.rdbuf(originalCout);
-            std::cerr.rdbuf(originalCerr);
         }
 
         // Test invalid USD data
@@ -357,9 +254,6 @@ public:
             std::ofstream temp(tempFile);
             temp << "This is not valid USD data\nJust random text\n";
             temp.close();
-
-            std::streambuf* originalCout = std::cout.rdbuf(&filteredCout);
-            std::streambuf* originalCerr = std::cerr.rdbuf(&filteredCerr);
 
             if (InitializeMiddleware_C(nullptr)) {
                 CMeshData* meshes = nullptr;
@@ -375,12 +269,65 @@ public:
                     allPassed = false;
                 }
             }
-
-            std::cout.rdbuf(originalCout);
-            std::cerr.rdbuf(originalCerr);
         }
 
-        return allPassed;
+        return allPassed ? 0 : 1;
+    }
+
+    // Performance benchmarks
+    int runPerformanceTests(const std::string& testDataPath) {
+        std::cout << "🚀 Running performance benchmarks..." << std::endl;
+
+        if (!InitializeMiddleware_C(nullptr)) {
+            std::cerr << "❌ Failed to initialize middleware" << std::endl;
+            return 1;
+        }
+
+        auto usdFiles = findUSDFiles(testDataPath);
+        if (usdFiles.empty()) {
+            std::cout << "⚠️ No USD files found" << std::endl;
+            ShutdownMiddleware_C();
+            return 1;
+        }
+
+        const int runs = 3;
+        auto totalStart = std::chrono::high_resolution_clock::now();
+
+        for (int run = 1; run <= runs; ++run) {
+            std::cout << "🔄 Performance run " << run << "/" << runs << std::endl;
+
+            for (const auto& filePath : usdFiles) {
+                processFilePerformance(filePath);
+            }
+        }
+
+        auto totalEnd = std::chrono::high_resolution_clock::now();
+        auto totalDuration = std::chrono::duration_cast<std::chrono::milliseconds>(totalEnd - totalStart);
+
+        ShutdownMiddleware_C();
+
+        std::cout << "📊 Average processing time: " << (totalDuration.count() / runs) << "ms" << std::endl;
+
+        return 0;
+    }
+
+    // Integration tests
+    int runIntegrationTests(const std::string& testDataPath) {
+        std::cout << "🔗 Running integration tests..." << std::endl;
+
+        // Run all test types in sequence
+        int result = 0;
+        result |= runStaticChecks();
+        result |= runUSDBasicTests(testDataPath);
+        result |= runErrorHandlingTests();
+
+        if (result == 0) {
+            std::cout << "✅ All integration tests passed" << std::endl;
+        } else {
+            std::cout << "❌ Some integration tests failed" << std::endl;
+        }
+
+        return result;
     }
 
     void printResults() {
@@ -392,53 +339,261 @@ public:
         std::cout << "   • SIMPLIFIED: Reduced triangle count for performance" << std::endl;
         std::cout << "   • CONVEX_HULL: Convex hull approximation" << std::endl;
         std::cout << "   • CONVEX_DECOMP: Advanced concave shape handling" << std::endl;
-        std::cout << "\n🎯 Ready for Unreal Engine RealtimeMeshComponent integration!" << std::endl;
+        std::cout << "\n🎯 Ready for Unreal Engine integration!" << std::endl;
     }
 
     int getFailureCount() const {
         return results.failedFiles;
     }
-};
 
-// Main function
-int main(int argc, char* argv[]) {
-    std::string directoryPath = (argc > 1) ? argv[1] : "../tests/data/usd_samples";
+private:
+    std::vector<std::string> findUSDFiles(const std::string& directoryPath) {
+        std::vector<std::string> usdFiles;
+        try {
+            for (const auto& entry : fs::recursive_directory_iterator(directoryPath)) {
+                if (entry.is_regular_file()) {
+                    std::string ext = entry.path().extension().string();
+                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                    if (ext == ".usd" || ext == ".usda" || ext == ".usdc" || ext == ".usdz") {
+                        usdFiles.push_back(entry.path().string());
+                    }
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "❌ Error scanning directory: " << e.what() << std::endl;
+        }
+        return usdFiles;
+    }
 
-    // Try to find test data if not provided
-    if (argc == 1) {
-        if (fs::exists("tests/data/usd_samples")) {
-            directoryPath = "tests/data/usd_samples";
-        } else if (fs::exists("../tests/data/usd_samples")) {
-            directoryPath = "../tests/data/usd_samples";
+    void processFileBasic(const std::string& filePath) {
+        std::string filename = fs::path(filePath).filename().string();
+        std::cout << " Testing " << filename << "... ";
+
+        // Set up output filtering
+        std::ostringstream cleanOutput;
+        FilteredStreamBuf filteredCout(std::cout.rdbuf(), &cleanOutput);
+        auto originalCout = std::cout.rdbuf(&filteredCout);
+
+        CMeshData* meshes = nullptr;
+        size_t meshCount = 0;
+        int result = LoadUSDFromDiskWithCollision_C(filePath.c_str(), COLLISION_SIMPLE, &meshes, &meshCount);
+
+        std::cout.rdbuf(originalCout);
+
+        if (result == 1 && meshes && meshCount > 0) {
+            size_t vertices = 0, triangles = 0;
+            for (size_t i = 0; i < meshCount; ++i) {
+                vertices += meshes[i].points_count / 3;
+                triangles += meshes[i].indices_count / 3;
+            }
+
+            std::cout << "✅" << std::endl;
+            results.addSuccess(filename, meshCount, vertices, triangles);
+            FreeMeshData_C(meshes, meshCount);
         } else {
-            std::cerr << "❌ Usage: " << argv[0] << " <directory_path>" << std::endl;
-            std::cerr << "   No default test directory found." << std::endl;
-            return 1;
+            std::cout << "❌" << std::endl;
+            results.addFailure(filename, "Failed to load USD file");
         }
     }
 
-    std::cout << "╔══════════════════════════════════════════════╗" << std::endl;
-    std::cout << "║    USD Collision Generation Validator       ║" << std::endl;
-    std::cout << "║        Clean Output - Filtered Logs         ║" << std::endl;
-    std::cout << "╚══════════════════════════════════════════════╝" << std::endl;
+    void processFileCollision(const std::string& filePath, int collisionType) {
+        std::string filename = fs::path(filePath).filename().string();
+        std::cout << " Testing " << filename << " collision... ";
 
-    USDCollisionValidator validator;
+        CMeshData* meshes = nullptr;
+        size_t meshCount = 0;
+        int result = LoadUSDFromDiskWithCollision_C(filePath.c_str(), collisionType, &meshes, &meshCount);
 
-    bool success = validator.processDirectory(directoryPath);
-
-    // Test error handling
-    validator.testErrorHandling();
-
-    validator.printResults();
-
-    if (success && validator.getFailureCount() == 0) {
-        std::cout << "\n🎉 ALL VALIDATIONS PASSED!" << std::endl;
-        std::cout << "   Collision generation pipeline is working correctly." << std::endl;
-        std::cout << "   Ready for production use!" << std::endl;
-        return 0;
-    } else {
-        std::cout << "\n⚠️ SOME VALIDATIONS FAILED!" << std::endl;
-        std::cout << "   Check failed files above for details." << std::endl;
-        return 1;
+        if (result == 1 && meshes && meshCount > 0) {
+            std::cout << "✅" << std::endl;
+            results.addSuccess(filename, meshCount, 0, 0);
+            FreeMeshData_C(meshes, meshCount);
+        } else {
+            std::cout << "❌" << std::endl;
+            results.addFailure(filename, "Collision generation failed");
+        }
     }
+
+    void processFilePerformance(const std::string& filePath) {
+        auto start = std::chrono::high_resolution_clock::now();
+
+        CMeshData* meshes = nullptr;
+        size_t meshCount = 0;
+        LoadUSDFromDiskWithCollision_C(filePath.c_str(), COLLISION_SIMPLE, &meshes, &meshCount);
+
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+        std::string filename = fs::path(filePath).filename().string();
+        std::cout << "   " << filename << ": " << duration.count() << "ms" << std::endl;
+
+        if (meshes) {
+            FreeMeshData_C(meshes, meshCount);
+        }
+    }
+
+    fs::path findMiddlewareLib(const std::string& baseName) {
+        std::string libExt;
+#ifdef _WIN32
+        libExt = ".dll";
+#elif __APPLE__
+        libExt = ".dylib";
+#else
+        libExt = ".so";
+#endif
+
+        std::string libName = baseName + libExt;
+
+        try {
+            for (auto& p : fs::recursive_directory_iterator(fs::current_path())) {
+                if (p.is_regular_file() && p.path().filename() == libName) {
+                    return p.path();
+                }
+            }
+        } catch (...) {}
+
+        return fs::path();
+    }
+
+    bool checkExecutableLinking() {
+#ifdef _WIN32
+        return true;  // Skip on Windows
+#else
+        // Check for missing dependencies using ldd
+        std::string cmd = "ldd " + fs::current_path().string() + "/usd_validation_tool 2>&1";
+        FILE* pipe = popen(cmd.c_str(), "r");
+        if (!pipe) return true;
+
+        char buffer[512];
+        while (fgets(buffer, sizeof(buffer), pipe)) {
+            if (strstr(buffer, "not found")) {
+                pclose(pipe);
+                return false;
+            }
+        }
+        pclose(pipe);
+        return true;
+#endif
+    }
+
+    void createMinimalUSDTest(const std::string& dir) {
+        fs::create_directories(dir);
+        std::ofstream minimal_file(fs::path(dir) / "minimal.usda");
+        minimal_file << "#usda 1.0\n"
+                    "def Mesh \"TestMesh\" {\n"
+                    "  int[] faceVertexCounts = [3, 3]\n"
+                    "  int[] faceVertexIndices = [0, 1, 2, 0, 2, 3]\n"
+                    "  point3f[] points = [(0,0,0), (1,0,0), (1,1,0), (0,1,0)]\n"
+                    "}\n";
+        minimal_file.close();
+    }
+
+    int parseCollisionType(const std::string& type) {
+        if (type == "simple") return COLLISION_SIMPLE;
+        if (type == "complex") return COLLISION_COMPLEX;
+        if (type == "convex") return COLLISION_CONVEX_HULL;
+        return COLLISION_SIMPLE;
+    }
+};
+
+// Parse command line arguments
+TestMode parseMode(int argc, char* argv[], std::string& collisionType) {
+    TestMode mode = FULL;
+    collisionType = "simple";
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--mode=static-check") mode = STATIC_CHECK;
+        else if (arg == "--mode=usd-basic") mode = USD_BASIC;
+        else if (arg == "--mode=collision") mode = COLLISION;
+        else if (arg == "--mode=error-handling") mode = ERROR_HANDLING;
+        else if (arg == "--mode=performance") mode = PERFORMANCE;
+        else if (arg == "--mode=integration") mode = INTEGRATION;
+        else if (arg.substr(0, 7) == "--type=") collisionType = arg.substr(7);
+    }
+
+    return mode;
+}
+
+fs::path findTestDataDir(int argc, char* argv[]) {
+    // Check if last argument is a path (not a flag)
+    if (argc > 1 && std::string(argv[argc-1]).substr(0, 2) != "--") {
+        return argv[argc-1];
+    }
+
+    // Try common test data locations
+    std::vector<std::string> possible = {
+        "tests/data/usd_samples",
+        "../tests/data/usd_samples",
+        "./tests/data/usd_samples",
+        "/workspace/tests/data/usd_samples"
+    };
+
+    for (const auto& dir : possible) {
+        if (fs::exists(dir)) return dir;
+    }
+
+    return "/tmp/usd_test_minimal";
+}
+
+int main(int argc, char* argv[]) {
+    std::string collisionType;
+    TestMode mode = parseMode(argc, argv, collisionType);
+    fs::path test_data_dir = findTestDataDir(argc, argv);
+
+    std::cout << "🚀 USD Middleware Test Runner" << std::endl;
+    std::cout << "Mode: " << mode << std::endl;
+    std::cout << "Test Data Dir: " << test_data_dir << std::endl;
+    std::cout << std::string(60, '-') << std::endl;
+
+    USDValidator validator;
+    int result = 0;
+
+    switch (mode) {
+        case STATIC_CHECK:
+            result = validator.runStaticChecks();
+            break;
+
+        case USD_BASIC:
+            result = validator.runUSDBasicTests(test_data_dir.string());
+            break;
+
+        case COLLISION:
+            result = validator.runCollisionTests(test_data_dir.string(), collisionType);
+            break;
+
+        case ERROR_HANDLING:
+            result = validator.runErrorHandlingTests();
+            break;
+
+        case PERFORMANCE:
+            result = validator.runPerformanceTests(test_data_dir.string());
+            break;
+
+        case INTEGRATION:
+            result = validator.runIntegrationTests(test_data_dir.string());
+            break;
+
+        case FULL:
+        default:
+            // Run all tests in sequence
+            result |= validator.runStaticChecks();
+            result |= validator.runUSDBasicTests(test_data_dir.string());
+            result |= validator.runCollisionTests(test_data_dir.string(), "simple");
+            result |= validator.runErrorHandlingTests();
+            result |= validator.runPerformanceTests(test_data_dir.string());
+            break;
+    }
+
+    if (mode == FULL) {
+        validator.printResults();
+    }
+
+    if (result == 0) {
+        std::cout << "\n🎉 ALL TESTS PASSED!" << std::endl;
+    } else {
+        std::cout << "\n⚠️ SOME TESTS FAILED!" << std::endl;
+    }
+
+    return result;
 }

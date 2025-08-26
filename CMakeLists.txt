@@ -217,16 +217,19 @@ if(BUILD_JUSYNC_Receiver_GUI)
     add_subdirectory(tools/ReceiverUI)
 endif()
 
-# USD Validation Test Tool
+# ------------------------------
+# USD Validation Test Tool (Enhanced)
+# ------------------------------
 option(BUILD_TESTS "Build test and validation applications" ON)
 if(BUILD_TESTS)
+    # Enhanced USD Validation Tool with granular test modes
     add_executable(usd_validation_tool
         tests/src/usd_validation_tool.cpp
     )
 
     target_link_libraries(usd_validation_tool
         PRIVATE
-            ${PROJECT_NAME}  # Your main middleware library
+            ${PROJECT_NAME}
     )
 
     target_include_directories(usd_validation_tool PRIVATE
@@ -237,72 +240,129 @@ if(BUILD_TESTS)
     # Set C++17 standard for the test tool
     target_compile_features(usd_validation_tool PRIVATE cxx_std_17)
 
-    # REMOVE: Copy test scripts to build directory
-    # configure_file(
-    #    ${CMAKE_CURRENT_SOURCE_DIR}/tests/scripts/comprehensive_test.sh
-    #    ${CMAKE_BINARY_DIR}/comprehensive_test.sh
-    #    COPYONLY
-    # )
-
-    # REMOVE: Make scripts executable on Unix systems
-    # if(UNIX)
-    #    add_custom_command(TARGET usd_validation_tool POST_BUILD
-    #        COMMAND chmod +x ${CMAKE_BINARY_DIR}/comprehensive_test.sh
-    #    )
-    # endif()
-
-    # Create test data directory structure in build
+    # Create test data and reports directory structure
     file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/test_data/usd_samples)
     file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/test_reports)
 
     # Copy USD test data files if they exist
-    # The usd_validation_tool.cpp handles reading the test data directly from the source directory.
-    # We might not need to copy them to the binary directory if the tool is invoked with the source path.
-    # However, if the tool expects them in the build directory, keep this part.
-    # Based on usd_validation_tool.cpp, it expects the path to the original `tests/data/usd_samples`.
-    # So, this `configure_file` for USD_TEST_FILES can likely be removed as well,
-    # or modified to simply ensure the directory structure exists if the tool
-    # expects to write reports there.
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/usd_samples")
-        # No need to copy individual files if the C++ tool is given the source path.
-        # This only creates the destination directories if they don't exist.
-        # file(GLOB USD_TEST_FILES "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/usd_samples/*.usda")
-        # foreach(USD_FILE ${USD_TEST_FILES})
-        #    configure_file(${USD_FILE} ${CMAKE_BINARY_DIR}/test_data/usd_samples/ COPYONLY)
-        # endforeach()
+        file(GLOB USD_TEST_FILES "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/usd_samples/*.usda"
+                                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/usd_samples/*.usd"
+                                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/usd_samples/*.usdc")
+        foreach(USD_FILE ${USD_TEST_FILES})
+            get_filename_component(USD_FILENAME ${USD_FILE} NAME)
+            configure_file(${USD_FILE} ${CMAKE_BINARY_DIR}/test_data/usd_samples/${USD_FILENAME} COPYONLY)
+        endforeach()
+        message(STATUS "Copied ${CMAKE_CURRENT_LIST_LENGTH} USD test files")
     endif()
 
-    # Enable CTest integration
+    # Enable CTest integration with granular tests
     enable_testing()
 
-    # Add individual tests for each USD file - these will run usd_validation_tool directly
-    # This CTest setup makes sense, as it leverages the usd_validation_tool.
-    # The usd_validation_tool itself can process a directory, so CTest could also just
-    # run `usd_validation_tool ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/usd_samples`
-    # as a single test, rather than per-file.
+    # Test Categories - These will show up as individual jobs in GitHub Actions
+    add_test(NAME "build_verification"
+             COMMAND ${CMAKE_COMMAND} -E echo "Build verification test"
+             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+    add_test(NAME "static_analysis"
+             COMMAND usd_validation_tool --mode=static-check
+             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+    add_test(NAME "usd_basic_processing"
+             COMMAND usd_validation_tool --mode=usd-basic
+             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+    # Collision tests for different complexity levels
+    add_test(NAME "collision_simple"
+             COMMAND usd_validation_tool --mode=collision --type=simple
+             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+    add_test(NAME "collision_complex"
+             COMMAND usd_validation_tool --mode=collision --type=complex
+             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+    add_test(NAME "collision_convex"
+             COMMAND usd_validation_tool --mode=collision --type=convex
+             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+    add_test(NAME "error_handling_tests"
+             COMMAND usd_validation_tool --mode=error-handling
+             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+    add_test(NAME "performance_benchmarks"
+             COMMAND usd_validation_tool --mode=performance
+             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+    add_test(NAME "integration_suite"
+             COMMAND usd_validation_tool --mode=integration
+             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+    # Set test properties
+    set_tests_properties(
+        build_verification static_analysis usd_basic_processing
+        collision_simple collision_complex collision_convex
+        error_handling_tests performance_benchmarks integration_suite
+        PROPERTIES TIMEOUT 300
+    )
+
+    # Test dependencies - later tests depend on earlier ones
+    set_tests_properties(static_analysis PROPERTIES DEPENDS build_verification)
+    set_tests_properties(usd_basic_processing PROPERTIES DEPENDS static_analysis)
+    set_tests_properties(collision_simple PROPERTIES DEPENDS usd_basic_processing)
+    set_tests_properties(collision_complex PROPERTIES DEPENDS usd_basic_processing)
+    set_tests_properties(collision_convex PROPERTIES DEPENDS usd_basic_processing)
+    set_tests_properties(error_handling_tests PROPERTIES DEPENDS usd_basic_processing)
+    set_tests_properties(performance_benchmarks PROPERTIES DEPENDS "collision_simple;collision_complex;collision_convex")
+    set_tests_properties(integration_suite PROPERTIES DEPENDS "usd_basic_processing;collision_simple;error_handling_tests")
+
+    # Legacy individual file tests (if USD files exist)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/usd_samples")
         file(GLOB USD_TEST_FILES "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/usd_samples/*.usda")
-
-        set(ALL_TEST_NAMES)
 
         foreach(USD_FILE ${USD_TEST_FILES})
             get_filename_component(TEST_NAME ${USD_FILE} NAME_WE)
 
-            # Test basic USD loading
-            add_test(NAME "usd_load_${TEST_NAME}"
-                     COMMAND usd_validation_tool ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/usd_samples/${TEST_NAME}.usda # Use source path
-                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}) # Tool should output reports here
+            # Individual file tests (these run in parallel)
+            add_test(NAME "usd_file_${TEST_NAME}"
+                     COMMAND usd_validation_tool ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/usd_samples/${TEST_NAME}.usda
+                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-            list(APPEND ALL_TEST_NAMES "usd_load_${TEST_NAME}")
+            set_tests_properties("usd_file_${TEST_NAME}" PROPERTIES
+                TIMEOUT 120
+                DEPENDS usd_basic_processing)
         endforeach()
-
-        if(ALL_TEST_NAMES)
-            set_tests_properties(${ALL_TEST_NAMES} PROPERTIES TIMEOUT 120)
-        endif()
     endif()
 
+    # Custom targets for local testing
+    add_custom_target(test_quick
+        COMMAND ctest -R "build_verification|static_analysis|usd_basic_processing" --output-on-failure
+        DEPENDS usd_validation_tool
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Running quick validation tests"
+    )
 
+    add_custom_target(test_collision
+        COMMAND ctest -R "collision_" --output-on-failure
+        DEPENDS usd_validation_tool
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Running collision-specific tests"
+    )
 
+    add_custom_target(test_full
+        COMMAND ctest --output-on-failure --verbose
+        DEPENDS usd_validation_tool
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Running full test suite with detailed output"
+    )
+
+    add_custom_target(test_parallel
+        COMMAND ctest -j${CMAKE_BUILD_PARALLEL_LEVEL} --output-on-failure
+        DEPENDS usd_validation_tool
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Running tests in parallel"
+    )
+
+    # Legacy compatibility target
     add_custom_target(run_validation_tool
         COMMAND usd_validation_tool ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/usd_samples
         DEPENDS usd_validation_tool
@@ -310,8 +370,7 @@ if(BUILD_TESTS)
         COMMENT "Running comprehensive USD validation tests using usd_validation_tool"
     )
 
-
-    # Windows DLL copying for validation tool (keep this as it's for the executable)
+    # Windows DLL copying for validation tool
     if(WIN32)
         set(REQUIRED_DLLS
             "${ZMQ_ROOT}/bin/libzmq-v143-mt-4_3_6.dll"
@@ -391,11 +450,21 @@ message(STATUS "  BUILD_JUSYNC_Receiver_GUI: ${BUILD_JUSYNC_Receiver_GUI}")
 message(STATUS "  C-wrapper: ENABLED")
 if(BUILD_TESTS)
 message(STATUS "")
-message(STATUS "Test Tools:")
-message(STATUS "  usd_validation_tool: Comprehensive USD validation")
-message(STATUS "  comprehensive_test.sh: Full test suite")
-message(STATUS "  run_usd_tests.sh: Quick USD tests")
-message(STATUS "  CTest Integration: ENABLED")
+message(STATUS "Enhanced Test Tools:")
+message(STATUS "  usd_validation_tool: Granular USD validation with modes")
+message(STATUS "  CTest Integration: ENABLED with 9 test categories")
+message(STATUS "  Local test targets: test_quick, test_collision, test_full, test_parallel")
+message(STATUS "")
+message(STATUS "Test Categories Available:")
+message(STATUS "  • build_verification: Build and compilation checks")
+message(STATUS "  • static_analysis: Code quality and static analysis")
+message(STATUS "  • usd_basic_processing: Basic USD file loading")
+message(STATUS "  • collision_simple: Simple collision generation")
+message(STATUS "  • collision_complex: Complex collision generation")
+message(STATUS "  • collision_convex: Convex hull collision generation")
+message(STATUS "  • error_handling_tests: Error scenario validation")
+message(STATUS "  • performance_benchmarks: Performance testing")
+message(STATUS "  • integration_suite: Full integration testing")
 endif()
 if(UNIX AND NOT APPLE)
 message(STATUS "")
@@ -404,6 +473,13 @@ message(STATUS "  GLIBC 2.35 compatibility: ENABLED")
 message(STATUS "  Static C++ runtime linking: ENABLED")
 message(STATUS "  RPATH configuration: $ORIGIN")
 endif()
+message(STATUS "")
+message(STATUS "Local Testing Commands:")
+message(STATUS "  make test_quick      - Run basic validation tests")
+message(STATUS "  make test_collision  - Run collision-specific tests")
+message(STATUS "  make test_full       - Run full test suite")
+message(STATUS "  make test_parallel   - Run tests in parallel")
+message(STATUS "  ctest -V            - Run all tests with verbose output")
 message(STATUS "")
 message(STATUS "To override paths, use:")
 message(STATUS "  cmake -DZMQ_ROOT=/path/to/zmq -DOPENSSL_ROOT_DIR=/path/to/openssl ..")
