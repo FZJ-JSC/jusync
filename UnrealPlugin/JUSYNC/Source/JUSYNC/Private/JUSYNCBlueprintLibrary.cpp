@@ -1,4 +1,6 @@
 #include "JUSYNCBlueprintLibrary.h"
+
+#include "JUSYNCModule.h"
 #include "JUSYNCSubsystem.h"
 #include "Engine/Engine.h"
 #include "Engine/Texture2D.h"
@@ -21,14 +23,14 @@ bool UJUSYNCBlueprintLibrary::InitializeJUSYNCMiddleware(const FString& Endpoint
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (!Subsystem)
     {
-        UE_LOG(LogTemp, Error, TEXT("JUSYNC Subsystem not available"));
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
         return false;
     }
 
     bool bResult = Subsystem->InitializeMiddleware(Endpoint);
     if (bResult)
     {
-        UE_LOG(LogTemp, Log, TEXT("JUSYNC Middleware initialized successfully"));
+        UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Middleware initialized successfully"));
         //DisplayDebugMessage(TEXT("JUSYNC Middleware Connected"), 3.0f, FLinearColor::Green);
     }
     else
@@ -117,7 +119,7 @@ bool UJUSYNCBlueprintLibrary::LoadUSDFromBuffer(const TArray<uint8>& Buffer, con
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (!Subsystem)
     {
-        UE_LOG(LogTemp, Error, TEXT("JUSYNC Subsystem not available for USD loading"));
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available for USD loading"));
         return false;
     }
 
@@ -127,7 +129,7 @@ bool UJUSYNCBlueprintLibrary::LoadUSDFromBuffer(const TArray<uint8>& Buffer, con
     {
         FString Message = FString::Printf(TEXT("Loaded USD: %s (%d meshes)"), *Filename, OutMeshData.Num());
         //DisplayDebugMessage(Message, 5.0f, FLinearColor::Green);
-        UE_LOG(LogTemp, Log, TEXT("USD Preview:\n%s"), *OutPreview);
+        UE_LOG(LogJUSYNC, Log, TEXT("USD Preview:\n%s"), *OutPreview);
     }
     else
     {
@@ -199,7 +201,7 @@ FJUSYNCTextureData UJUSYNCBlueprintLibrary::CreateTextureFromBuffer(const TArray
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (!Subsystem)
     {
-        UE_LOG(LogTemp, Error, TEXT("JUSYNC Subsystem not available for texture creation"));
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available for texture creation"));
         return EmptyTexture;
     }
 
@@ -224,14 +226,14 @@ UTexture2D* UJUSYNCBlueprintLibrary::CreateUETextureFromJUSYNC(const FJUSYNCText
 {
     if (!TextureData.IsValid())
     {
-        UE_LOG(LogTemp, Error, TEXT("Invalid texture data provided"));
+        UE_LOG(LogJUSYNC, Error, TEXT("Invalid texture data provided"));
         return nullptr;
     }
 
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (!Subsystem)
     {
-        UE_LOG(LogTemp, Error, TEXT("JUSYNC Subsystem not available"));
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
         return nullptr;
     }
 
@@ -261,7 +263,7 @@ bool UJUSYNCBlueprintLibrary::WriteGradientLineAsPNG(const TArray<uint8>& Buffer
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (!Subsystem)
     {
-        UE_LOG(LogTemp, Error, TEXT("JUSYNC Subsystem not available"));
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
         return false;
     }
 
@@ -290,7 +292,7 @@ bool UJUSYNCBlueprintLibrary::GetGradientLineAsPNGBuffer(const TArray<uint8>& Bu
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (!Subsystem)
     {
-        UE_LOG(LogTemp, Error, TEXT("JUSYNC Subsystem not available"));
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
         return false;
     }
 
@@ -315,20 +317,20 @@ bool UJUSYNCBlueprintLibrary::CreateRealtimeMeshFromJUSYNC(const FJUSYNCMeshData
 {
     if (!MeshData.IsValid())
     {
-        UE_LOG(LogTemp, Error, TEXT("Invalid mesh data provided"));
+        UE_LOG(LogJUSYNC, Error, TEXT("Invalid mesh data provided"));
         return false;
     }
 
     if (!RealtimeMeshComponent)
     {
-        UE_LOG(LogTemp, Error, TEXT("RealtimeMeshComponent is null"));
+        UE_LOG(LogJUSYNC, Error, TEXT("RealtimeMeshComponent is null"));
         return false;
     }
 
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (!Subsystem)
     {
-        UE_LOG(LogTemp, Error, TEXT("JUSYNC Subsystem not available"));
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
         return false;
     }
 
@@ -349,7 +351,7 @@ bool UJUSYNCBlueprintLibrary::BatchCreateRealtimeMeshesFromJUSYNC(const TArray<F
 {
     if (MeshDataArray.Num() != MeshComponents.Num())
     {
-        UE_LOG(LogTemp, Error, TEXT("Mesh data array and component array size mismatch"));
+        UE_LOG(LogJUSYNC, Error, TEXT("Mesh data array and component array size mismatch"));
         return false;
     }
 
@@ -364,7 +366,7 @@ bool UJUSYNCBlueprintLibrary::BatchCreateRealtimeMeshesFromJUSYNC(const TArray<F
         }
         else
         {
-            UE_LOG(LogTemp, Warning, TEXT("Failed to create RealtimeMesh %d: %s"), i, *MeshDataArray[i].ElementName);
+            UE_LOG(LogJUSYNC, Warning, TEXT("Failed to create RealtimeMesh %d: %s"), i, *MeshDataArray[i].ElementName);
             bAllSuccessful = false;
         }
     }
@@ -382,7 +384,7 @@ FJUSYNCRealtimeMeshData UJUSYNCBlueprintLibrary::ConvertToRealtimeMeshFormat(con
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (!Subsystem)
     {
-        UE_LOG(LogTemp, Error, TEXT("JUSYNC Subsystem not available"));
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
         return FJUSYNCRealtimeMeshData();
     }
 
@@ -404,7 +406,7 @@ bool UJUSYNCBlueprintLibrary::CheckForReceivedFiles(TArray<FJUSYNCFileData>& Out
         {
             FString Message = FString::Printf(TEXT("Received File: %s (%d bytes, %s)"),
                                             *FileData.Filename, FileData.Data.Num(), *FileData.FileType);
-            UE_LOG(LogTemp, Log, TEXT("%s"), *Message);
+            UE_LOG(LogJUSYNC, Log, TEXT("%s"), *Message);
             //DisplayDebugMessage(Message, 5.0f, FLinearColor::Blue);
         }
 
@@ -425,7 +427,7 @@ bool UJUSYNCBlueprintLibrary::CheckForReceivedMessages(TArray<FString>& OutRecei
         // Log received messages for debugging
         for (const FString& Message : ReceivedMessages)
         {
-            UE_LOG(LogTemp, Log, TEXT("Received Message: %s"), *Message);
+            UE_LOG(LogJUSYNC, Log, TEXT("Received Message: %s"), *Message);
             // Use FLinearColor constructor for Cyan color
             //DisplayDebugMessage(FString::Printf(TEXT("Message: %s"), *Message), 3.0f, FLinearColor(0.0f, 1.0f, 1.0f, 1.0f));
         }
@@ -441,7 +443,7 @@ void UJUSYNCBlueprintLibrary::ClearReceivedData()
     FScopeLock Lock(&DataMutex);
     ReceivedFiles.Empty();
     ReceivedMessages.Empty();
-    UE_LOG(LogTemp, Log, TEXT("JUSYNC received data cleared"));
+    UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC received data cleared"));
 }
 
 // ========== VALIDATION & UTILITIES ==========
@@ -571,19 +573,19 @@ void UJUSYNCBlueprintLibrary::DisplayDebugMessage(const FString& Message, float 
         GEngine->AddOnScreenDebugMessage(-1, Duration, Color.ToFColor(true), FString::Printf(TEXT("JUSYNC: %s"), *Message));
     }*/
 
-    UE_LOG(LogTemp, Log, TEXT("JUSYNC: %s"), *Message);
+    UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC: %s"), *Message);
 }
 
 void UJUSYNCBlueprintLibrary::LogJUSYNCMessage(const FString& Message, bool bIsError)
 {
     if (bIsError)
     {
-        UE_LOG(LogTemp, Error, TEXT("JUSYNC: %s"), *Message);
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC: %s"), *Message);
         //DisplayDebugMessage(Message, 5.0f, FLinearColor::Red);
     }
     else
     {
-        UE_LOG(LogTemp, Log, TEXT("JUSYNC: %s"), *Message);
+        UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC: %s"), *Message);
         //DisplayDebugMessage(Message, 3.0f, FLinearColor::White);
     }
 }
@@ -638,7 +640,7 @@ UJUSYNCSubsystem* UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem()
         }
     }
     
-    UE_LOG(LogTemp, Warning, TEXT("JUSYNC Subsystem not found in any world context"));
+    UE_LOG(LogJUSYNC, Warning, TEXT("JUSYNC Subsystem not found in any world context"));
     return nullptr;
 }
 
@@ -648,7 +650,7 @@ bool UJUSYNCBlueprintLibrary::ValidateBufferSize(const TArray<uint8>& Buffer, co
 {
     if (Buffer.Num() == 0)
     {
-        UE_LOG(LogTemp, Error, TEXT("%s: Buffer is empty"), *Context);
+        UE_LOG(LogJUSYNC, Error, TEXT("%s: Buffer is empty"), *Context);
         return false;
     }
 
@@ -656,7 +658,7 @@ bool UJUSYNCBlueprintLibrary::ValidateBufferSize(const TArray<uint8>& Buffer, co
     const size_t MaxSize = 1024 * 1024 * 1024; // 1GB limit from your middleware
     if (Buffer.Num() > MaxSize)
     {
-        UE_LOG(LogTemp, Error, TEXT("%s: Buffer too large (%d bytes, max: %llu)"), *Context, Buffer.Num(), MaxSize);
+        UE_LOG(LogJUSYNC, Error, TEXT("%s: Buffer too large (%d bytes, max: %llu)"), *Context, Buffer.Num(), MaxSize);
         return false;
     }
 
@@ -667,20 +669,20 @@ bool UJUSYNCBlueprintLibrary::ValidateFilePath(const FString& FilePath, const FS
 {
     if (FilePath.IsEmpty())
     {
-        UE_LOG(LogTemp, Error, TEXT("%s: File path is empty"), *Context);
+        UE_LOG(LogJUSYNC, Error, TEXT("%s: File path is empty"), *Context);
         return false;
     }
 
     if (FilePath.Len() > 1000)
     {
-        UE_LOG(LogTemp, Error, TEXT("%s: File path too long"), *Context);
+        UE_LOG(LogJUSYNC, Error, TEXT("%s: File path too long"), *Context);
         return false;
     }
 
     // Check for dangerous path patterns
     if (FilePath.Contains(TEXT("..")) || FilePath.Contains(TEXT("~/")))
     {
-        UE_LOG(LogTemp, Error, TEXT("%s: Unsafe file path detected: %s"), *Context, *FilePath);
+        UE_LOG(LogJUSYNC, Error, TEXT("%s: Unsafe file path detected: %s"), *Context, *FilePath);
         return false;
     }
 
@@ -715,7 +717,7 @@ FString UJUSYNCBlueprintLibrary::ExtractUSDAPreview(const TArray<uint8>& Buffer,
     
     SearchSize = FMath::Min(Buffer.Num(), SearchSize);
     
-    UE_LOG(LogTemp, Log, TEXT("ExtractUSDAPreview: Searching %d bytes of %d total"), 
+    UE_LOG(LogJUSYNC, Log, TEXT("ExtractUSDAPreview: Searching %d bytes of %d total"), 
            SearchSize, Buffer.Num());
 
     // Convert buffer to string with better handling
@@ -764,11 +766,11 @@ FString UJUSYNCBlueprintLibrary::ExtractUSDAPreview(const TArray<uint8>& Buffer,
     Preview += TEXT("=== END PREVIEW ===");
     
     // Debug logging
-    UE_LOG(LogTemp, Log, TEXT("ExtractUSDAPreview: Converted %d characters, %d lines"), 
+    UE_LOG(LogJUSYNC, Log, TEXT("ExtractUSDAPreview: Converted %d characters, %d lines"), 
            Content.Len(), Lines.Num());
     
     bool bHasVertexColors = Content.Contains(TEXT("primvars:color.timeSamples"));
-    UE_LOG(LogTemp, Log, TEXT("ExtractUSDAPreview: Contains vertex colors: %s"), 
+    UE_LOG(LogJUSYNC, Log, TEXT("ExtractUSDAPreview: Contains vertex colors: %s"), 
            bHasVertexColors ? TEXT("YES") : TEXT("NO"));
     
     return Preview;
@@ -792,7 +794,7 @@ void UJUSYNCBlueprintLibrary::ApplyEnhancedDefaultMaterial(URealtimeMeshComponen
             DynamicMaterial->SetScalarParameterValue(TEXT("Roughness"), 0.8f);
             DynamicMaterial->SetVectorParameterValue(TEXT("BaseColor"), FLinearColor::White);
             MeshComp->SetMaterial(0, DynamicMaterial);
-            UE_LOG(LogTemp, Log, TEXT("✅ Applied enhanced default material"));
+            UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied enhanced default material"));
         }
     }
 }
@@ -810,14 +812,14 @@ void UJUSYNCBlueprintLibrary::AsyncBatchSpawnInternal(
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (!Subsystem)
     {
-        UE_LOG(LogTemp, Error, TEXT("No subsystem for async spawn"));
+        UE_LOG(LogJUSYNC, Error, TEXT("No subsystem for async spawn"));
         return;
     }
 
     UWorld* World = Subsystem->GetWorld();
     if (!World)
     {
-        UE_LOG(LogTemp, Error, TEXT("No world for async spawn"));
+        UE_LOG(LogJUSYNC, Error, TEXT("No world for async spawn"));
         return;
     }
 
@@ -825,7 +827,7 @@ void UJUSYNCBlueprintLibrary::AsyncBatchSpawnInternal(
     int32 StartIndex = CurrentBatch * BatchSize;
     int32 EndIndex = FMath::Min(StartIndex + BatchSize, MeshDataArray.Num());
     
-    UE_LOG(LogTemp, Warning, TEXT("📦 Processing async batch %d: indices %d-%d with rotations"),
+    UE_LOG(LogJUSYNC, Log, TEXT("📦 Processing async batch %d: indices %d-%d with rotations"),
            CurrentBatch, StartIndex, EndIndex - 1);
 
     // Process current batch with rotations
@@ -839,7 +841,7 @@ void UJUSYNCBlueprintLibrary::AsyncBatchSpawnInternal(
         
         if (SpawnedActor)
         {
-            UE_LOG(LogTemp, Log, TEXT("✅ Async spawned mesh %d at %s with rotation %s"),
+            UE_LOG(LogJUSYNC, Log, TEXT("✅ Async spawned mesh %d at %s with rotation %s"),
                    i, *SpawnLocations[i].ToString(), *UERotation.ToString());
         }
     }
@@ -847,7 +849,7 @@ void UJUSYNCBlueprintLibrary::AsyncBatchSpawnInternal(
     // Check if we're done
     if (EndIndex >= MeshDataArray.Num())
     {
-        UE_LOG(LogTemp, Warning, TEXT("🎉 Async batch spawn complete: %d/%d successful"),
+        UE_LOG(LogJUSYNC, Log, TEXT("🎉 Async batch spawn complete: %d/%d successful"),
                SharedResults->Num(), MeshDataArray.Num());
         return;
     }
@@ -868,13 +870,13 @@ FString UJUSYNCBlueprintLibrary::DetectUSDContentType(const TArray<uint8>& Buffe
 {
     FString Content = ExtractUSDAPreview(Buffer, 200);
     
-    UE_LOG(LogTemp, Warning, TEXT("=== USD CONTENT TYPE DETECTION DEBUG ==="));
-    UE_LOG(LogTemp, Warning, TEXT("Buffer size: %d bytes"), Buffer.Num());
-    UE_LOG(LogTemp, Warning, TEXT("Content length: %d characters"), Content.Len());
+    UE_LOG(LogJUSYNC, Log, TEXT("=== USD CONTENT TYPE DETECTION DEBUG ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Buffer size: %d bytes"), Buffer.Num());
+    UE_LOG(LogJUSYNC, Log, TEXT("Content length: %d characters"), Content.Len());
     
     // Look for primvars:color.timeSamples
     bool bHasPrimvarsColor = Content.Contains(TEXT("primvars:color.timeSamples"));
-    UE_LOG(LogTemp, Warning, TEXT("Contains 'primvars:color.timeSamples': %s"), 
+    UE_LOG(LogJUSYNC, Log, TEXT("Contains 'primvars:color.timeSamples': %s"), 
            bHasPrimvarsColor ? TEXT("YES") : TEXT("NO"));
     
     if (bHasPrimvarsColor)
@@ -886,18 +888,18 @@ FString UJUSYNCBlueprintLibrary::DetectUSDContentType(const TArray<uint8>& Buffe
                                   Content.Contains(TEXT("), (1.")) ||
                                   (Content.Contains(TEXT("0: [(")) && Content.Contains(TEXT("), (")));
         
-        UE_LOG(LogTemp, Warning, TEXT("Contains actual color data patterns: %s"), 
+        UE_LOG(LogJUSYNC, Log, TEXT("Contains actual color data patterns: %s"), 
                bHasActualColorData ? TEXT("YES") : TEXT("NO"));
         
         // CRITICAL FIX: Prioritize actual color data over "None"
         if (bHasActualColorData)
         {
-            UE_LOG(LogTemp, Warning, TEXT("🎨 DETECTED: VERTEX_COLORS (actual color data found)"));
+            UE_LOG(LogJUSYNC, Log, TEXT("🎨 DETECTED: VERTEX_COLORS (actual color data found)"));
             return TEXT("VERTEX_COLORS");
         }
         else if (Content.Contains(TEXT("0: None")))
         {
-            UE_LOG(LogTemp, Warning, TEXT("🎨 DETECTED: TEXTURES (None values found, no color data)"));
+            UE_LOG(LogJUSYNC, Log, TEXT("🎨 DETECTED: TEXTURES (None values found, no color data)"));
             return TEXT("TEXTURES");
         }
     }
@@ -908,11 +910,11 @@ FString UJUSYNCBlueprintLibrary::DetectUSDContentType(const TArray<uint8>& Buffe
         Content.Contains(TEXT(".jpg")) ||
         Content.Contains(TEXT(".png")))
     {
-        UE_LOG(LogTemp, Warning, TEXT("🎨 DETECTED: TEXTURES (explicit references)"));
+        UE_LOG(LogJUSYNC, Log, TEXT("🎨 DETECTED: TEXTURES (explicit references)"));
         return TEXT("TEXTURES");
     }
     
-    UE_LOG(LogTemp, Warning, TEXT("🎨 DETECTED: GEOMETRY_ONLY"));
+    UE_LOG(LogJUSYNC, Log, TEXT("🎨 DETECTED: GEOMETRY_ONLY"));
     return TEXT("GEOMETRY_ONLY");
 }
 
@@ -931,8 +933,8 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocationsSync
         FinalRotations = GenerateDefaultRotations(MeshDataArray.Num());
     }
 
-    UE_LOG(LogTemp, Warning, TEXT("=== SYNC BATCH SPAWN WITH ROTATIONS ==="));
-    UE_LOG(LogTemp, Warning, TEXT("Processing %d meshes with locations and rotations"), MeshDataArray.Num());
+    UE_LOG(LogJUSYNC, Log, TEXT("=== SYNC BATCH SPAWN WITH ROTATIONS ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Processing %d meshes with locations and rotations"), MeshDataArray.Num());
 
     SpawnedActors.Reserve(MeshDataArray.Num());
     int32 SuccessCount = 0;
@@ -942,7 +944,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocationsSync
         // Convert ParaView rotation to UE rotation if needed
         FRotator UERotation = ConvertParaViewToUERotation(FinalRotations[i]);
         
-        UE_LOG(LogTemp, Warning, TEXT("🎯 Spawning mesh %d '%s' at location %s with rotation %s"),
+        UE_LOG(LogJUSYNC, Log, TEXT("🎯 Spawning mesh %d '%s' at location %s with rotation %s"),
                i, *MeshDataArray[i].ElementName, *SpawnLocations[i].ToString(), *UERotation.ToString());
 
         AActor* SpawnedActor = SpawnRealtimeMeshAtLocation(MeshDataArray[i], SpawnLocations[i], UERotation);
@@ -951,17 +953,17 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocationsSync
         if (SpawnedActor)
         {
             SuccessCount++;
-            UE_LOG(LogTemp, Warning, TEXT("✅ Successfully spawned at %s with rotation %s"),
+            UE_LOG(LogJUSYNC, Log, TEXT("✅ Successfully spawned at %s with rotation %s"),
                    *SpawnedActor->GetActorLocation().ToString(), 
                    *SpawnedActor->GetActorRotation().ToString());
         }
         else
         {
-            UE_LOG(LogTemp, Error, TEXT("❌ Failed to spawn mesh %d"), i);
+            UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to spawn mesh %d"), i);
         }
     }
 
-    UE_LOG(LogTemp, Warning, TEXT("=== SYNC BATCH SPAWN COMPLETE: %d/%d successful ==="),
+    UE_LOG(LogJUSYNC, Log, TEXT("=== SYNC BATCH SPAWN COMPLETE: %d/%d successful ==="),
            SuccessCount, MeshDataArray.Num());
     return SpawnedActors;
 }
@@ -976,7 +978,7 @@ FRotator UJUSYNCBlueprintLibrary::ConvertParaViewToUERotation(const FRotator& Pa
     UERotation.Yaw = -ParaViewRotation.Yaw;     // Flip yaw for handedness
     UERotation.Roll = ParaViewRotation.Roll;    // Keep roll
     
-    UE_LOG(LogTemp, Log, TEXT("Converted ParaView rotation %s to UE rotation %s"),
+    UE_LOG(LogJUSYNC, Log, TEXT("Converted ParaView rotation %s to UE rotation %s"),
            *ParaViewRotation.ToString(), *UERotation.ToString());
     
     return UERotation;
@@ -1012,14 +1014,14 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
     // Enhanced validation
     if (MeshDataArray.Num() != SpawnLocations.Num())
     {
-        UE_LOG(LogTemp, Error, TEXT("❌ Array size mismatch! Meshes: %d, Locations: %d"),
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Array size mismatch! Meshes: %d, Locations: %d"),
                MeshDataArray.Num(), SpawnLocations.Num());
         return TArray<AActor*>();
     }
 
     if (MeshDataArray.Num() == 0)
     {
-        UE_LOG(LogTemp, Warning, TEXT("⚠️ Empty mesh data array provided"));
+        UE_LOG(LogJUSYNC, Warning, TEXT("⚠️ Empty mesh data array provided"));
         return TArray<AActor*>();
     }
 
@@ -1028,11 +1030,11 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
     if (FinalRotations.Num() == 0)
     {
         FinalRotations = GenerateDefaultRotations(MeshDataArray.Num());
-        UE_LOG(LogTemp, Warning, TEXT("Generated %d default rotations"), FinalRotations.Num());
+        UE_LOG(LogJUSYNC, Log, TEXT("Generated %d default rotations"), FinalRotations.Num());
     }
     else if (FinalRotations.Num() != MeshDataArray.Num())
     {
-        UE_LOG(LogTemp, Error, TEXT("❌ Rotation array size mismatch! Expected: %d, Got: %d"),
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Rotation array size mismatch! Expected: %d, Got: %d"),
                MeshDataArray.Num(), FinalRotations.Num());
         return TArray<AActor*>();
     }
@@ -1043,13 +1045,13 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
     
     if (bUseUniformScaling && OuterBoundingBoxSize != FVector::ZeroVector)
     {
-        UE_LOG(LogTemp, Warning, TEXT("🎯 Applying uniform scaling with bounding box: %s"),
+        UE_LOG(LogJUSYNC, Log, TEXT("🎯 Applying uniform scaling with bounding box: %s"),
                *OuterBoundingBoxSize.ToString());
                
         // **FIX: Handle single point scaling properly**
         if (SpawnLocations.Num() == 1)
         {
-            UE_LOG(LogTemp, Warning, TEXT("🔧 Single spawn point - calculating scale based on mesh bounds"));
+            UE_LOG(LogJUSYNC, Log, TEXT("🔧 Single spawn point - calculating scale based on mesh bounds"));
             
             // Calculate mesh extent from first mesh data
             FVector MeshSize(40.0f, 40.0f, 40.0f); // Default fallback
@@ -1061,7 +1063,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
                     MeshBounds += Vertex;
                 }
                 MeshSize = MeshBounds.GetSize();
-                UE_LOG(LogTemp, Warning, TEXT("📐 Calculated mesh size from vertices: %s"), *MeshSize.ToString());
+                UE_LOG(LogJUSYNC, Log, TEXT("📐 Calculated mesh size from vertices: %s"), *MeshSize.ToString());
             }
 
             // Calculate scale factor for single point
@@ -1083,7 +1085,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
                 );
             }
 
-            UE_LOG(LogTemp, Warning, TEXT("🎯 Single point scale factor: %s (MeshSize: %s, TargetSize: %s)"),
+            UE_LOG(LogJUSYNC, Log, TEXT("🎯 Single point scale factor: %s (MeshSize: %s, TargetSize: %s)"),
                    *ScaleFactor.ToString(), *MeshSize.ToString(), *OuterBoundingBoxSize.ToString());
         }
         else
@@ -1097,21 +1099,21 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
             );
         }
 
-        UE_LOG(LogTemp, Warning, TEXT("📏 Final scale factor: %s"), *ScaleFactor.ToString());
+        UE_LOG(LogJUSYNC, Log, TEXT("📏 Final scale factor: %s"), *ScaleFactor.ToString());
     }
 
     // Get subsystem and world
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (!Subsystem)
     {
-        UE_LOG(LogTemp, Error, TEXT("JUSYNC Subsystem not available"));
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
         return TArray<AActor*>();
     }
 
     UWorld* World = Subsystem->GetWorld();
     if (!World)
     {
-        UE_LOG(LogTemp, Error, TEXT("No valid world context"));
+        UE_LOG(LogJUSYNC, Error, TEXT("No valid world context"));
         return TArray<AActor*>();
     }
 
@@ -1120,8 +1122,8 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
     SpawnedActors.Reserve(MeshDataArray.Num());
     int32 SuccessCount = 0;
 
-    UE_LOG(LogTemp, Warning, TEXT("=== STARTING BATCH SPAWN ==="));
-    UE_LOG(LogTemp, Warning, TEXT("Meshes: %d, Uniform Scaling: %s, Scale Factor: %s"),
+    UE_LOG(LogJUSYNC, Log, TEXT("=== STARTING BATCH SPAWN ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Meshes: %d, Uniform Scaling: %s, Scale Factor: %s"),
            MeshDataArray.Num(), bUseUniformScaling ? TEXT("YES") : TEXT("NO"), *ScaleFactor.ToString());
 
     for (int32 i = 0; i < MeshDataArray.Num(); ++i)
@@ -1130,7 +1132,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
         FJUSYNCMeshData ProcessedMeshData = FixMeshDataForSpawning(MeshDataArray[i]);
         FRotator UERotation = ConvertParaViewToUERotation(FinalRotations[i]);
 
-        UE_LOG(LogTemp, Log, TEXT("🎯 Spawning mesh %d '%s' at location %s with rotation %s"),
+        UE_LOG(LogJUSYNC, Log, TEXT("🎯 Spawning mesh %d '%s' at location %s with rotation %s"),
                i, *ProcessedMeshData.ElementName, *FinalLocations[i].ToString(), *UERotation.ToString());
 
         // **FIXED ACTOR SPAWNING - Let engine auto-generate names**
@@ -1141,14 +1143,14 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
         AActor* SpawnedActor = World->SpawnActor<AActor>(SpawnParams);
         if (!SpawnedActor)
         {
-            UE_LOG(LogTemp, Error, TEXT("❌ Failed to spawn actor %d"), i);
+            UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to spawn actor %d"), i);
             SpawnedActors.Add(nullptr);
             continue;
         }
 
         // **ENHANCED: Use Tags for identification instead of relying on names**
         SpawnedActor->Tags.Add(FName(*FString::Printf(TEXT("JUSYNC_%s_%d"), *ProcessedMeshData.ElementName, i)));
-        UE_LOG(LogTemp, Log, TEXT("✅ Spawned actor with auto-generated name: %s"), *SpawnedActor->GetName());
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Spawned actor with auto-generated name: %s"), *SpawnedActor->GetName());
 
         // **ENHANCED COMPONENT CREATION**
         URealtimeMeshComponent* MeshComp = NewObject<URealtimeMeshComponent>(SpawnedActor);
@@ -1171,7 +1173,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
             // Method 4: Mark for render state update
             MeshComp->MarkRenderStateDirty();
 
-            UE_LOG(LogTemp, Warning, TEXT("🔧 Applied scale %s to actor %d (Actor: %s, Component: %s)"),
+            UE_LOG(LogJUSYNC, Log, TEXT("🔧 Applied scale %s to actor %d (Actor: %s, Component: %s)"),
                    *ScaleFactor.ToString(), i,
                    *SpawnedActor->GetActorScale3D().ToString(),
                    *MeshComp->GetComponentScale().ToString());
@@ -1182,13 +1184,13 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
         {
             // Always use the provided material (your texture material from Blueprint)
             MeshComp->SetMaterial(0, Material);
-            UE_LOG(LogTemp, Warning, TEXT("✅ Applied PROVIDED material to mesh %d (prioritizing over auto-detection)"), i);
+            UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied PROVIDED material to mesh %d (prioritizing over auto-detection)"), i);
         }
         else
         {
             // Only use automatic detection if NO material is provided
             FString ContentType = DetectUSDContentType(USDBuffer);
-            UE_LOG(LogTemp, Warning, TEXT("🎨 USD Content Type: %s"), *ContentType);
+            UE_LOG(LogJUSYNC, Log, TEXT("🎨 USD Content Type: %s"), *ContentType);
             
             if (ContentType == TEXT("VERTEX_COLORS"))
             {
@@ -1196,7 +1198,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
                 if (VertexColorMaterial)
                 {
                     MeshComp->SetMaterial(0, VertexColorMaterial);
-                    UE_LOG(LogTemp, Warning, TEXT("✅ Applied M_VertexColor material (auto-detected)"));
+                    UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied M_VertexColor material (auto-detected)"));
                 }
             }
             else if (ContentType == TEXT("TEXTURES"))
@@ -1205,7 +1207,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
                 if (TextureMaterial)
                 {
                     MeshComp->SetMaterial(0, TextureMaterial);
-                    UE_LOG(LogTemp, Log, TEXT("✅ Applied texture material to mesh %d (auto-detected)"), i);
+                    UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied texture material to mesh %d (auto-detected)"), i);
                 }
             }
             else
@@ -1226,23 +1228,23 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
             FVector ActualScale = SpawnedActor->GetActorScale3D();
             FRotator ActualRotation = SpawnedActor->GetActorRotation();
 
-            UE_LOG(LogTemp, Warning, TEXT("✅ Successfully spawned mesh %d at %s (Scale: %s, Rotation: %s)"),
+            UE_LOG(LogJUSYNC, Log, TEXT("✅ Successfully spawned mesh %d at %s (Scale: %s, Rotation: %s)"),
                    i, *ActualLocation.ToString(), *ActualScale.ToString(), *ActualRotation.ToString());
         }
         else
         {
-            UE_LOG(LogTemp, Error, TEXT("❌ Failed to create RealtimeMesh for actor %d, destroying"), i);
+            UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to create RealtimeMesh for actor %d, destroying"), i);
             SpawnedActor->Destroy();
             SpawnedActors.Add(nullptr);
         }
     }
 
     // **ENHANCED COMPLETION LOGGING**
-    UE_LOG(LogTemp, Warning, TEXT("=== BATCH SPAWN COMPLETE: %d/%d successful ==="),
+    UE_LOG(LogJUSYNC, Log, TEXT("=== BATCH SPAWN COMPLETE: %d/%d successful ==="),
            SuccessCount, MeshDataArray.Num());
     if (bUseUniformScaling)
     {
-        UE_LOG(LogTemp, Warning, TEXT("🎯 Uniform scaling applied with factor: %s"),
+        UE_LOG(LogJUSYNC, Log, TEXT("🎯 Uniform scaling applied with factor: %s"),
                *ScaleFactor.ToString());
     }
 
@@ -1265,7 +1267,7 @@ FJUSYNCMeshData UJUSYNCBlueprintLibrary::FixMeshDataForSpawning(const FJUSYNCMes
         FVector& Vertex = FixedData.Vertices[i];
         if (!FMath::IsFinite(Vertex.X) || !FMath::IsFinite(Vertex.Y) || !FMath::IsFinite(Vertex.Z))
         {
-            UE_LOG(LogTemp, Warning, TEXT("Fixed invalid vertex at index %d"), i);
+            UE_LOG(LogJUSYNC, Warning, TEXT("Fixed invalid vertex at index %d"), i);
             Vertex = FVector::ZeroVector;
         }
     }
@@ -1337,7 +1339,7 @@ FJUSYNCMeshData UJUSYNCBlueprintLibrary::FixMeshDataForSpawning(const FJUSYNCMes
             }
         }
         
-        UE_LOG(LogTemp, Log, TEXT("Recalculated normals for mesh: %s"), *InputMeshData.ElementName);
+        UE_LOG(LogJUSYNC, Log, TEXT("Recalculated normals for mesh: %s"), *InputMeshData.ElementName);
     }
     
     // Validate and fix UV coordinates
@@ -1386,7 +1388,7 @@ TArray<FVector> UJUSYNCBlueprintLibrary::CalculateScaledPositions(
     // **FIX: Handle single point case with mesh-based scaling**
     if (OriginalLocations.Num() == 1)
     {
-        UE_LOG(LogTemp, Warning, TEXT("🔧 Single spawn point - calculating scale based on mesh bounds"));
+        UE_LOG(LogJUSYNC, Log, TEXT("🔧 Single spawn point - calculating scale based on mesh bounds"));
         
         // For single point, calculate scale based on the mesh extent from USD
         // Your USD shows extent [(-20, -20, -20), (20, 20, 20)] = 40x40x40 size
@@ -1410,7 +1412,7 @@ TArray<FVector> UJUSYNCBlueprintLibrary::CalculateScaledPositions(
             );
         }
         
-        UE_LOG(LogTemp, Warning, TEXT("🎯 Single point scale factor: %s"), *OutScaleFactor.ToString());
+        UE_LOG(LogJUSYNC, Log, TEXT("🎯 Single point scale factor: %s"), *OutScaleFactor.ToString());
         return OriginalLocations; // Return original location, scaling will be applied to actor
     }
 
@@ -1426,7 +1428,7 @@ TArray<FVector> UJUSYNCBlueprintLibrary::CalculateScaledPositions(
 
     if (CurrentSize.IsNearlyZero())
     {
-        UE_LOG(LogTemp, Warning, TEXT("🔧 Zero-size bounding box detected - no scaling needed"));
+        UE_LOG(LogJUSYNC, Log, TEXT("🔧 Zero-size bounding box detected - no scaling needed"));
         OutScaleFactor = FVector::OneVector;
         return OriginalLocations;
     }
@@ -1462,7 +1464,7 @@ TArray<FVector> UJUSYNCBlueprintLibrary::CalculateScaledPositions(
         ScaledLocations.Add(NewLocation);
     }
 
-    UE_LOG(LogTemp, Warning, TEXT("🎯 Multi-point scaling applied: %s"), *OutScaleFactor.ToString());
+    UE_LOG(LogJUSYNC, Log, TEXT("🎯 Multi-point scaling applied: %s"), *OutScaleFactor.ToString());
     return ScaledLocations;
 }
 

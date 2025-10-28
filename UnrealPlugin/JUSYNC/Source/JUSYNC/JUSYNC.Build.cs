@@ -1,19 +1,16 @@
 ﻿using UnrealBuildTool;
+using System;
 using System.IO;
 
 public class JUSYNC : ModuleRules
 {
     public JUSYNC(ReadOnlyTargetRules Target) : base(Target)
     {
-        // Build settings
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
         CppStandard = CppStandardVersion.Cpp20;
-        bUseUnity = false;
-        bUseRTTI = false;
         bEnableExceptions = true;
-        UndefinedIdentifierWarningLevel = WarningLevel.Off;
+        bUseRTTI = false;
 
-        // Core runtime dependencies
         PublicDependencyModuleNames.AddRange(new string[]
         {
             "Core",
@@ -22,34 +19,23 @@ public class JUSYNC : ModuleRules
             "RealtimeMeshComponent"
         });
 
-        // Private runtime dependencies
         PrivateDependencyModuleNames.AddRange(new string[]
         {
             "Slate",
             "SlateCore",
             "RenderCore",
             "RHI",
-            "GameplayTasks",
-            "BlueprintGraph"
+            "GameplayTasks"
         });
 
-        // Compiler definitions
-        PublicDefinitions.AddRange(new string[]
-        {
-            "NOMINMAX",
-            "WIN32_LEAN_AND_MEAN",
-            "_CRT_SECURE_NO_WARNINGS=1",
-            "_SCL_SECURE_NO_WARNINGS=1",
-            "ANARI_USD_MIDDLEWARE_SAFE_MODE=1",
-            "_ITERATOR_DEBUG_LEVEL=0",
-            "_HAS_EXCEPTIONS=1"
-        });
-
-        // Setup third-party libraries
+        // Setup third-party includes
         string ThirdPartyPath = Path.Combine(ModuleDirectory, "..", "ThirdParty");
         string AnariUsdPath = Path.Combine(ThirdPartyPath, "AnariUsdMiddleware");
 
-        // Add ANARI includes
+        // Add GLM headers (points to your glm/glm/ directory)
+        PublicIncludePaths.Add(Path.Combine(ThirdPartyPath, "glm"));
+
+        // Add middleware headers  
         PublicIncludePaths.Add(Path.Combine(AnariUsdPath, "Include"));
 
         // Platform configuration
@@ -59,28 +45,26 @@ public class JUSYNC : ModuleRules
         }
         else if (Target.Platform == UnrealTargetPlatform.Linux)
         {
-            ConfigureLinux(ThirdPartyPath, AnariUsdPath);
+            ConfigureLinux(AnariUsdPath);
         }
         else
         {
             PublicDefinitions.Add("WITH_ANARI_USD_MIDDLEWARE=0");
-            System.Console.WriteLine("JUSYNC: Unsupported platform - middleware disabled");
+            Console.WriteLine("JUSYNC: Unsupported platform - middleware disabled");
         }
     }
 
     private void ConfigureWindows(string AnariUsdPath)
     {
-        System.Console.WriteLine("JUSYNC: Configuring Windows");
-
         // Windows system libraries
         PublicSystemLibraries.AddRange(new string[]
         {
-            "kernel32.lib", "user32.lib", "gdi32.lib", "winspool.lib",
-            "comdlg32.lib", "advapi32.lib", "shell32.lib", "ole32.lib",
-            "oleaut32.lib", "uuid.lib", "odbc32.lib", "odbccp32.lib"
+            "kernel32.lib",
+            "ws2_32.lib",
+            "iphlpapi.lib",
+            "userenv.lib"
         });
 
-        // ANARI middleware
         string LibDir = Path.Combine(AnariUsdPath, "Lib", "Win64");
         string LibFile = Path.Combine(LibDir, "anari_usd_middleware.lib");
 
@@ -88,168 +72,95 @@ public class JUSYNC : ModuleRules
         {
             PublicAdditionalLibraries.Add(LibFile);
 
-            // Delay load DLLs
-            PublicDelayLoadDLLs.AddRange(new string[]
+            // Stage required DLLs with enhanced multi-location staging
+            string[] RequiredDlls = new string[]
             {
                 "anari_usd_middleware.dll",
-                "libzmq-v143-mt-4_3_6.dll",
-                "libcrypto-3-x64.dll",
-                "libssl-3-x64.dll"
-            });
+            };
 
-            // Stage Windows DLLs
-            StageWindowsDLLs(LibDir);
+            StageDllsEnhanced(LibDir, RequiredDlls);
 
             PublicDefinitions.Add("WITH_ANARI_USD_MIDDLEWARE=1");
-            System.Console.WriteLine("JUSYNC: ✅ Windows libraries configured");
+            Console.WriteLine("JUSYNC: ✅ Windows middleware enabled with enhanced staging");
         }
         else
         {
             PublicDefinitions.Add("WITH_ANARI_USD_MIDDLEWARE=0");
-            System.Console.WriteLine($"JUSYNC: ❌ Windows library not found: {LibFile}");
+            Console.WriteLine($"JUSYNC: ❌ Windows library not found: {LibFile}");
         }
     }
 
-    private void ConfigureLinux(string ThirdPartyPath, string AnariUsdPath)
+    private void ConfigureLinux(string AnariUsdPath)
     {
-        System.Console.WriteLine("JUSYNC: Configuring Linux");
-
         // Linux system libraries
-        PublicSystemLibraries.AddRange(new string[] { "dl", "pthread", "rt", "m" });
+        PublicSystemLibraries.AddRange(new string[]
+        {
+            "pthread",
+            "dl",
+            "rt",
+            "m"
+        });
 
-        // ANARI middleware
-        string LibPath = Path.Combine(AnariUsdPath, "Lib", "Linux");
-        string LibFile = Path.Combine(LibPath, "libanari_usd_middleware.so");
+        string LibDir = Path.Combine(AnariUsdPath, "Lib", "Linux");
+        string LibFile = Path.Combine(LibDir, "libanari_usd_middleware.so");
 
         if (File.Exists(LibFile))
         {
             PublicAdditionalLibraries.Add(LibFile);
             RuntimeDependencies.Add(LibFile);
-            System.Console.WriteLine("JUSYNC: ✅ Linux ANARI middleware linked");
-        }
-        else
-        {
-            PublicDefinitions.Add("WITH_ANARI_USD_MIDDLEWARE=0");
-            System.Console.WriteLine($"JUSYNC: ❌ Linux library not found: {LibFile}");
-            return;
-        }
 
-        // Configure ZeroMQ (dynamic linking only)
-        if (ConfigureZeroMQ(ThirdPartyPath))
-        {
             PublicDefinitions.Add("WITH_ANARI_USD_MIDDLEWARE=1");
-            System.Console.WriteLine("JUSYNC: ✅ Linux configuration complete");
+            Console.WriteLine("JUSYNC: ✅ Linux middleware enabled with static ZeroMQ");
         }
         else
         {
             PublicDefinitions.Add("WITH_ANARI_USD_MIDDLEWARE=0");
-            System.Console.WriteLine("JUSYNC: ❌ Linux configuration failed");
+            Console.WriteLine($"JUSYNC: ❌ Linux library not found: {LibFile}");
         }
     }
 
-    /// <summary>
-    /// Configures ZeroMQ dynamic linking only.
-    /// Removed static linking to avoid sodium/pgm/norm dependency issues.
-    /// </summary>
-    private bool ConfigureZeroMQ(string ThirdPartyPath)
+    // ✅ ENHANCED: Multi-location DLL staging for comprehensive coverage
+    private void StageDllsEnhanced(string LibDir, string[] RequiredDlls)
     {
-        string ZmqPath = Path.Combine(ThirdPartyPath, "ZeroMQ");
-        string ZmqIncludePath = Path.Combine(ZmqPath, "include");
-        string ZmqLibPath = Path.Combine(ZmqPath, "lib");
-
-        System.Console.WriteLine($"JUSYNC: Configuring ZeroMQ from: {ZmqPath}");
-
-        // Add includes
-        if (Directory.Exists(ZmqIncludePath))
-        {
-            PublicIncludePaths.Add(ZmqIncludePath);
-            System.Console.WriteLine("JUSYNC: ✅ ZeroMQ includes added");
-        }
-        else
-        {
-            System.Console.WriteLine($"JUSYNC: ❌ ZeroMQ includes not found: {ZmqIncludePath}");
-            return false;
-        }
-
-        // Method 1: Use unversioned symlink (preferred)
-        string BaseLib = Path.Combine(ZmqLibPath, "libzmq.so");
-        if (File.Exists(BaseLib))
-        {
-            PublicAdditionalLibraries.Add(BaseLib);
-            string RuntimeLib = Path.Combine(ZmqLibPath, "libzmq.so.5");
-            if (File.Exists(RuntimeLib))
-            {
-                RuntimeDependencies.Add(Path.Combine("$(BinaryOutputDir)", "libzmq.so.5"), RuntimeLib, StagedFileType.NonUFS);
-                System.Console.WriteLine("JUSYNC: ⚠️  ZeroMQ runtime library staged for deployment");
-            }
-            System.Console.WriteLine("JUSYNC: ✅ ZeroMQ linked (unversioned symlink)");
-            return true;
-        }
-
-        // Method 2: Use versioned symlink
-        string VersionedLib = Path.Combine(ZmqLibPath, "libzmq.so.5");
-        if (File.Exists(VersionedLib))
-        {
-            PublicAdditionalLibraries.Add(VersionedLib);
-            RuntimeDependencies.Add(Path.Combine("$(BinaryOutputDir)", "libzmq.so.5"), VersionedLib, StagedFileType.NonUFS);
-            System.Console.WriteLine("JUSYNC: ✅ ZeroMQ linked (versioned symlink)");
-            return true;
-        }
-
-        // Method 3: Use actual file
-        string ActualLib = Path.Combine(ZmqLibPath, "libzmq.so.5.2.6");
-        if (File.Exists(ActualLib))
-        {
-            PublicAdditionalLibraries.Add(ActualLib);
-            RuntimeDependencies.Add(Path.Combine("$(BinaryOutputDir)", "libzmq.so.5"), ActualLib, StagedFileType.NonUFS);
-            System.Console.WriteLine("JUSYNC: ✅ ZeroMQ linked (direct file)");
-            return true;
-        }
-
-        // All methods failed
-        System.Console.WriteLine($"JUSYNC: ❌ No ZeroMQ library found in: {ZmqLibPath}");
-        if (Directory.Exists(ZmqLibPath))
-        {
-            System.Console.WriteLine("JUSYNC: Available files:");
-            foreach (string file in Directory.GetFiles(ZmqLibPath))
-            {
-                System.Console.WriteLine($"JUSYNC:   - {Path.GetFileName(file)}");
-            }
-
-            System.Console.WriteLine("");
-            System.Console.WriteLine("JUSYNC: For GitLab CI, ensure LD_LIBRARY_PATH includes:");
-            System.Console.WriteLine($"JUSYNC:   $CI_PROJECT_DIR/Plugins/JUSYNC/Source/ThirdParty/ZeroMQ/lib");
-            System.Console.WriteLine("JUSYNC: Or install ZeroMQ system-wide: apt install libzmq5");
-        }
-        return false;
-    }
-
-    private void StageWindowsDLLs(string LibPath)
-    {
-        string[] RequiredDlls = new string[]
-        {
-            "anari_usd_middleware.dll",
-            "libzmq-v143-mt-4_3_6.dll",
-            "libcrypto-3-x64.dll",
-            "libssl-3-x64.dll"
-        };
+        Console.WriteLine("JUSYNC: Starting enhanced DLL staging...");
 
         foreach (string dll in RequiredDlls)
         {
-            string sourceDll = Path.Combine(LibPath, dll);
-            string destDll = Path.Combine("$(BinaryOutputDir)", dll);
+            string sourceDll = Path.Combine(LibDir, dll);
 
             if (File.Exists(sourceDll))
             {
-                RuntimeDependencies.Add(destDll, sourceDll, StagedFileType.NonUFS);
-                System.Console.WriteLine($"JUSYNC: ✅ Staged: {dll}");
+                // Stage to multiple locations for comprehensive coverage
+
+                // 1. Binary output directory (for packaged builds)
+                RuntimeDependencies.Add(
+                    Path.Combine("$(BinaryOutputDir)", dll),
+                    sourceDll,
+                    StagedFileType.NonUFS
+                );
+
+                // 2. Project binaries directory (for editor and PIE)
+                RuntimeDependencies.Add(
+                    Path.Combine("$(ProjectDir)", "Binaries", "Win64", dll),
+                    sourceDll,
+                    StagedFileType.NonUFS
+                );
+
+                // 3. Plugin binaries directory (for plugin-specific loading)
+                RuntimeDependencies.Add(
+                    Path.Combine("$(PluginDir)", "Binaries", "Win64", dll),
+                    sourceDll,
+                    StagedFileType.NonUFS
+                );
+
+                Console.WriteLine($"JUSYNC: ✅ Multi-staged: {dll}");
             }
             else
             {
-                System.Console.WriteLine($"JUSYNC: ⚠️  Missing: {dll}");
+                Console.WriteLine($"JUSYNC: ⚠️ Missing DLL: {dll}");
             }
         }
+
+        Console.WriteLine("JUSYNC: Enhanced DLL staging complete");
     }
 }
-
-

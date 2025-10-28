@@ -113,13 +113,13 @@ private:
     TUniquePtr<anari_usd_middleware::AnariUsdMiddleware> Middleware;
 
     // Legacy callback handlers (wrapped for compatibility)
-    void HandleFileReceived(const anari_usd_middleware::AnariUsdMiddleware::FileData& FileData);
+    void HandleFileReceived(const anari_usd_middleware::FileData& FileData);
     void HandleMessageReceived(const std::string& Message);
 
     // Legacy conversion helpers (wrapped for compatibility)
-    FJUSYNCFileData ConvertFileData(const anari_usd_middleware::AnariUsdMiddleware::FileData& SourceData);
-    FJUSYNCMeshData ConvertMeshData(const anari_usd_middleware::AnariUsdMiddleware::MeshData& SourceData);
-    FJUSYNCTextureData ConvertTextureData(const anari_usd_middleware::AnariUsdMiddleware::TextureData& SourceData);
+    FJUSYNCFileData ConvertFileData(const anari_usd_middleware::FileData& SourceData);
+    FJUSYNCMeshData ConvertMeshData(const anari_usd_middleware::MeshData& SourceData);
+    FJUSYNCTextureData ConvertTextureData(const anari_usd_middleware::TextureData& SourceData);
 #endif
 
     mutable FCriticalSection MiddlewareMutex;

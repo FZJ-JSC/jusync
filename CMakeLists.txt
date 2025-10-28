@@ -19,65 +19,49 @@ if(UNIX AND NOT APPLE)
 endif()
 
 # ------------------------------
-# ZeroMQ Configuration (Portable)
+# ZeroMQ Configuration (STATIC BUILD FROM SOURCE)
 # ------------------------------
-find_package(PkgConfig QUIET)
 
+# Build ZMQ as static library from bundled source
+message(STATUS "Building ZeroMQ as static library from source...")
+
+# Configure ZMQ build options for static linking
+set(BUILD_STATIC ON CACHE BOOL "Build static library" FORCE)
+set(BUILD_SHARED OFF CACHE BOOL "Build shared library" FORCE)
+set(BUILD_TESTS OFF CACHE BOOL "Build ZMQ tests" FORCE)
+set(WITH_LIBSODIUM OFF CACHE BOOL "Use libsodium" FORCE)
+set(ENABLE_CPACK OFF CACHE BOOL "Disable CPack" FORCE)
+set(ZMQ_BUILD_TESTS OFF CACHE BOOL "Disable ZMQ tests" FORCE)
+set(WITH_PERF_TOOL OFF CACHE BOOL "Disable perf tools" FORCE)
+set(WITH_DOCS OFF CACHE BOOL "Disable docs" FORCE)
+
+# Add ZMQ subdirectory to build static library
+add_subdirectory(external/zmq)
+
+# Set static ZMQ target
+set(ZMQ_STATIC_TARGET libzmq-static)
+set(ZMQ_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/zmq/include")
+
+message(STATUS "ZeroMQ will be statically linked from: ${ZMQ_STATIC_TARGET}")
+message(STATUS "ZeroMQ Include: ${ZMQ_INCLUDE_DIR}")
+
+# Fallback for Windows if needed (keep original logic for compatibility)
 if(WIN32)
     # Try environment variable first, then user-supplied path, then fallback
     if(NOT DEFINED ZMQ_ROOT AND DEFINED ENV{ZMQ_ROOT})
         set(ZMQ_ROOT $ENV{ZMQ_ROOT})
-    endif()
+        message(STATUS "Windows fallback - Using ZMQ_ROOT: ${ZMQ_ROOT}")
 
-    if(NOT ZMQ_ROOT)
-        set(ZMQ_ROOT "D:/SDK/ZeroMQ" CACHE PATH "ZeroMQ root directory (fallback)")
-        message(STATUS "Using fallback ZMQ_ROOT: ${ZMQ_ROOT}")
-    else()
-        message(STATUS "Using ZMQ_ROOT: ${ZMQ_ROOT}")
-    endif()
+        set(ZMQ_INCLUDE_DIR "${ZMQ_ROOT}/include")
+        set(ZMQ_LIBRARY "${ZMQ_ROOT}/lib/libzmq-v143-mt-4_3_6.lib")
 
-    set(ZMQ_INCLUDE_DIR "${ZMQ_ROOT}/include")
-    set(ZMQ_LIBRARY "${ZMQ_ROOT}/lib/libzmq-v143-mt-4_3_6.lib")
-
-    # Verify ZeroMQ installation
-    if(NOT EXISTS "${ZMQ_INCLUDE_DIR}/zmq.h")
-        message(FATAL_ERROR "ZeroMQ headers not found at ${ZMQ_INCLUDE_DIR}. Please set ZMQ_ROOT correctly.")
-    endif()
-    if(NOT EXISTS "${ZMQ_LIBRARY}")
-        message(FATAL_ERROR "ZeroMQ library not found at ${ZMQ_LIBRARY}. Please set ZMQ_ROOT correctly.")
-    endif()
-else()
-    # Linux: Use pkg-config first, then fallback to find_path/find_library
-    if(PKG_CONFIG_FOUND)
-        pkg_check_modules(ZMQ libzmq)
-        if(ZMQ_FOUND)
-            set(ZMQ_INCLUDE_DIR ${ZMQ_INCLUDE_DIRS})
-            set(ZMQ_LIBRARY ${ZMQ_LIBRARIES})
-            message(STATUS "Found ZeroMQ via pkg-config: ${ZMQ_LIBRARY}")
+        # Override static target for Windows if external ZMQ is provided
+        if(EXISTS "${ZMQ_LIBRARY}")
+            set(ZMQ_STATIC_TARGET ${ZMQ_LIBRARY})
+            message(STATUS "Using external Windows ZMQ library: ${ZMQ_LIBRARY}")
         endif()
     endif()
-
-    # Fallback if pkg-config didn't work
-    if(NOT ZMQ_INCLUDE_DIR)
-        find_path(ZMQ_INCLUDE_DIR zmq.h
-            HINTS /usr/include /usr/local/include
-            PATH_SUFFIXES zmq
-        )
-    endif()
-    if(NOT ZMQ_LIBRARY)
-        find_library(ZMQ_LIBRARY NAMES zmq libzmq
-            HINTS /usr/lib /usr/local/lib
-            PATH_SUFFIXES x86_64-linux-gnu
-        )
-    endif()
 endif()
-
-if(NOT ZMQ_INCLUDE_DIR OR NOT ZMQ_LIBRARY)
-    message(FATAL_ERROR "ZeroMQ not found. Please install ZeroMQ or set ZMQ_ROOT environment variable.")
-endif()
-
-message(STATUS "ZeroMQ Include: ${ZMQ_INCLUDE_DIR}")
-message(STATUS "ZeroMQ Library: ${ZMQ_LIBRARY}")
 
 # ------------------------------
 # OpenSSL Configuration (Portable)
@@ -147,10 +131,10 @@ target_include_directories(${PROJECT_NAME}
 add_subdirectory(external/tinyusdz external/tinyusdz_build)
 add_subdirectory(external/glm external/glm_build)
 
-# Link dependencies
+# Link dependencies - STATIC ZMQ INSTEAD OF DYNAMIC
 target_link_libraries(${PROJECT_NAME}
     PRIVATE
-        ${ZMQ_LIBRARY}
+        ${ZMQ_STATIC_TARGET}  # Static ZMQ library instead of ${ZMQ_LIBRARY}
         OpenSSL::SSL
         OpenSSL::Crypto
         tinyusdz::tinyusdz_static
@@ -184,7 +168,7 @@ if(UNIX AND NOT APPLE)
         BUILD_RPATH "$ORIGIN"
     )
 
-    # Add standard Linux system libraries
+    # Add standard Linux system libraries (required for static ZMQ)
     target_link_libraries(${PROJECT_NAME} PRIVATE
         pthread
         dl
@@ -193,7 +177,7 @@ if(UNIX AND NOT APPLE)
     )
 endif()
 
-# Custom target for compatibility verification (Linux only)
+# Custom target for compatibility verification (Linux only) - ENHANCED FOR STATIC ZMQ
 if(UNIX AND NOT APPLE)
     add_custom_target(verify_glibc_compatibility ALL
         DEPENDS ${PROJECT_NAME}
@@ -201,7 +185,9 @@ if(UNIX AND NOT APPLE)
         COMMAND objdump -T $<TARGET_FILE:${PROJECT_NAME}> | grep GLIBC_ | sort -u | tail -n1 || echo "No GLIBC symbols found"
         COMMAND ${CMAKE_COMMAND} -E echo "=== Checking Dependencies ==="
         COMMAND ldd $<TARGET_FILE:${PROJECT_NAME}> | grep "not found" || echo "All dependencies satisfied"
-        COMMAND ${CMAKE_COMMAND} -E echo "=== Verifying Static Linking ==="
+        COMMAND ${CMAKE_COMMAND} -E echo "=== Verifying Static ZMQ Linking ==="
+        COMMAND ldd $<TARGET_FILE:${PROJECT_NAME}> | grep zmq || echo "ZMQ statically linked ✓"
+        COMMAND ${CMAKE_COMMAND} -E echo "=== Verifying Static C++ Runtime ==="
         COMMAND readelf -d $<TARGET_FILE:${PROJECT_NAME}> | grep NEEDED | grep stdc++ || echo "libstdc++ statically linked ✓"
         COMMAND ${CMAKE_COMMAND} -E echo "=== Compatibility Check Complete ==="
         VERBATIM
@@ -370,10 +356,10 @@ if(BUILD_TESTS)
         COMMENT "Running comprehensive USD validation tests using usd_validation_tool"
     )
 
-    # Windows DLL copying for validation tool
+    # Windows DLL copying for validation tool (NOT NEEDED FOR STATIC ZMQ)
     if(WIN32)
+        # Only copy OpenSSL DLLs, ZMQ is now static
         set(REQUIRED_DLLS
-            "${ZMQ_ROOT}/bin/libzmq-v143-mt-4_3_6.dll"
             "${OPENSSL_ROOT_DIR}/bin/libcrypto-3-x64.dll"
             "${OPENSSL_ROOT_DIR}/bin/libssl-3-x64.dll"
         )
@@ -412,10 +398,9 @@ if(BUILD_TESTS)
     )
 endif()
 
-# Install required DLLs on Windows
+# Install required DLLs on Windows (ONLY OPENSSL NOW, ZMQ IS STATIC)
 if(WIN32)
     set(INSTALL_DLLS
-        "${ZMQ_ROOT}/bin/libzmq-v143-mt-4_3_6.dll"
         "${OPENSSL_ROOT_DIR}/bin/libcrypto-3-x64.dll"
         "${OPENSSL_ROOT_DIR}/bin/libssl-3-x64.dll"
     )
@@ -439,8 +424,8 @@ message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ Standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "")
 message(STATUS "Dependencies:")
+message(STATUS "  ZeroMQ: STATIC BUILD from external/zmq (${ZMQ_STATIC_TARGET})")
 message(STATUS "  ZeroMQ Include: ${ZMQ_INCLUDE_DIR}")
-message(STATUS "  ZeroMQ Library: ${ZMQ_LIBRARY}")
 message(STATUS "  OpenSSL Include: ${OPENSSL_INCLUDE_DIR}")
 message(STATUS "  OpenSSL Libraries: ${OPENSSL_LIBRARIES}")
 message(STATUS "")
@@ -471,6 +456,7 @@ message(STATUS "")
 message(STATUS "Linux Compatibility:")
 message(STATUS "  GLIBC 2.35 compatibility: ENABLED")
 message(STATUS "  Static C++ runtime linking: ENABLED")
+message(STATUS "  Static ZMQ linking: ENABLED")
 message(STATUS "  RPATH configuration: $ORIGIN")
 endif()
 message(STATUS "")
@@ -481,7 +467,13 @@ message(STATUS "  make test_full       - Run full test suite")
 message(STATUS "  make test_parallel   - Run tests in parallel")
 message(STATUS "  ctest -V            - Run all tests with verbose output")
 message(STATUS "")
-message(STATUS "To override paths, use:")
-message(STATUS "  cmake -DZMQ_ROOT=/path/to/zmq -DOPENSSL_ROOT_DIR=/path/to/openssl ..")
-message(STATUS "Or set environment variables ZMQ_ROOT and OPENSSL_ROOT_DIR")
+message(STATUS "Static Linking Benefits:")
+message(STATUS "  • No system ZMQ dependencies for end users")
+message(STATUS "  • Self-contained middleware library")
+message(STATUS "  • Consistent ZMQ version across deployments")
+message(STATUS "  • Simplified distribution and installation")
+message(STATUS "")
+message(STATUS "To override OpenSSL path, use:")
+message(STATUS "  cmake -DOPENSSL_ROOT_DIR=/path/to/openssl ..")
+message(STATUS "Or set environment variable OPENSSL_ROOT_DIR")
 message(STATUS "===========================================")

@@ -155,7 +155,7 @@ typedef void (*MessageReceivedCallback_C)(const char* message);
  * Initialize the middleware with ZeroMQ endpoint
  * Must be called before any other operations
  *
- * @param endpoint ZeroMQ endpoint string (e.g., "tcp://*:5556") or NULL for default
+* @param endpoint ZeroMQ endpoint string (e.g., "tcp://0.0.0.0:5556") or NULL for default
  * @return 1 on success, 0 on failure
  */
 ANARI_USD_MIDDLEWARE_C_API int InitializeMiddleware_C(const char* endpoint);

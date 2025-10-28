@@ -3,13 +3,14 @@
 #include "CoreMinimal.h"
 #include "Modules/ModuleManager.h"
 
+
+DECLARE_LOG_CATEGORY_EXTERN(LogJUSYNC, Log, All)
+
+
 class FJUSYNCModule : public IModuleInterface {
 public:
     virtual void StartupModule() override;
     virtual void ShutdownModule() override;
-    virtual bool IsGameModule() const override {
-        return true;
-    }
 
 private:
     // Platform detection and logging

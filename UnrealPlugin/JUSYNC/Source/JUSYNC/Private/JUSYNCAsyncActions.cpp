@@ -1,5 +1,6 @@
 ﻿#include "JUSYNCAsyncActions.h"
 #include "JUSYNCBlueprintLibrary.h"
+#include "JUSYNCModule.h"
 #include "JUSYNCSubsystem.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -108,7 +109,7 @@ UWorld* UJUSYNCAsyncReceiveFiles::GetWorld() const
     // Method 1: Use GWorld global (most reliable for PIE)
     if (GWorld)
     {
-        UE_LOG(LogTemp, Log, TEXT("JUSYNC Async: Got world from GWorld: %s"), *GWorld->GetName());
+        UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Async: Got world from GWorld: %s"), *GWorld->GetName());
         return GWorld;
     }
     
@@ -120,7 +121,7 @@ UWorld* UJUSYNCAsyncReceiveFiles::GetWorld() const
             UWorld* World = GameInstance->GetWorld();
             if (World)
             {
-                UE_LOG(LogTemp, Log, TEXT("JUSYNC Async: Got world from subsystem: %s"), *World->GetName());
+                UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Async: Got world from subsystem: %s"), *World->GetName());
                 return World;
             }
         }
@@ -134,7 +135,7 @@ UWorld* UJUSYNCAsyncReceiveFiles::GetWorld() const
         {
             if (WorldContext.World() && WorldContext.WorldType == EWorldType::PIE)
             {
-                UE_LOG(LogTemp, Log, TEXT("JUSYNC Async: Got PIE world: %s"), *WorldContext.World()->GetName());
+                UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Async: Got PIE world: %s"), *WorldContext.World()->GetName());
                 return WorldContext.World();
             }
         }
@@ -144,49 +145,49 @@ UWorld* UJUSYNCAsyncReceiveFiles::GetWorld() const
         {
             if (WorldContext.World() && WorldContext.WorldType == EWorldType::Game)
             {
-                UE_LOG(LogTemp, Log, TEXT("JUSYNC Async: Got game world: %s"), *WorldContext.World()->GetName());
+                UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Async: Got game world: %s"), *WorldContext.World()->GetName());
                 return WorldContext.World();
             }
         }
     }
     
-    UE_LOG(LogTemp, Error, TEXT("JUSYNC Async: No valid world context found"));
+    UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Async: No valid world context found"));
     return nullptr;
 }
 
 
 void UJUSYNCAsyncReceiveFiles::Activate()
 {
-    UE_LOG(LogTemp, Log, TEXT("JUSYNC Async: Activate() called"));
+    UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Async: Activate() called"));
     
     // Get world context first
     UWorld* World = GetWorld();
     if (!World)
     {
-        UE_LOG(LogTemp, Error, TEXT("Failed to get world context for JUSYNC async receiving"));
+        UE_LOG(LogJUSYNC, Error, TEXT("Failed to get world context for JUSYNC async receiving"));
         SetReadyToDestroy();
         return;
     }
     
-    UE_LOG(LogTemp, Log, TEXT("JUSYNC Async: Got world context: %s"), *World->GetName());
+    UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Async: Got world context: %s"), *World->GetName());
     
     // Start receiving using your existing function
     bool bStarted = UJUSYNCBlueprintLibrary::StartJUSYNCReceiving();
     
     if (!bStarted)
     {
-        UE_LOG(LogTemp, Error, TEXT("Failed to start JUSYNC receiving - check middleware initialization"));
+        UE_LOG(LogJUSYNC, Error, TEXT("Failed to start JUSYNC receiving - check middleware initialization"));
         SetReadyToDestroy();
         return;
     }
     
-    UE_LOG(LogTemp, Log, TEXT("JUSYNC receiving started successfully"));
+    UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC receiving started successfully"));
     
     // Set up timer to check for files
     World->GetTimerManager().SetTimer(CheckTimer, this, 
         &UJUSYNCAsyncReceiveFiles::CheckForFiles, 0.1f, true);
         
-    UE_LOG(LogTemp, Log, TEXT("JUSYNC Async: Timer setup complete"));
+    UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Async: Timer setup complete"));
 }
 
 
@@ -196,7 +197,7 @@ void UJUSYNCAsyncReceiveFiles::CheckForFiles()
     TArray<FJUSYNCFileData> ReceivedFiles;
     if (UJUSYNCBlueprintLibrary::CheckForReceivedFiles(ReceivedFiles))
     {
-        UE_LOG(LogTemp, Log, TEXT("JUSYNC Async: Found %d files"), ReceivedFiles.Num());
+        UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Async: Found %d files"), ReceivedFiles.Num());
         for (const FJUSYNCFileData& FileData : ReceivedFiles)
         {
             OnFileReceived.Broadcast(FileData, true);

@@ -6,6 +6,7 @@
 #include "RenderUtils.h"
 #include "RealtimeMeshComponent.h"
 #include "JUSYNCBlueprintLibrary.h"
+#include "JUSYNCModule.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Engine/GameInstance.h"
@@ -27,27 +28,27 @@ static UJUSYNCSubsystem* g_SubsystemInstance = nullptr;
 // Enhanced callback functions with detailed debugging
 extern "C" void FileReceivedCallback_Static(const CFileData* file_data)
 {
-    UE_LOG(LogTemp, Warning, TEXT("=== ZMQ CALLBACK TRIGGERED ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("=== ZMQ CALLBACK TRIGGERED ==="));
     
     if (!file_data)
     {
-        UE_LOG(LogTemp, Error, TEXT("FileReceivedCallback_Static: NULL file_data received"));
+        UE_LOG(LogJUSYNC, Error, TEXT("FileReceivedCallback_Static: NULL file_data received"));
         return;
     }
     
-    UE_LOG(LogTemp, Warning, TEXT("ZMQ File Received:"));
-    UE_LOG(LogTemp, Warning, TEXT("  - Filename: %s"), UTF8_TO_TCHAR(file_data->filename));
-    UE_LOG(LogTemp, Warning, TEXT("  - File Type: %s"), UTF8_TO_TCHAR(file_data->file_type));
-    UE_LOG(LogTemp, Warning, TEXT("  - Data Size: %d bytes"), file_data->data_size);
-    UE_LOG(LogTemp, Warning, TEXT("  - Hash: %s"), UTF8_TO_TCHAR(file_data->hash));
+    UE_LOG(LogJUSYNC, Log, TEXT("ZMQ File Received:"));
+    UE_LOG(LogJUSYNC, Log, TEXT("  - Filename: %s"), UTF8_TO_TCHAR(file_data->filename));
+    UE_LOG(LogJUSYNC, Log, TEXT("  - File Type: %s"), UTF8_TO_TCHAR(file_data->file_type));
+    UE_LOG(LogJUSYNC, Log, TEXT("  - Data Size: %d bytes"), file_data->data_size);
+    UE_LOG(LogJUSYNC, Log, TEXT("  - Hash: %s"), UTF8_TO_TCHAR(file_data->hash));
     
     if (!g_SubsystemInstance)
     {
-        UE_LOG(LogTemp, Error, TEXT("FileReceivedCallback_Static: g_SubsystemInstance is NULL"));
+        UE_LOG(LogJUSYNC, Error, TEXT("FileReceivedCallback_Static: g_SubsystemInstance is NULL"));
         return;
     }
     
-    UE_LOG(LogTemp, Log, TEXT("Creating async task for file processing..."));
+    UE_LOG(LogJUSYNC, Log, TEXT("Creating async task for file processing..."));
     
     // Create a copy of the data for the lambda
     CFileData LocalData = *file_data;
@@ -60,15 +61,15 @@ extern "C" void FileReceivedCallback_Static(const CFileData* file_data)
     
     AsyncTask(ENamedThreads::GameThread, [LocalData]()
     {
-        UE_LOG(LogTemp, Warning, TEXT("=== ASYNC TASK EXECUTING ON GAME THREAD ==="));
+        UE_LOG(LogJUSYNC, Log, TEXT("=== ASYNC TASK EXECUTING ON GAME THREAD ==="));
         
         if (!g_SubsystemInstance)
         {
-            UE_LOG(LogTemp, Error, TEXT("Async Task: g_SubsystemInstance is NULL on game thread"));
+            UE_LOG(LogJUSYNC, Error, TEXT("Async Task: g_SubsystemInstance is NULL on game thread"));
             return;
         }
         
-        UE_LOG(LogTemp, Log, TEXT("Converting C data to UE format..."));
+        UE_LOG(LogJUSYNC, Log, TEXT("Converting C data to UE format..."));
         
         FJUSYNCFileData UEFileData;
         UEFileData.Filename = FString(UTF8_TO_TCHAR(LocalData.filename));
@@ -77,10 +78,10 @@ extern "C" void FileReceivedCallback_Static(const CFileData* file_data)
         UEFileData.Data.SetNum(LocalData.data_size);
         FMemory::Memcpy(UEFileData.Data.GetData(), LocalData.data, LocalData.data_size);
         
-        UE_LOG(LogTemp, Warning, TEXT("Broadcasting to Blueprint events..."));
-        UE_LOG(LogTemp, Warning, TEXT("  - UE Filename: %s"), *UEFileData.Filename);
-        UE_LOG(LogTemp, Warning, TEXT("  - UE File Type: %s"), *UEFileData.FileType);
-        UE_LOG(LogTemp, Warning, TEXT("  - UE Data Size: %d"), UEFileData.Data.Num());
+        UE_LOG(LogJUSYNC, Log, TEXT("Broadcasting to Blueprint events..."));
+        UE_LOG(LogJUSYNC, Log, TEXT("  - UE Filename: %s"), *UEFileData.Filename);
+        UE_LOG(LogJUSYNC, Log, TEXT("  - UE File Type: %s"), *UEFileData.FileType);
+        UE_LOG(LogJUSYNC, Log, TEXT("  - UE Data Size: %d"), UEFileData.Data.Num());
         
         // Send to Blueprint Library FIRST
         g_SubsystemInstance->HandleFileReceivedForLibrary(UEFileData);
@@ -88,7 +89,7 @@ extern "C" void FileReceivedCallback_Static(const CFileData* file_data)
         // Broadcast to subsystem events
         g_SubsystemInstance->OnFileReceived.Broadcast(UEFileData);
         
-        UE_LOG(LogTemp, Warning, TEXT("=== FILE PROCESSING COMPLETE ==="));
+        UE_LOG(LogJUSYNC, Log, TEXT("=== FILE PROCESSING COMPLETE ==="));
 
         if (LocalData.data) {
             delete[] LocalData.data;
@@ -99,19 +100,19 @@ extern "C" void FileReceivedCallback_Static(const CFileData* file_data)
 
 extern "C" void MessageReceivedCallback_Static(const char* message)
 {
-    UE_LOG(LogTemp, Warning, TEXT("=== ZMQ MESSAGE CALLBACK TRIGGERED ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("=== ZMQ MESSAGE CALLBACK TRIGGERED ==="));
     
     if (!message)
     {
-        UE_LOG(LogTemp, Error, TEXT("MessageReceivedCallback_Static: NULL message received"));
+        UE_LOG(LogJUSYNC, Error, TEXT("MessageReceivedCallback_Static: NULL message received"));
         return;
     }
     
-    UE_LOG(LogTemp, Warning, TEXT("ZMQ Message: %s"), UTF8_TO_TCHAR(message));
+    UE_LOG(LogJUSYNC, Log, TEXT("ZMQ Message: %s"), UTF8_TO_TCHAR(message));
     
     if (!g_SubsystemInstance)
     {
-        UE_LOG(LogTemp, Error, TEXT("MessageReceivedCallback_Static: g_SubsystemInstance is NULL"));
+        UE_LOG(LogJUSYNC, Error, TEXT("MessageReceivedCallback_Static: g_SubsystemInstance is NULL"));
         return;
     }
     
@@ -122,7 +123,7 @@ extern "C" void MessageReceivedCallback_Static(const char* message)
     {
         if (g_SubsystemInstance)
         {
-            UE_LOG(LogTemp, Warning, TEXT("Broadcasting message to Blueprint: %s"), *MessageCopy);
+            UE_LOG(LogJUSYNC, Log, TEXT("Broadcasting message to Blueprint: %s"), *MessageCopy);
             g_SubsystemInstance->OnMessageReceived.Broadcast(MessageCopy);
             g_SubsystemInstance->HandleMessageReceivedForLibrary(MessageCopy);
         }
@@ -197,9 +198,9 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
         bool bDetectedVertexInterp = (ColorCount == VertexCount);
         bool bDetectedUniformInterp = (ColorCount == FaceCount);
         
-        UE_LOG(LogTemp, Warning, TEXT("🎨 Color conversion: %d colors, %d vertices, %d faces"),
+        UE_LOG(LogJUSYNC, Log, TEXT("🎨 Color conversion: %d colors, %d vertices, %d faces"),
                ColorCount, VertexCount, FaceCount);
-        UE_LOG(LogTemp, Warning, TEXT("🎨 Detected: %s | Force Vertex: %s"),
+        UE_LOG(LogJUSYNC, Log, TEXT("🎨 Detected: %s | Force Vertex: %s"),
                bDetectedVertexInterp ? TEXT("VERTEX") : (bDetectedUniformInterp ? TEXT("UNIFORM") : TEXT("UNKNOWN")),
                bForceVertexInterpolation ? TEXT("YES") : TEXT("NO"));
 
@@ -208,7 +209,7 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
         if (bDetectedVertexInterp)
         {
             // ✅ CASE 1: Already vertex interpolation - direct mapping (PRESERVED)
-            UE_LOG(LogTemp, Warning, TEXT("🎨 Using direct VERTEX interpolation"));
+            UE_LOG(LogJUSYNC, Log, TEXT("🎨 Using direct VERTEX interpolation"));
             for (int32 i = 0; i < VertexCount; ++i)
             {
                 int64 idx = int64(i) * 4;
@@ -222,7 +223,7 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
         else if (bDetectedUniformInterp && bForceVertexInterpolation)
         {
             // ✅ CASE 2: Uniform detected + Force Vertex = Convert uniform to smooth vertex interpolation
-            UE_LOG(LogTemp, Warning, TEXT("🎨 CONVERTING uniform to smooth VERTEX interpolation"));
+            UE_LOG(LogJUSYNC, Log, TEXT("🎨 CONVERTING uniform to smooth VERTEX interpolation"));
             
             // Initialize vertex color accumulation arrays
             TArray<FLinearColor> AccumulatedColors;
@@ -284,13 +285,13 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
                 UEMesh.VertexColors.Add(FColor(r, g, b, a));
             }
             
-            UE_LOG(LogTemp, Warning, TEXT("✅ Converted uniform to smooth vertex interpolation: %d vertex colors"), 
+            UE_LOG(LogJUSYNC, Log, TEXT("✅ Converted uniform to smooth vertex interpolation: %d vertex colors"), 
                    UEMesh.VertexColors.Num());
         }
         else if (bDetectedUniformInterp && !bForceVertexInterpolation)
         {
             // ✅ CASE 3: Keep original uniform behavior (PRESERVED for backwards compatibility)
-            UE_LOG(LogTemp, Warning, TEXT("🎨 Using original UNIFORM interpolation (flat shading)"));
+            UE_LOG(LogJUSYNC, Log, TEXT("🎨 Using original UNIFORM interpolation (flat shading)"));
             UEMesh.VertexColors.Reserve(FaceCount * 3);
             
             for (int32 f = 0; f < FaceCount; ++f)
@@ -312,7 +313,7 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
         else
         {
             // ✅ CASE 4: Fallback behavior (PRESERVED)
-            UE_LOG(LogTemp, Warning, TEXT("🎨 Using fallback vertex interpolation"));
+            UE_LOG(LogJUSYNC, Warning, TEXT("🎨 Using fallback vertex interpolation"));
             for (int32 i = 0; i < VertexCount; ++i)
             {
                 if (i < ColorCount)
@@ -332,7 +333,7 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
         }
 
         // ✅ PRESERVED: Debug logging for color verification
-        UE_LOG(LogTemp, Warning, TEXT("🎨 Final vertex colors: %d"), UEMesh.VertexColors.Num());
+        UE_LOG(LogJUSYNC, Log, TEXT("🎨 Final vertex colors: %d"), UEMesh.VertexColors.Num());
         
         // ✅ PRESERVED: DEBUG dump first 20 different colours
         TSet<FColor> Unique;
@@ -342,12 +343,12 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
             if (!Unique.Contains(C))
             {
                 Unique.Add(C);
-                UE_LOG(LogTemp, Warning, TEXT("USD Color[%d] = (R=%d G=%d B=%d A=%d)"),
+                UE_LOG(LogJUSYNC, Log, TEXT("USD Color[%d] = (R=%d G=%d B=%d A=%d)"),
                        i, C.R, C.G, C.B, C.A);
                 if (Unique.Num() == 20) break;
             }
         }
-        UE_LOG(LogTemp, Warning, TEXT("Total unique colours in first scan: %d"), Unique.Num());
+        UE_LOG(LogJUSYNC, Log, TEXT("Total unique colours in first scan: %d"), Unique.Num());
     }
 
     return UEMesh;
@@ -363,14 +364,14 @@ void UJUSYNCSubsystem::Initialize(FSubsystemCollectionBase& Collection)
     // Set global instance for callbacks
     g_SubsystemInstance = this;
     
-    UE_LOG(LogTemp, Warning, TEXT("=== JUSYNC SUBSYSTEM INITIALIZED ==="));
-    UE_LOG(LogTemp, Warning, TEXT("Global instance set: %p"), g_SubsystemInstance);
-    UE_LOG(LogTemp, Log, TEXT("JUSYNCSubsystem initialized with C-wrapper interface"));
+    UE_LOG(LogJUSYNC, Log, TEXT("=== JUSYNC SUBSYSTEM INITIALIZED ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Global instance set: %p"), g_SubsystemInstance);
+    UE_LOG(LogJUSYNC, Log, TEXT("JUSYNCSubsystem initialized with C-wrapper interface"));
 }
 
 void UJUSYNCSubsystem::Deinitialize()
 {
-    UE_LOG(LogTemp, Warning, TEXT("=== JUSYNC SUBSYSTEM DEINITIALIZING ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("=== JUSYNC SUBSYSTEM DEINITIALIZING ==="));
     
     ShutdownMiddleware();
     
@@ -378,7 +379,7 @@ void UJUSYNCSubsystem::Deinitialize()
     g_SubsystemInstance = nullptr;
     
     Super::Deinitialize();
-    UE_LOG(LogTemp, Log, TEXT("JUSYNCSubsystem deinitialized"));
+    UE_LOG(LogJUSYNC, Log, TEXT("JUSYNCSubsystem deinitialized"));
 }
 
 bool UJUSYNCSubsystem::ShouldCreateSubsystem(UObject* Outer) const
@@ -390,16 +391,16 @@ bool UJUSYNCSubsystem::InitializeMiddleware(const FString& Endpoint)
 {
     FScopeLock Lock(&MiddlewareMutex);
     
-    UE_LOG(LogTemp, Warning, TEXT("=== INITIALIZING JUSYNC MIDDLEWARE ==="));
-    UE_LOG(LogTemp, Warning, TEXT("Requested Endpoint: %s"), *Endpoint);
-    UE_LOG(LogTemp, Warning, TEXT("Subsystem instance: %p"), this);
-    UE_LOG(LogTemp, Warning, TEXT("Global instance: %p"), g_SubsystemInstance);
+    UE_LOG(LogJUSYNC, Log, TEXT("=== INITIALIZING JUSYNC MIDDLEWARE ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Requested Endpoint: %s"), *Endpoint);
+    UE_LOG(LogJUSYNC, Log, TEXT("Subsystem instance: %p"), this);
+    UE_LOG(LogJUSYNC, Log, TEXT("Global instance: %p"), g_SubsystemInstance);
     
     // Ensure global instance is set
     if (!g_SubsystemInstance)
     {
         g_SubsystemInstance = this;
-        UE_LOG(LogTemp, Warning, TEXT("Set global instance: %p"), g_SubsystemInstance);
+        UE_LOG(LogJUSYNC, Log, TEXT("Set global instance: %p"), g_SubsystemInstance);
     }
     
 #ifdef WITH_ANARI_USD_MIDDLEWARE
@@ -407,45 +408,45 @@ bool UJUSYNCSubsystem::InitializeMiddleware(const FString& Endpoint)
     FTCHARToUTF8 EndpointConverter(*Endpoint);
     const char* EndpointCStr = Endpoint.IsEmpty() ? "tcp://*:5556" : EndpointConverter.Get();
     
-    UE_LOG(LogTemp, Warning, TEXT("Using C endpoint: %s"), UTF8_TO_TCHAR(EndpointCStr));
+    UE_LOG(LogJUSYNC, Log, TEXT("Using C endpoint: %s"), UTF8_TO_TCHAR(EndpointCStr));
     
     // Register callbacks BEFORE initialization
-    UE_LOG(LogTemp, Warning, TEXT("Registering ZMQ callbacks..."));
+    UE_LOG(LogJUSYNC, Log, TEXT("Registering ZMQ callbacks..."));
     RegisterUpdateCallback_C(FileReceivedCallback_Static);
     RegisterMessageCallback_C(MessageReceivedCallback_Static);
-    UE_LOG(LogTemp, Warning, TEXT("✅ Callbacks registered"));
+    UE_LOG(LogJUSYNC, Log, TEXT("✅ Callbacks registered"));
     
     // Initialize middleware using C interface
-    UE_LOG(LogTemp, Warning, TEXT("Calling InitializeMiddleware_C..."));
+    UE_LOG(LogJUSYNC, Log, TEXT("Calling InitializeMiddleware_C..."));
     int Result = InitializeMiddleware_C(EndpointCStr);
     
-    UE_LOG(LogTemp, Warning, TEXT("InitializeMiddleware_C returned: %d"), Result);
+    UE_LOG(LogJUSYNC, Log, TEXT("InitializeMiddleware_C returned: %d"), Result);
     
     bIsInitialized.store(Result == 1);
     
     if (Result == 1)
     {
-        UE_LOG(LogTemp, Warning, TEXT("✅ ROUTER socket bound to: %s"), UTF8_TO_TCHAR(EndpointCStr));
-        UE_LOG(LogTemp, Warning, TEXT("✅ Waiting for DEALER connections..."));
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ ROUTER socket bound to: %s"), UTF8_TO_TCHAR(EndpointCStr));
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Waiting for DEALER connections..."));
         
         // Test connection status
         int ConnectionStatus = IsConnected_C();
-        UE_LOG(LogTemp, Warning, TEXT("Connection status check: %d"), ConnectionStatus);
+        UE_LOG(LogJUSYNC, Log, TEXT("Connection status check: %d"), ConnectionStatus);
         
         // Get status info
         const char* StatusInfo = GetStatusInfo_C();
-        UE_LOG(LogTemp, Warning, TEXT("Middleware status: %s"), UTF8_TO_TCHAR(StatusInfo));
+        UE_LOG(LogJUSYNC, Log, TEXT("Middleware status: %s"), UTF8_TO_TCHAR(StatusInfo));
         
-        UE_LOG(LogTemp, Log, TEXT("JUSYNC Middleware initialized successfully on %s"), *Endpoint);
+        UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Middleware initialized successfully on %s"), *Endpoint);
     }
     else
     {
-        UE_LOG(LogTemp, Error, TEXT("❌ Failed to initialize JUSYNC Middleware (Result: %d)"), Result);
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to initialize JUSYNC Middleware (Result: %d)"), Result);
     }
     
     return Result == 1;
 #else
-    UE_LOG(LogTemp, Error, TEXT("JUSYNC compiled without middleware support"));
+    UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC compiled without middleware support"));
     return false;
 #endif
 }
@@ -454,12 +455,12 @@ void UJUSYNCSubsystem::ShutdownMiddleware()
 {
     FScopeLock Lock(&MiddlewareMutex);
     
-    UE_LOG(LogTemp, Warning, TEXT("=== SHUTTING DOWN JUSYNC MIDDLEWARE ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("=== SHUTTING DOWN JUSYNC MIDDLEWARE ==="));
     
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     ShutdownMiddleware_C();
     bIsInitialized.store(false);
-    UE_LOG(LogTemp, Log, TEXT("JUSYNC Middleware shutdown"));
+    UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Middleware shutdown"));
 #endif
 }
 
@@ -475,7 +476,7 @@ bool UJUSYNCSubsystem::IsMiddlewareConnected() const
     StatusCheckCount++;
     if (StatusCheckCount % 1000 == 0) // Log every 1000 calls
     {
-        UE_LOG(LogTemp, Log, TEXT("Connection status: %s (Check #%d)"), 
+        UE_LOG(LogJUSYNC, Log, TEXT("Connection status: %s (Check #%d)"), 
                bConnected ? TEXT("CONNECTED") : TEXT("DISCONNECTED"), StatusCheckCount);
     }
     
@@ -493,7 +494,7 @@ FString UJUSYNCSubsystem::GetStatusInfo() const
     const char* StatusCStr = GetStatusInfo_C();
     FString Status = FString(UTF8_TO_TCHAR(StatusCStr));
     
-    UE_LOG(LogTemp, Log, TEXT("Status info requested: %s"), *Status);
+    UE_LOG(LogJUSYNC, Log, TEXT("Status info requested: %s"), *Status);
     return Status;
 #else
     return TEXT("Middleware not available");
@@ -504,39 +505,39 @@ bool UJUSYNCSubsystem::StartReceiving()
 {
     FScopeLock Lock(&MiddlewareMutex);
     
-    UE_LOG(LogTemp, Warning, TEXT("=== STARTING JUSYNC RECEIVING ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("=== STARTING JUSYNC RECEIVING ==="));
     
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (!bIsInitialized.load())
     {
-        UE_LOG(LogTemp, Error, TEXT("❌ Cannot start receiving - middleware not initialized"));
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot start receiving - middleware not initialized"));
         return false;
     }
     
-    UE_LOG(LogTemp, Warning, TEXT("Middleware is initialized, calling StartReceiving_C..."));
+    UE_LOG(LogJUSYNC, Log, TEXT("Middleware is initialized, calling StartReceiving_C..."));
     
     int Result = StartReceiving_C();
     
-    UE_LOG(LogTemp, Warning, TEXT("StartReceiving_C returned: %d"), Result);
+    UE_LOG(LogJUSYNC, Log, TEXT("StartReceiving_C returned: %d"), Result);
     
     if (Result == 1)
     {
-        UE_LOG(LogTemp, Warning, TEXT("✅ JUSYNC Started Receiving Data"));
-        UE_LOG(LogTemp, Warning, TEXT("✅ ROUTER is now listening for DEALER messages"));
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ JUSYNC Started Receiving Data"));
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ ROUTER is now listening for DEALER messages"));
         
         // Additional status checks
         int ConnectionStatus = IsConnected_C();
-        UE_LOG(LogTemp, Warning, TEXT("Post-start connection status: %d"), ConnectionStatus);
+        UE_LOG(LogJUSYNC, Log, TEXT("Post-start connection status: %d"), ConnectionStatus);
         
         const char* StatusInfo = GetStatusInfo_C();
-        UE_LOG(LogTemp, Warning, TEXT("Post-start middleware status: %s"), UTF8_TO_TCHAR(StatusInfo));
+        UE_LOG(LogJUSYNC, Log, TEXT("Post-start middleware status: %s"), UTF8_TO_TCHAR(StatusInfo));
         
-        UE_LOG(LogTemp, Log, TEXT("JUSYNC Start receiving: Success"));
+        UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Start receiving: Success"));
     }
     else
     {
-        UE_LOG(LogTemp, Error, TEXT("❌ Failed to start receiving (Result: %d)"), Result);
-        UE_LOG(LogTemp, Log, TEXT("JUSYNC Start receiving: Failed"));
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to start receiving (Result: %d)"), Result);
+        UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Start receiving: Failed"));
     }
     
     return Result == 1;
@@ -548,18 +549,18 @@ void UJUSYNCSubsystem::StopReceiving()
 {
     FScopeLock Lock(&MiddlewareMutex);
     
-    UE_LOG(LogTemp, Warning, TEXT("=== STOPPING JUSYNC RECEIVING ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("=== STOPPING JUSYNC RECEIVING ==="));
     
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     StopReceiving_C();
-    UE_LOG(LogTemp, Log, TEXT("JUSYNC Stopped receiving"));
+    UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Stopped receiving"));
 #endif
 }
 
 void UJUSYNCSubsystem::HandleFileReceivedForLibrary(const FJUSYNCFileData& FileData)
 {
-    UE_LOG(LogTemp, Warning, TEXT("=== ADDING FILE TO BLUEPRINT LIBRARY ==="));
-    UE_LOG(LogTemp, Warning, TEXT("File: %s (%d bytes, %s)"), 
+    UE_LOG(LogJUSYNC, Log, TEXT("=== ADDING FILE TO BLUEPRINT LIBRARY ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("File: %s (%d bytes, %s)"), 
            *FileData.Filename, FileData.Data.Num(), *FileData.FileType);
     
     FScopeLock Lock(&UJUSYNCBlueprintLibrary::DataMutex);
@@ -568,14 +569,14 @@ void UJUSYNCSubsystem::HandleFileReceivedForLibrary(const FJUSYNCFileData& FileD
     UJUSYNCBlueprintLibrary::ReceivedFiles.Add(FileData);
     int32 NewCount = UJUSYNCBlueprintLibrary::ReceivedFiles.Num();
     
-    UE_LOG(LogTemp, Warning, TEXT("Blueprint Library file count: %d -> %d"), PreviousCount, NewCount);
-    UE_LOG(LogTemp, Warning, TEXT("✅ File added to Blueprint Library: %s"), *FileData.Filename);
+    UE_LOG(LogJUSYNC, Log, TEXT("Blueprint Library file count: %d -> %d"), PreviousCount, NewCount);
+    UE_LOG(LogJUSYNC, Log, TEXT("✅ File added to Blueprint Library: %s"), *FileData.Filename);
 }
 
 void UJUSYNCSubsystem::HandleMessageReceivedForLibrary(const FString& Message)
 {
-    UE_LOG(LogTemp, Warning, TEXT("=== ADDING MESSAGE TO BLUEPRINT LIBRARY ==="));
-    UE_LOG(LogTemp, Warning, TEXT("Message: %s"), *Message);
+    UE_LOG(LogJUSYNC, Log, TEXT("=== ADDING MESSAGE TO BLUEPRINT LIBRARY ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Message: %s"), *Message);
     
     FScopeLock Lock(&UJUSYNCBlueprintLibrary::DataMutex);
     
@@ -583,8 +584,8 @@ void UJUSYNCSubsystem::HandleMessageReceivedForLibrary(const FString& Message)
     UJUSYNCBlueprintLibrary::ReceivedMessages.Add(Message);
     int32 NewCount = UJUSYNCBlueprintLibrary::ReceivedMessages.Num();
     
-    UE_LOG(LogTemp, Warning, TEXT("Blueprint Library message count: %d -> %d"), PreviousCount, NewCount);
-    UE_LOG(LogTemp, Log, TEXT("Message received for Blueprint Library: %s"), *Message);
+    UE_LOG(LogJUSYNC, Log, TEXT("Blueprint Library message count: %d -> %d"), PreviousCount, NewCount);
+    UE_LOG(LogJUSYNC, Log, TEXT("Message received for Blueprint Library: %s"), *Message);
 }
 
 bool UJUSYNCSubsystem::LoadUSDFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCMeshData>& OutMeshData)
@@ -592,7 +593,7 @@ bool UJUSYNCSubsystem::LoadUSDFromBuffer(const TArray<uint8>& Buffer, const FStr
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (!bIsInitialized.load())
     {
-        UE_LOG(LogTemp, Error, TEXT("JUSYNC Middleware not initialized"));
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Middleware not initialized"));
         return false;
     }
     
@@ -621,12 +622,12 @@ bool UJUSYNCSubsystem::LoadUSDFromBuffer(const TArray<uint8>& Buffer, const FStr
         // Free C memory
         FreeMeshData_C(CMeshes, MeshCount);
         
-        UE_LOG(LogTemp, Log, TEXT("Successfully loaded %d meshes from USD buffer"), OutMeshData.Num());
+        UE_LOG(LogJUSYNC, Log, TEXT("Successfully loaded %d meshes from USD buffer"), OutMeshData.Num());
         return true;
     }
     else
     {
-        UE_LOG(LogTemp, Error, TEXT("Failed to load USD from buffer"));
+        UE_LOG(LogJUSYNC, Error, TEXT("Failed to load USD from buffer"));
         if (CMeshes)
         {
             FreeMeshData_C(CMeshes, MeshCount);
@@ -641,7 +642,7 @@ bool UJUSYNCSubsystem::LoadUSDFromDisk(const FString& FilePath, TArray<FJUSYNCMe
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (!bIsInitialized.load())
     {
-        UE_LOG(LogTemp, Error, TEXT("JUSYNC Middleware not initialized"));
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Middleware not initialized"));
         return false;
     }
     
@@ -670,12 +671,12 @@ bool UJUSYNCSubsystem::LoadUSDFromDisk(const FString& FilePath, TArray<FJUSYNCMe
         // Free C memory
         FreeMeshData_C(CMeshes, MeshCount);
         
-        UE_LOG(LogTemp, Log, TEXT("Successfully loaded %d meshes from USD file"), OutMeshData.Num());
+        UE_LOG(LogJUSYNC, Log, TEXT("Successfully loaded %d meshes from USD file"), OutMeshData.Num());
         return true;
     }
     else
     {
-        UE_LOG(LogTemp, Error, TEXT("Failed to load USD from disk"));
+        UE_LOG(LogJUSYNC, Error, TEXT("Failed to load USD from disk"));
         if (CMeshes)
         {
             FreeMeshData_C(CMeshes, MeshCount);
@@ -692,7 +693,7 @@ FJUSYNCTextureData UJUSYNCSubsystem::CreateTextureFromBuffer(const TArray<uint8>
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (!bIsInitialized.load())
     {
-        UE_LOG(LogTemp, Error, TEXT("JUSYNC Middleware not initialized"));
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Middleware not initialized"));
         return Result;
     }
     
@@ -710,11 +711,11 @@ FJUSYNCTextureData UJUSYNCSubsystem::CreateTextureFromBuffer(const TArray<uint8>
         // Free C memory
         FreeTextureData_C(&CTexture);
         
-        UE_LOG(LogTemp, Log, TEXT("Created texture: %dx%d (%d channels)"), Result.Width, Result.Height, Result.Channels);
+        UE_LOG(LogJUSYNC, Log, TEXT("Created texture: %dx%d (%d channels)"), Result.Width, Result.Height, Result.Channels);
     }
     else
     {
-        UE_LOG(LogTemp, Error, TEXT("Failed to create texture from buffer"));
+        UE_LOG(LogJUSYNC, Error, TEXT("Failed to create texture from buffer"));
     }
 #endif
     
@@ -726,7 +727,7 @@ bool UJUSYNCSubsystem::WriteGradientLineAsPNG(const TArray<uint8>& Buffer, const
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (!bIsInitialized.load())
     {
-        UE_LOG(LogTemp, Error, TEXT("JUSYNC Middleware not initialized"));
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Middleware not initialized"));
         return false;
     }
     
@@ -739,12 +740,12 @@ bool UJUSYNCSubsystem::WriteGradientLineAsPNG(const TArray<uint8>& Buffer, const
     
     if (Result == 1)
     {
-        UE_LOG(LogTemp, Log, TEXT("Gradient PNG saved: %s"), *OutputPath);
+        UE_LOG(LogJUSYNC, Log, TEXT("Gradient PNG saved: %s"), *OutputPath);
         return true;
     }
     else
     {
-        UE_LOG(LogTemp, Error, TEXT("Failed to save gradient PNG"));
+        UE_LOG(LogJUSYNC, Error, TEXT("Failed to save gradient PNG"));
     }
 #endif
     return false;
@@ -755,7 +756,7 @@ bool UJUSYNCSubsystem::GetGradientLineAsPNGBuffer(const TArray<uint8>& Buffer, T
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (!bIsInitialized.load())
     {
-        UE_LOG(LogTemp, Error, TEXT("JUSYNC Middleware not initialized"));
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Middleware not initialized"));
         return false;
     }
     
@@ -773,12 +774,12 @@ bool UJUSYNCSubsystem::GetGradientLineAsPNGBuffer(const TArray<uint8>& Buffer, T
         // Free C memory
         FreeBuffer_C(PNGData);
         
-        UE_LOG(LogTemp, Log, TEXT("Gradient PNG buffer created: %d bytes"), OutPNGBuffer.Num());
+        UE_LOG(LogJUSYNC, Log, TEXT("Gradient PNG buffer created: %d bytes"), OutPNGBuffer.Num());
         return true;
     }
     else
     {
-        UE_LOG(LogTemp, Error, TEXT("Failed to create gradient PNG buffer"));
+        UE_LOG(LogJUSYNC, Error, TEXT("Failed to create gradient PNG buffer"));
         if (PNGData)
         {
             FreeBuffer_C(PNGData);
@@ -833,7 +834,7 @@ void RecalculateNormals(FJUSYNCMeshData& MeshData)
         }
     }
     
-    UE_LOG(LogTemp, Warning, TEXT("Recalculated normals with correct CCW winding"));
+    UE_LOG(LogJUSYNC, Log, TEXT("Recalculated normals with correct CCW winding"));
 }
 
 bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
@@ -842,15 +843,15 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
 {
     if (!RealtimeMeshComponent || !InMeshData.IsValid())
     {
-        UE_LOG(LogTemp, Error, TEXT("❌ Invalid input to CreateRealtimeMeshFromJUSYNC"));
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid input to CreateRealtimeMeshFromJUSYNC"));
         return false;
     }
 
     // Use the mesh data as-is (already processed by ConvertCMeshDataToUE_Helper with forced vertex interpolation)
     const FJUSYNCMeshData& MeshData = InMeshData;
     
-    UE_LOG(LogTemp, Warning, TEXT("🎨 === SMOOTH VERTEX INTERPOLATION MESH CREATION ==="));
-    UE_LOG(LogTemp, Warning, TEXT("Mesh: %d vertices, %d triangles, %d colors"),
+    UE_LOG(LogJUSYNC, Log, TEXT("🎨 === SMOOTH VERTEX INTERPOLATION MESH CREATION ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Mesh: %d vertices, %d triangles, %d colors"),
            MeshData.Vertices.Num(), MeshData.Triangles.Num() / 3, MeshData.VertexColors.Num());
 
     // Calculate final counts (already processed by helper function)
@@ -861,7 +862,7 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
     URealtimeMeshSimple* RealtimeMesh = RealtimeMeshComponent->InitializeRealtimeMesh<URealtimeMeshSimple>();
     if (!RealtimeMesh)
     {
-        UE_LOG(LogTemp, Error, TEXT("❌ Failed to initialize RealtimeMesh"));
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to initialize RealtimeMesh"));
         return false;
     }
 
@@ -874,7 +875,7 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
         if (VertexColorMaterial)
         {
             RealtimeMeshComponent->SetMaterial(0, VertexColorMaterial);
-            UE_LOG(LogTemp, Warning, TEXT("✅ Applied M_VertexColor material as fallback"));
+            UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied M_VertexColor material as fallback"));
         }
         else
         {
@@ -885,13 +886,13 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
                 auto* DynMat = UMaterialInstanceDynamic::Create(DefaultMat, RealtimeMeshComponent);
                 DynMat->SetScalarParameterValue(TEXT("UseVertexColor"), 1.0f);
                 RealtimeMeshComponent->SetMaterial(0, DynMat);
-                UE_LOG(LogTemp, Warning, TEXT("✅ Applied enhanced default material as fallback"));
+                UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied enhanced default material as fallback"));
             }
         }
     }
     else
     {
-        UE_LOG(LogTemp, Warning, TEXT("✅ Using provided material (preserving texture material from Blueprint)"));
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Using provided material (preserving texture material from Blueprint)"));
     }
 
 
@@ -930,7 +931,7 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
             // Debug first few vertices
             if (i < 6)
             {
-                UE_LOG(LogTemp, Warning, TEXT("🎨 Vertex %d: Smooth Color=(%d,%d,%d,%d)"), 
+                UE_LOG(LogJUSYNC, Log, TEXT("🎨 Vertex %d: Smooth Color=(%d,%d,%d,%d)"), 
                        i, VertexColor.R, VertexColor.G, VertexColor.B, VertexColor.A);
             }
         }
@@ -953,7 +954,7 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
         }
         else
         {
-            UE_LOG(LogTemp, Error, TEXT("❌ Invalid triangle %d: [%d,%d,%d] vs %d vertices"), 
+            UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid triangle %d: [%d,%d,%d] vs %d vertices"), 
                    Face, i0, i1, i2, FinalVertexCount);
         }
     }
@@ -965,12 +966,12 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
     FRealtimeMeshSectionConfig SectionConfig(0);
     SectionConfig.bIsVisible = true;
     SectionConfig.bCastsShadow = true;
-    RealtimeMesh->UpdateSectionConfig(SectionKey, SectionConfig);
+    RealtimeMesh->UpdateSectionConfig(SectionKey, SectionConfig, true);
 
     RealtimeMeshComponent->MarkRenderStateDirty();
     
-    UE_LOG(LogTemp, Warning, TEXT("🎨 === SMOOTH VERTEX INTERPOLATION MESH CREATION COMPLETE ==="));
-    UE_LOG(LogTemp, Log, TEXT("✅ CreateRealtimeMeshFromJUSYNC: Smooth mesh created '%s' (%d verts, %d tris)"),
+    UE_LOG(LogJUSYNC, Log, TEXT("🎨 === SMOOTH VERTEX INTERPOLATION MESH CREATION COMPLETE ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("✅ CreateRealtimeMeshFromJUSYNC: Smooth mesh created '%s' (%d verts, %d tris)"),
            *MeshData.ElementName, FinalVertexCount, FinalTriCount);
 
     return true;
@@ -982,7 +983,7 @@ bool UJUSYNCSubsystem::BatchCreateRealtimeMeshesFromJUSYNC(const TArray<FJUSYNCM
 {
     if (MeshDataArray.Num() != MeshComponents.Num())
     {
-        UE_LOG(LogTemp, Error, TEXT("Mesh data array and component array size mismatch"));
+        UE_LOG(LogJUSYNC, Error, TEXT("Mesh data array and component array size mismatch"));
         return false;
     }
     
@@ -997,12 +998,12 @@ bool UJUSYNCSubsystem::BatchCreateRealtimeMeshesFromJUSYNC(const TArray<FJUSYNCM
         }
         else
         {
-            UE_LOG(LogTemp, Warning, TEXT("Failed to create RealtimeMesh %d: %s"), i, *MeshDataArray[i].ElementName);
+            UE_LOG(LogJUSYNC, Warning, TEXT("Failed to create RealtimeMesh %d: %s"), i, *MeshDataArray[i].ElementName);
             bAllSuccessful = false;
         }
     }
     
-    UE_LOG(LogTemp, Log, TEXT("Batch RealtimeMesh Creation: %d/%d successful"), SuccessCount, MeshDataArray.Num());
+    UE_LOG(LogJUSYNC, Log, TEXT("Batch RealtimeMesh Creation: %d/%d successful"), SuccessCount, MeshDataArray.Num());
     return bAllSuccessful;
 }
 
@@ -1091,21 +1092,21 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(const FJUSYNCMeshDa
 {
     if (!MeshData.IsValid())
     {
-        UE_LOG(LogTemp, Error, TEXT("Invalid mesh data for spawning"));
+        UE_LOG(LogJUSYNC, Error, TEXT("Invalid mesh data for spawning"));
         return nullptr;
     }
 
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (!Subsystem)
     {
-        UE_LOG(LogTemp, Error, TEXT("JUSYNC Subsystem not available for spawning"));
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available for spawning"));
         return nullptr;
     }
 
     UWorld* World = Subsystem->GetWorld();
     if (!World)
     {
-        UE_LOG(LogTemp, Error, TEXT("No valid world context for spawning"));
+        UE_LOG(LogJUSYNC, Error, TEXT("No valid world context for spawning"));
         return nullptr;
     }
 
@@ -1116,7 +1117,7 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(const FJUSYNCMeshDa
     AActor* SpawnedActor = World->SpawnActor<AActor>(SpawnParams);
     if (!SpawnedActor)
     {
-        UE_LOG(LogTemp, Error, TEXT("Failed to spawn actor"));
+        UE_LOG(LogJUSYNC, Error, TEXT("Failed to spawn actor"));
         return nullptr;
     }
 
@@ -1139,13 +1140,13 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(const FJUSYNCMeshDa
         FString Message = FString::Printf(TEXT("✅ RealtimeMesh spawned: %s at %s"), 
                                         *MeshData.ElementName, *ActualLocation.ToString());
         //DisplayDebugMessage(Message, 5.0f, FLinearColor::Green);
-        UE_LOG(LogTemp, Warning, TEXT("%s"), *Message);
+        UE_LOG(LogJUSYNC, Log, TEXT("%s"), *Message);
         return SpawnedActor;
     }
     else
     {
         SpawnedActor->Destroy();
-        UE_LOG(LogTemp, Error, TEXT("Failed to create RealtimeMesh, destroying actor"));
+        UE_LOG(LogJUSYNC, Error, TEXT("Failed to create RealtimeMesh, destroying actor"));
         return nullptr;
     }
 }
@@ -1155,7 +1156,7 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtActor(const FJUSYNCMeshData&
 {
     if (!TargetActor)
     {
-        UE_LOG(LogTemp, Error, TEXT("Target actor is null"));
+        UE_LOG(LogJUSYNC, Error, TEXT("Target actor is null"));
         return nullptr;
     }
 
@@ -1174,15 +1175,15 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocations(
     float BatchDelay)
 {
     // Enhanced validation with rotation support
-    UE_LOG(LogTemp, Warning, TEXT("=== BATCH SPAWN DEBUG ==="));
-    UE_LOG(LogTemp, Warning, TEXT("MeshDataArray.Num(): %d"), MeshDataArray.Num());
-    UE_LOG(LogTemp, Warning, TEXT("SpawnLocations.Num(): %d"), SpawnLocations.Num());
-    UE_LOG(LogTemp, Warning, TEXT("SpawnRotations.Num(): %d"), SpawnRotations.Num());
-    UE_LOG(LogTemp, Warning, TEXT("Async Mode: %s"), bUseAsyncSpawning ? TEXT("YES") : TEXT("NO"));
+    UE_LOG(LogJUSYNC, Log, TEXT("=== BATCH SPAWN DEBUG ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("MeshDataArray.Num(): %d"), MeshDataArray.Num());
+    UE_LOG(LogJUSYNC, Log, TEXT("SpawnLocations.Num(): %d"), SpawnLocations.Num());
+    UE_LOG(LogJUSYNC, Log, TEXT("SpawnRotations.Num(): %d"), SpawnRotations.Num());
+    UE_LOG(LogJUSYNC, Log, TEXT("Async Mode: %s"), bUseAsyncSpawning ? TEXT("YES") : TEXT("NO"));
 
     if (MeshDataArray.Num() != SpawnLocations.Num())
     {
-        UE_LOG(LogTemp, Error, TEXT("❌ Array size mismatch! Meshes: %d, Locations: %d"), 
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Array size mismatch! Meshes: %d, Locations: %d"), 
                MeshDataArray.Num(), SpawnLocations.Num());
         return TArray<AActor*>();
     }
@@ -1192,11 +1193,11 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocations(
     if (FinalRotations.Num() == 0)
     {
         FinalRotations = GenerateDefaultRotations(MeshDataArray.Num());
-        UE_LOG(LogTemp, Warning, TEXT("Generated %d default rotations"), FinalRotations.Num());
+        UE_LOG(LogJUSYNC, Log, TEXT("Generated %d default rotations"), FinalRotations.Num());
     }
     else if (FinalRotations.Num() != MeshDataArray.Num())
     {
-        UE_LOG(LogTemp, Error, TEXT("❌ Rotation array size mismatch! Expected: %d, Got: %d"), 
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Rotation array size mismatch! Expected: %d, Got: %d"), 
                MeshDataArray.Num(), FinalRotations.Num());
         return TArray<AActor*>();
     }
@@ -1208,7 +1209,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocations(
     }
 
     // Async spawning logic
-    UE_LOG(LogTemp, Warning, TEXT("🚀 Starting ASYNC batch spawn with rotations"));
+    UE_LOG(LogJUSYNC, Log, TEXT("🚀 Starting ASYNC batch spawn with rotations"));
     TSharedPtr<TArray<AActor*>> SharedSpawnedActors = MakeShared<TArray<AActor*>>();
     SharedSpawnedActors->Reserve(MeshDataArray.Num());
 
@@ -1225,25 +1226,25 @@ TArray<FVector> UJUSYNCBlueprintLibrary::GetSpawnPointLocations(const FString& T
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (!Subsystem)
     {
-        UE_LOG(LogTemp, Error, TEXT("❌ No JUSYNC Subsystem"));
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ No JUSYNC Subsystem"));
         return SpawnLocations;
     }
 
     UWorld* World = Subsystem->GetWorld();
     if (!World)
     {
-        UE_LOG(LogTemp, Error, TEXT("❌ No World context"));
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ No World context"));
         return SpawnLocations;
     }
 
     // 🔍 DEBUG: Log search parameters
-    UE_LOG(LogTemp, Warning, TEXT("=== SEARCHING FOR SPAWN POINTS ==="));
-    UE_LOG(LogTemp, Warning, TEXT("Tag Filter: '%s'"), *TagFilter);
+    UE_LOG(LogJUSYNC, Log, TEXT("=== SEARCHING FOR SPAWN POINTS ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Tag Filter: '%s'"), *TagFilter);
 
     TArray<AActor*> FoundActors;
     UGameplayStatics::GetAllActorsWithTag(World, FName(*TagFilter), FoundActors);
     
-    UE_LOG(LogTemp, Warning, TEXT("Found %d actors with tag '%s'"), FoundActors.Num(), *TagFilter);
+    UE_LOG(LogJUSYNC, Log, TEXT("Found %d actors with tag '%s'"), FoundActors.Num(), *TagFilter);
 
     SpawnLocations.Reserve(FoundActors.Num());
     for (int32 i = 0; i < FoundActors.Num(); ++i)
@@ -1253,12 +1254,12 @@ TArray<FVector> UJUSYNCBlueprintLibrary::GetSpawnPointLocations(const FString& T
         {
             FVector Location = Actor->GetActorLocation();
             SpawnLocations.Add(Location);
-            UE_LOG(LogTemp, Warning, TEXT("SpawnPoint[%d]: %s at %s"), 
+            UE_LOG(LogJUSYNC, Log, TEXT("SpawnPoint[%d]: %s at %s"), 
                    i, *Actor->GetName(), *Location.ToString());
         }
     }
 
-    UE_LOG(LogTemp, Warning, TEXT("=== TOTAL SPAWN POINTS: %d ==="), SpawnLocations.Num());
+    UE_LOG(LogJUSYNC, Log, TEXT("=== TOTAL SPAWN POINTS: %d ==="), SpawnLocations.Num());
     return SpawnLocations;
 }
 
