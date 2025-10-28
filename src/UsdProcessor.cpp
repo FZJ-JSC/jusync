@@ -668,11 +668,12 @@ bool UsdProcessor::LoadUSDBuffer(const std::vector<uint8_t>& buffer,
         for (size_t i = 0; i < outMeshData.size(); ++i) {
             const auto& mesh = outMeshData[i];
             MIDDLEWARE_LOG_INFO("Mesh %zu '%s': %zu vertices, %zu triangles, %zu normals, %zu UVs",
-                               i, mesh.elementName.c_str(),
-                               mesh.points.size() / 3,
-                               mesh.indices.size() / 3,
-                               mesh.normals.size() / 3,
-                               mesh.uvs.size() / 2);
+                i, mesh.elementName.c_str(),
+                mesh.points.size(),          // ✅ CORRECT - already vec3
+                mesh.indices.size() / 3,     // ✅ CORRECT - indices to triangles
+                mesh.normals.size(),         // ✅ CORRECT - already vec3
+                mesh.uvs.size());            // ✅ CORRECT - already vec2
+
         }
 
         return true;
@@ -937,6 +938,39 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
 
     try {
         tinyusdz::GeomMesh* geomMesh = static_cast<tinyusdz::GeomMesh*>(mesh);
+                // NEW: Extract subdivision scheme
+        // NEW: Extract subdivision scheme
+        std::string subdivScheme = "none";
+        try {
+            // TinyUSDZ returns the value directly, not via pointer
+            auto subdivValue = geomMesh->subdivisionScheme.get_value();
+            // Convert SubdivisionScheme enum to string
+            if (subdivValue == tinyusdz::GeomMesh::SubdivisionScheme::CatmullClark) {
+                subdivScheme = "catmullClark";
+            } else if (subdivValue == tinyusdz::GeomMesh::SubdivisionScheme::Loop) {
+                subdivScheme = "loop";
+            } else if (subdivValue == tinyusdz::GeomMesh::SubdivisionScheme::Bilinear) {
+                subdivScheme = "bilinear";
+            } else {
+                subdivScheme = "none";
+            }
+            MIDDLEWARE_LOG_DEBUG("Mesh '%s' has subdivision scheme: %s",
+                                outMeshData.elementName.c_str(), subdivScheme.c_str());
+        } catch (...) {
+            subdivScheme = "none";
+        }
+        outMeshData.subdivisionScheme = subdivScheme;
+
+        // NEW: Extract doubleSided attribute
+        try {
+            bool doubleSidedValue = geomMesh->doubleSided.get_value();
+            outMeshData.doubleSided = doubleSidedValue;
+            MIDDLEWARE_LOG_DEBUG("Mesh '%s' doubleSided: %d",
+                                outMeshData.elementName.c_str(), outMeshData.doubleSided);
+        } catch (...) {
+            outMeshData.doubleSided = false;
+        }
+
 
         // Extract points with validation
         auto points = geomMesh->get_points();
@@ -987,69 +1021,91 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         // Extract and triangulate faces
         auto faceVertexCounts = geomMesh->get_faceVertexCounts();
         auto faceVertexIndices = geomMesh->get_faceVertexIndices();
+
+        outMeshData.faceVertexCounts.clear();
+        outMeshData.faceVertexCounts.reserve(faceVertexCounts.size());
+        for (const auto& count : faceVertexCounts) {
+            outMeshData.faceVertexCounts.push_back(static_cast<uint32_t>(count));
+        }
+
         if (faceVertexCounts.empty() || faceVertexIndices.empty()) {
             MIDDLEWARE_LOG_WARNING("Mesh has no face data: %s", outMeshData.elementName.c_str());
             return false;
         }
 
-        // Triangulate with validation
-        std::vector<uint32_t> triangulatedIndices;
-        size_t indexOffset = 0;
-        for (size_t faceIdx = 0; faceIdx < faceVertexCounts.size(); faceIdx++) {
-            int32_t numVertsInFace = faceVertexCounts[faceIdx];
-            if (numVertsInFace < 3) {
-                MIDDLEWARE_LOG_WARNING("Face %zu has less than 3 vertices, skipping", faceIdx);
-                indexOffset += numVertsInFace;
-                continue;
-            }
+        // Conditionally triangulate based on subdivision scheme
+        std::vector<uint32_t> finalIndices;
 
-            if (numVertsInFace > 100) { // Reasonable polygon limit
-                MIDDLEWARE_LOG_WARNING("Face %zu has too many vertices (%d), skipping",
-                                     faceIdx, numVertsInFace);
-                indexOffset += numVertsInFace;
-                continue;
-            }
+        if (subdivScheme == "none") {
+            // Only triangulate for non-subdivision meshes
+            MIDDLEWARE_LOG_DEBUG("Triangulating mesh (subdivScheme=none)");
 
-            // Check bounds for face indices
-            if (indexOffset + numVertsInFace > faceVertexIndices.size()) {
-                MIDDLEWARE_LOG_ERROR("Face vertex indices out of bounds");
-                break;
-            }
+            size_t indexOffset = 0;
+            for (size_t faceIdx = 0; faceIdx < faceVertexCounts.size(); ++faceIdx) {
+                int32_t numVertsInFace = faceVertexCounts[faceIdx];
 
-            // Triangulate this face
-            for (int32_t triIdx = 0; triIdx < numVertsInFace - 2; triIdx++) {
-                uint32_t idx0 = static_cast<uint32_t>(faceVertexIndices[indexOffset]);
-                uint32_t idx1 = static_cast<uint32_t>(faceVertexIndices[indexOffset + triIdx + 1]);
-                uint32_t idx2 = static_cast<uint32_t>(faceVertexIndices[indexOffset + triIdx + 2]);
-
-                // Validate indices
-                if (idx0 >= outMeshData.points.size() ||
-                    idx1 >= outMeshData.points.size() ||
-                    idx2 >= outMeshData.points.size()) {
-                    MIDDLEWARE_LOG_WARNING("Invalid triangle indices, skipping triangle");
+                if (numVertsInFace < 3) {
+                    MIDDLEWARE_LOG_WARNING("Face %zu has less than 3 vertices, skipping", faceIdx);
+                    indexOffset += numVertsInFace;
                     continue;
                 }
 
-                triangulatedIndices.push_back(idx0);
-                triangulatedIndices.push_back(idx1);
-                triangulatedIndices.push_back(idx2);
+                if (numVertsInFace > 100) {
+                    MIDDLEWARE_LOG_WARNING("Face %zu has too many vertices (%d), skipping", faceIdx, numVertsInFace);
+                    indexOffset += numVertsInFace;
+                    continue;
+                }
+
+                if (indexOffset + numVertsInFace > faceVertexIndices.size()) {
+                    MIDDLEWARE_LOG_ERROR("Face vertex indices out of bounds");
+                    break;
+                }
+
+                // Triangulate this face (fan triangulation)
+                for (int32_t triIdx = 0; triIdx < numVertsInFace - 2; ++triIdx) {
+                    uint32_t idx0 = static_cast<uint32_t>(faceVertexIndices[indexOffset]);
+                    uint32_t idx1 = static_cast<uint32_t>(faceVertexIndices[indexOffset + triIdx + 1]);
+                    uint32_t idx2 = static_cast<uint32_t>(faceVertexIndices[indexOffset + triIdx + 2]);
+
+                    if (idx0 >= outMeshData.points.size() ||
+                        idx1 >= outMeshData.points.size() ||
+                        idx2 >= outMeshData.points.size()) {
+                        MIDDLEWARE_LOG_WARNING("Invalid triangle indices, skipping triangle");
+                        continue;
+                    }
+
+                    finalIndices.push_back(idx0);
+                    finalIndices.push_back(idx1);
+                    finalIndices.push_back(idx2);
+                }
+
+                indexOffset += numVertsInFace;
             }
+        } else {
+            // Preserve original topology for subdivision surfaces
+            MIDDLEWARE_LOG_DEBUG("Preserving original topology for subdivision (scheme=%s)", subdivScheme.c_str());
 
-            indexOffset += numVertsInFace;
+            finalIndices.reserve(faceVertexIndices.size());
+            for (const auto& idx : faceVertexIndices) {
+                if (static_cast<size_t>(idx) >= outMeshData.points.size()) {
+                    MIDDLEWARE_LOG_WARNING("Invalid index %d, skipping", idx);
+                    continue;
+                }
+                finalIndices.push_back(static_cast<uint32_t>(idx));
+            }
         }
 
-        if (triangulatedIndices.empty()) {
-            MIDDLEWARE_LOG_WARNING("No valid triangles generated");
+        if (finalIndices.empty()) {
+            MIDDLEWARE_LOG_WARNING("No valid indices generated");
             return false;
         }
 
-        if (triangulatedIndices.size() > safety::MAX_MESH_INDICES) {
-            MIDDLEWARE_LOG_ERROR("Too many indices generated: %zu (max: %zu)",
-                               triangulatedIndices.size(), safety::MAX_MESH_INDICES);
+        if (finalIndices.size() > safety::MAX_MESH_INDICES) {
+            MIDDLEWARE_LOG_ERROR("Too many indices generated (%zu max %zu)", finalIndices.size(), safety::MAX_MESH_INDICES);
             return false;
         }
 
-        outMeshData.indices = std::move(triangulatedIndices);
+        outMeshData.indices = std::move(finalIndices);
 
         // Extract normals with validation
         auto normals = geomMesh->get_normals();
@@ -1618,46 +1674,63 @@ void UsdProcessor::extractUVCoordinates(tinyusdz::GeomMesh* mesh, MeshData& mesh
     if (!mesh) return;
 
     try {
-        tinyusdz::GeomPrimvar primvar;
-        std::string primvarErr;
-        bool foundUVs = false;
-
-        // Try different UV attribute names
+        // ✅ MODIFIED: Support multiple UV sets
         const std::vector<std::string> uvNames = {
-            "primvars:st", "st", "primvars:uv", "uv",
+            "primvars:st", "st",
+            "primvars:st1", "st1",
+            "primvars:st2", "st2",
+            "primvars:uv", "uv",
+            "primvars:uv0", "uv0",
+            "primvars:uv1", "uv1",
+            "primvars:map1", "map1",
             "primvars:attribute0", "attribute0"
         };
 
+        meshData.uvSets.clear();
+        meshData.uvSetNames.clear();
+
         for (const auto& name : uvNames) {
+            tinyusdz::GeomPrimvar primvar;
+            std::string primvarErr;
+
             if (mesh->get_primvar(name, &primvar, &primvarErr)) {
                 std::vector<tinyusdz::value::texcoord2f> uvs;
-                if (primvar.get_value(&uvs)) {
-                    MIDDLEWARE_LOG_DEBUG("Found %zu UV coordinates in primvar: %s",
-                                       uvs.size(), name.c_str());
 
-                    meshData.uvs.clear();
-                    meshData.uvs.reserve(uvs.size());
+                if (primvar.get_value(&uvs)) {
+                    std::vector<glm::vec2> uvChannel;
+                    uvChannel.reserve(uvs.size());
 
                     for (const auto& uv : uvs) {
-                        meshData.uvs.push_back(glm::vec2(uv.s, uv.t));
+                        uvChannel.push_back(glm::vec2(uv.s, uv.t));
                     }
 
                     // Normalize and validate UVs
-                    normalizeUVCoordinates(meshData.uvs);
-                    foundUVs = true;
-                    break;
+                    normalizeUVCoordinates(uvChannel);
+
+                    meshData.uvSets.push_back(uvChannel);
+                    meshData.uvSetNames.push_back(name);
+
+                    MIDDLEWARE_LOG_INFO("Found UV set '%s' with %zu coordinates", name.c_str(), uvChannel.size());
                 }
             }
         }
 
-        if (!foundUVs) {
-            MIDDLEWARE_LOG_DEBUG("No UV coordinates found for mesh: %s", meshData.elementName.c_str());
+        // Backward compatibility: copy first UV set to uvs
+        if (!meshData.uvSets.empty()) {
+            meshData.uvs = meshData.uvSets[0];
+            MIDDLEWARE_LOG_DEBUG("Mesh '%s' has %zu UV channels", meshData.elementName.c_str(), meshData.uvSets.size());
+
+        } else {
+            MIDDLEWARE_LOG_DEBUG("No UV coordinates found for mesh '%s'", meshData.elementName.c_str());
         }
 
     } catch (const std::exception& e) {
         MIDDLEWARE_LOG_ERROR("Exception extracting UV coordinates: %s", e.what());
+        meshData.uvSets.clear();
+        meshData.uvSetNames.clear();
     }
 }
+
 
 // Helper methods for reference resolution
 bool UsdProcessor::hasEmptyGeometry(const std::vector<MeshData>& meshData) const {

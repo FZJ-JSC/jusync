@@ -332,18 +332,32 @@ bool CollisionProcessor::generateConvexHullCollision(const std::vector<float>& v
 }
 
 bool CollisionProcessor::generateComplexCollision(const std::vector<float>& vertices,
-                                                 const std::vector<uint32_t>& indices,
-                                                 CollisionData& outCollisionData) {
+                                                   const std::vector<unsigned int>& indices,
+                                                   CollisionData& outCollisionData) {
     // For complex collision, use the original mesh
     outCollisionData.vertices = vertices;
     outCollisionData.indices = indices;
 
-    // Also calculate bounding primitives
-    generateBoundingBoxCollision(vertices, outCollisionData);
+    // ✅ FIX: Calculate bounding box WITHOUT overwriting vertices/indices
+    // Just calculate the min/max bounds and sphere
+    if (vertices.size() >= 9) {
+        glm::vec3 minBounds(vertices[0], vertices[1], vertices[2]);
+        glm::vec3 maxBounds = minBounds;
+
+        for (size_t i = 0; i < vertices.size(); i += 3) {
+            glm::vec3 vertex(vertices[i], vertices[i + 1], vertices[i + 2]);
+            minBounds = glm::min(minBounds, vertex);
+            maxBounds = glm::max(maxBounds, vertex);
+        }
+
+        outCollisionData.boundingBoxMin = minBounds;
+        outCollisionData.boundingBoxMax = maxBounds;
+        outCollisionData.sphereCenter = (minBounds + maxBounds) * 0.5f;
+        outCollisionData.sphereRadius = glm::length(maxBounds - outCollisionData.sphereCenter);
+    }
 
     MIDDLEWARE_LOG_DEBUG("Generated complex collision: %zu vertices, %zu triangles",
-        vertices.size() / 3, indices.size() / 3);
-
+                         vertices.size() / 3, indices.size() / 3);
     return true;
 }
 

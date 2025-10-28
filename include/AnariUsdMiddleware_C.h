@@ -92,6 +92,15 @@ typedef struct {
     float* vertex_colors;
     size_t vertex_colors_count;  // Total number of floats (vertices * 4)
 
+    const char* subdivision_scheme;           // "none", "catmullClark", "loop", "bilinear"
+    bool double_sided;                        // Two-sided rendering flag
+    const unsigned int* face_vertex_counts;   // Original polygon vertex counts
+    size_t face_vertex_counts_size;           // Number of faces
+
+    // Multiple UV sets
+    float** uv_sets;                    // Array of UV channel pointers [channel][u,v pairs]
+    const char** uv_set_names;                // UV channel names array
+    size_t uv_sets_count;                     // Number of UV channels
     // ========== COLLISION DATA ==========
     int collision_type;          // Maps to ECollisionComplexity_C enum
 

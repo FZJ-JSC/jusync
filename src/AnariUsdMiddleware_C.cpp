@@ -1,6 +1,7 @@
 #include "AnariUsdMiddleware_C.h"
 #include "AnariUsdMiddleware.h"
 #include "CollisionProcessor.h"
+#include "UsdProcessor.h"
 
 #include <memory>
 #include <cstring>
@@ -164,28 +165,184 @@ void StopReceiving_C() {
 }
 
 // ============================================================================
+// INTERNAL HELPER FUNCTIONS
+// ============================================================================
+
+// Thread-local storage for UV set names and subdivision schemes to ensure lifetime
+static thread_local std::vector<std::string> g_subdivision_scheme_storage;
+static thread_local std::vector<std::string> g_uv_name_storage;
+
+/**
+ * Helper function to convert UsdProcessor::MeshData to CMeshData
+ * Handles all USD geometry features including subdivision, UV sets, etc.
+ *
+ * CRITICAL: src.points is std::vector<glm::vec3>, NOT std::vector<float>!
+ *           Each vec3 becomes 3 floats in the output array.
+ */
+static void ConvertMeshDataToCFormat(const anari_usd_middleware::UsdProcessor::MeshData& src,
+                                     CMeshData& dst) {
+    // Initialize all pointers to null for safety
+    dst.points = nullptr;
+    dst.indices = nullptr;
+    dst.normals = nullptr;
+    dst.uvs = nullptr;
+    dst.vertex_colors = nullptr;
+
+    // Initialize USD geometry feature pointers
+    dst.subdivision_scheme = nullptr;
+    dst.double_sided = false;
+    dst.face_vertex_counts = nullptr;
+    dst.face_vertex_counts_size = 0;
+    dst.uv_sets = nullptr;
+    dst.uv_set_names = nullptr;
+    dst.uv_sets_count = 0;
+
+    // Safe string copying with bounds checking
+    #ifdef _WIN32
+    strncpy_s(dst.element_name, sizeof(dst.element_name), src.elementName.c_str(), 255);
+    strncpy_s(dst.type_name, sizeof(dst.type_name), src.typeName.c_str(), 127);
+    #else
+    std::strncpy(dst.element_name, src.elementName.c_str(), 255);
+    std::strncpy(dst.type_name, src.typeName.c_str(), 127);
+    dst.element_name[255] = '\0';
+    dst.type_name[127] = '\0';
+    #endif
+
+    // ========================================================================
+    // COPY VISUAL MESH DATA (CORRECTED FOR GLM TYPES)
+    // ========================================================================
+
+    // Points: src.points is std::vector<glm::vec3> -> convert to flat float array
+    size_t numVertices = src.points.size();
+    dst.points_count = numVertices * 3;  // ✅ FIXED: Each vec3 = 3 floats
+    if (dst.points_count > 0) {
+        dst.points = new float[dst.points_count];
+        for (size_t i = 0; i < numVertices; ++i) {
+            dst.points[i * 3 + 0] = src.points[i].x;
+            dst.points[i * 3 + 1] = src.points[i].y;
+            dst.points[i * 3 + 2] = src.points[i].z;
+        }
+    }
+
+    // Indices: src.indices is std::vector<unsigned int> -> direct copy
+    dst.indices_count = src.indices.size();
+    if (dst.indices_count > 0) {
+        dst.indices = new unsigned int[dst.indices_count];
+        std::memcpy(dst.indices, src.indices.data(), dst.indices_count * sizeof(unsigned int));
+    }
+
+    // Normals: src.normals is std::vector<glm::vec3> -> convert to flat float array
+    size_t numNormals = src.normals.size();
+    dst.normals_count = numNormals * 3;  // ✅ FIXED: Each vec3 = 3 floats
+    if (dst.normals_count > 0) {
+        dst.normals = new float[dst.normals_count];
+        for (size_t i = 0; i < numNormals; ++i) {
+            dst.normals[i * 3 + 0] = src.normals[i].x;
+            dst.normals[i * 3 + 1] = src.normals[i].y;
+            dst.normals[i * 3 + 2] = src.normals[i].z;
+        }
+    }
+
+    // UVs: src.uvs is std::vector<glm::vec2> -> convert to flat float array
+    size_t numUVs = src.uvs.size();
+    dst.uvs_count = numUVs * 2;  // ✅ FIXED: Each vec2 = 2 floats
+    if (dst.uvs_count > 0) {
+        dst.uvs = new float[dst.uvs_count];
+        for (size_t i = 0; i < numUVs; ++i) {
+            dst.uvs[i * 2 + 0] = src.uvs[i].x;
+            dst.uvs[i * 2 + 1] = src.uvs[i].y;
+        }
+    }
+
+    // Vertex colors: src.vertex_colors is std::vector<glm::vec3> -> convert to flat float array
+    size_t numColors = src.vertex_colors.size();
+    dst.vertex_colors_count = numColors * 3;  // ✅ FIXED: Each vec3 = 3 floats
+    if (dst.vertex_colors_count > 0) {
+        dst.vertex_colors = new float[dst.vertex_colors_count];
+        for (size_t i = 0; i < numColors; ++i) {
+            dst.vertex_colors[i * 3 + 0] = src.vertex_colors[i].x;
+            dst.vertex_colors[i * 3 + 1] = src.vertex_colors[i].y;
+            dst.vertex_colors[i * 3 + 2] = src.vertex_colors[i].z;
+        }
+    }
+
+    // ========================================================================
+    // COPY USD GEOMETRY FEATURES
+    // ========================================================================
+
+    // Subdivision scheme (thread-local storage for lifetime)
+    g_subdivision_scheme_storage.push_back(src.subdivisionScheme);
+    dst.subdivision_scheme = g_subdivision_scheme_storage.back().c_str();
+
+    // Double-sided flag
+    dst.double_sided = src.doubleSided;
+
+    // Face vertex counts
+    dst.face_vertex_counts_size = src.faceVertexCounts.size();
+    if (dst.face_vertex_counts_size > 0) {
+        unsigned int* fvc = new unsigned int[dst.face_vertex_counts_size];
+        std::memcpy(fvc, src.faceVertexCounts.data(),
+                   dst.face_vertex_counts_size * sizeof(unsigned int));
+        dst.face_vertex_counts = fvc;
+    }
+
+    // Multiple UV sets
+    dst.uv_sets_count = src.uvSets.size();
+    if (dst.uv_sets_count > 0) {
+        // Allocate array of pointers for UV channels
+        float** uvSetPtrs = new float*[dst.uv_sets_count];
+        const char** uvNamePtrs = new const char*[dst.uv_sets_count];
+
+        for (size_t j = 0; j < dst.uv_sets_count; ++j) {
+            // Copy UV data for this channel (each vec2 becomes 2 floats)
+            size_t uvCount = src.uvSets[j].size() * 2; // ✅ FIXED: vec2 -> 2 floats
+            if (uvCount > 0) {
+                uvSetPtrs[j] = new float[uvCount];
+                // Convert glm::vec2 to flat float array
+                for (size_t k = 0; k < src.uvSets[j].size(); ++k) {
+                    uvSetPtrs[j][k * 2 + 0] = src.uvSets[j][k].x;
+                    uvSetPtrs[j][k * 2 + 1] = src.uvSets[j][k].y;
+                }
+            } else {
+                uvSetPtrs[j] = nullptr;
+            }
+
+            // Store UV name (thread-local for lifetime)
+            g_uv_name_storage.push_back(src.uvSetNames[j]);
+            uvNamePtrs[j] = g_uv_name_storage.back().c_str();
+        }
+
+        dst.uv_sets = uvSetPtrs;
+        dst.uv_set_names = uvNamePtrs;
+    }
+}
+
+
+// ============================================================================
 // USD PROCESSING FUNCTIONS (Legacy - No Collision)
 // ============================================================================
 
 /**
  * Load USD data from memory buffer and extract mesh geometry (Legacy)
- * ENHANCED: Now includes vertex color extraction for Unreal RealtimeMesh
+ * ENHANCED: Now includes USD geometry features (subdivision, multi-UV, etc.)
  */
 int LoadUSDBuffer_C(const unsigned char* buffer, size_t buffer_size, const char* filename,
                     CMeshData** out_meshes, size_t* out_count) {
-    // Validate input parameters
-    if (!g_middleware || !buffer || !filename || !out_meshes || !out_count) {
+    if (!buffer || !filename || !out_meshes || !out_count) {
         return 0;
     }
 
     try {
         // Convert C types to C++ types
-        std::vector<unsigned char> std_buffer(buffer, buffer + buffer_size);
+        std::vector<uint8_t> std_buffer(buffer, buffer + buffer_size);
         std::string std_filename(filename);
-        std::vector<anari_usd_middleware::MeshData> mesh_data;
+        std::vector<anari_usd_middleware::UsdProcessor::MeshData> mesh_data;
 
-        // Call middleware USD processing
-        bool result = g_middleware->LoadUSDBuffer(std_buffer, std_filename, mesh_data);
+        // Create UsdProcessor instance and call ProcessFile directly
+        anari_usd_middleware::UsdProcessor processor;
+        bool result = processor.LoadUSDBuffer(std_buffer, std_filename, mesh_data);
+
+
         if (!result || mesh_data.empty()) {
             *out_count = 0;
             *out_meshes = nullptr;
@@ -196,84 +353,28 @@ int LoadUSDBuffer_C(const unsigned char* buffer, size_t buffer_size, const char*
         *out_count = mesh_data.size();
         *out_meshes = new CMeshData[*out_count];
 
-        // Convert each mesh from C++ to C format
+        // Convert each mesh using helper
         for (size_t i = 0; i < mesh_data.size(); ++i) {
-            const auto& src = mesh_data[i];
-            CMeshData& dst = (*out_meshes)[i];
+            ConvertMeshDataToCFormat(mesh_data[i], (*out_meshes)[i]);
 
-            // Initialize all pointers to null for safety
-            dst.points = nullptr;
-            dst.indices = nullptr;
-            dst.normals = nullptr;
-            dst.uvs = nullptr;
-            dst.vertex_colors = nullptr;
             // Initialize collision fields to defaults
-            dst.collision_type = COLLISION_NONE;
-            dst.collision_vertices = nullptr;
-            dst.collision_indices = nullptr;
-            dst.collision_vertices_count = 0;
-            dst.collision_indices_count = 0;
+            (*out_meshes)[i].collision_type = COLLISION_NONE;
+            (*out_meshes)[i].collision_vertices = nullptr;
+            (*out_meshes)[i].collision_indices = nullptr;
+            (*out_meshes)[i].collision_vertices_count = 0;
+            (*out_meshes)[i].collision_indices_count = 0;
 
-            // Initialize simple collision data
             for (int j = 0; j < 3; j++) {
-                dst.bounding_box_min[j] = 0.0f;
-                dst.bounding_box_max[j] = 0.0f;
-                dst.sphere_center[j] = 0.0f;
+                (*out_meshes)[i].bounding_box_min[j] = 0.0f;
+                (*out_meshes)[i].bounding_box_max[j] = 0.0f;
+                (*out_meshes)[i].sphere_center[j] = 0.0f;
             }
-            dst.sphere_radius = 0.0f;
-
-            // Safe string copying with bounds checking
-#ifdef _WIN32
-            strncpy_s(dst.element_name, sizeof(dst.element_name), src.elementName.c_str(), 255);
-            strncpy_s(dst.type_name, sizeof(dst.type_name), src.typeName.c_str(), 127);
-#else
-            std::strncpy(dst.element_name, src.elementName.c_str(), 255);
-            std::strncpy(dst.type_name, src.typeName.c_str(), 127);
-            dst.element_name[255] = '\0';
-            dst.type_name[127] = '\0';
-#endif
-
-            // Copy points (src.points is already a flat float array from middleware)
-            dst.points_count = src.points.size();
-            if (dst.points_count > 0) {
-                dst.points = new float[dst.points_count];
-                std::memcpy(dst.points, src.points.data(), dst.points_count * sizeof(float));
-            }
-
-            // Copy triangle indices
-            dst.indices_count = src.indices.size();
-            if (dst.indices_count > 0) {
-                dst.indices = new unsigned int[dst.indices_count];
-                std::memcpy(dst.indices, src.indices.data(), dst.indices_count * sizeof(unsigned int));
-            }
-
-            // Copy normals (src.normals is already a flat float array from middleware)
-            dst.normals_count = src.normals.size();
-            if (dst.normals_count > 0) {
-                dst.normals = new float[dst.normals_count];
-                std::memcpy(dst.normals, src.normals.data(), dst.normals_count * sizeof(float));
-            }
-
-            // Copy UVs (src.uvs is already a flat float array from middleware)
-            dst.uvs_count = src.uvs.size();
-            if (dst.uvs_count > 0) {
-                dst.uvs = new float[dst.uvs_count];
-                std::memcpy(dst.uvs, src.uvs.data(), dst.uvs_count * sizeof(float));
-            }
-
-            // ✅ Copy vertex colors (RGBA values from primvars:color.timeSamples)
-            // This enables vertex colors from USD files in Unreal Engine
-            dst.vertex_colors_count = src.vertex_colors.size();
-            if (dst.vertex_colors_count > 0) {
-                dst.vertex_colors = new float[dst.vertex_colors_count];
-                std::memcpy(dst.vertex_colors, src.vertex_colors.data(),
-                           dst.vertex_colors_count * sizeof(float));
-            }
+            (*out_meshes)[i].sphere_radius = 0.0f;
         }
 
         return 1;
+
     } catch (...) {
-        // Cleanup on exception
         *out_count = 0;
         *out_meshes = nullptr;
         return 0;
@@ -282,21 +383,40 @@ int LoadUSDBuffer_C(const unsigned char* buffer, size_t buffer_size, const char*
 
 /**
  * Load USD data directly from disk file (Legacy)
- * ENHANCED: Now includes vertex color extraction for Unreal RealtimeMesh
+ * ENHANCED: Now includes USD geometry features (subdivision, multi-UV, etc.)
  */
 int LoadUSDFromDisk_C(const char* filepath, CMeshData** out_meshes, size_t* out_count) {
-    // Validate input parameters
-    if (!g_middleware || !filepath || !out_meshes || !out_count) {
+    if (!filepath || !out_meshes || !out_count) {
         return 0;
     }
 
     try {
-        // Convert C types to C++ types
-        std::string std_filepath(filepath);
-        std::vector<anari_usd_middleware::MeshData> mesh_data;
+        // Read file into buffer
+        std::ifstream file(filepath, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) {
+            *out_count = 0;
+            *out_meshes = nullptr;
+            return 0;
+        }
 
-        // Call middleware USD processing
-        bool result = g_middleware->LoadUSDFromDisk(std_filepath, mesh_data);
+        std::streamsize size = file.tellg();
+        file.seekg(0, std::ios::beg);
+
+        std::vector<uint8_t> buffer(size);
+        if (!file.read(reinterpret_cast<char*>(buffer.data()), size)) {
+            *out_count = 0;
+            *out_meshes = nullptr;
+            return 0;
+        }
+
+        std::string std_filepath(filepath);
+        std::vector<anari_usd_middleware::UsdProcessor::MeshData> mesh_data;
+
+        // Create UsdProcessor instance and call ProcessFile directly
+        anari_usd_middleware::UsdProcessor processor;
+        bool result = processor.LoadUSDFromDisk(std_filepath, mesh_data);
+
+
         if (!result || mesh_data.empty()) {
             *out_count = 0;
             *out_meshes = nullptr;
@@ -307,81 +427,28 @@ int LoadUSDFromDisk_C(const char* filepath, CMeshData** out_meshes, size_t* out_
         *out_count = mesh_data.size();
         *out_meshes = new CMeshData[*out_count];
 
-        // Convert each mesh from C++ to C format
+        // Convert each mesh using helper
         for (size_t i = 0; i < mesh_data.size(); ++i) {
-            const auto& src = mesh_data[i];
-            CMeshData& dst = (*out_meshes)[i];
+            ConvertMeshDataToCFormat(mesh_data[i], (*out_meshes)[i]);
 
-            // Initialize all pointers to null for safety
-            dst.points = nullptr;
-            dst.indices = nullptr;
-            dst.normals = nullptr;
-            dst.uvs = nullptr;
-            dst.vertex_colors = nullptr;
             // Initialize collision fields to defaults
-            dst.collision_type = COLLISION_NONE;
-            dst.collision_vertices = nullptr;
-            dst.collision_indices = nullptr;
-            dst.collision_vertices_count = 0;
-            dst.collision_indices_count = 0;
+            (*out_meshes)[i].collision_type = COLLISION_NONE;
+            (*out_meshes)[i].collision_vertices = nullptr;
+            (*out_meshes)[i].collision_indices = nullptr;
+            (*out_meshes)[i].collision_vertices_count = 0;
+            (*out_meshes)[i].collision_indices_count = 0;
 
-            // Initialize simple collision data
             for (int j = 0; j < 3; j++) {
-                dst.bounding_box_min[j] = 0.0f;
-                dst.bounding_box_max[j] = 0.0f;
-                dst.sphere_center[j] = 0.0f;
+                (*out_meshes)[i].bounding_box_min[j] = 0.0f;
+                (*out_meshes)[i].bounding_box_max[j] = 0.0f;
+                (*out_meshes)[i].sphere_center[j] = 0.0f;
             }
-            dst.sphere_radius = 0.0f;
-
-            // Safe string copying with bounds checking
-#ifdef _WIN32
-            strncpy_s(dst.element_name, sizeof(dst.element_name), src.elementName.c_str(), 255);
-            strncpy_s(dst.type_name, sizeof(dst.type_name), src.typeName.c_str(), 127);
-#else
-            std::strncpy(dst.element_name, src.elementName.c_str(), 255);
-            std::strncpy(dst.type_name, src.typeName.c_str(), 127);
-            dst.element_name[255] = '\0';
-            dst.type_name[127] = '\0';
-#endif
-
-            // Direct memory copy for flat arrays (already processed by middleware)
-            dst.points_count = src.points.size();
-            if (dst.points_count > 0) {
-                dst.points = new float[dst.points_count];
-                std::memcpy(dst.points, src.points.data(), dst.points_count * sizeof(float));
-            }
-
-            dst.indices_count = src.indices.size();
-            if (dst.indices_count > 0) {
-                dst.indices = new unsigned int[dst.indices_count];
-                std::memcpy(dst.indices, src.indices.data(), dst.indices_count * sizeof(unsigned int));
-            }
-
-            dst.normals_count = src.normals.size();
-            if (dst.normals_count > 0) {
-                dst.normals = new float[dst.normals_count];
-                std::memcpy(dst.normals, src.normals.data(), dst.normals_count * sizeof(float));
-            }
-
-            dst.uvs_count = src.uvs.size();
-            if (dst.uvs_count > 0) {
-                dst.uvs = new float[dst.uvs_count];
-                std::memcpy(dst.uvs, src.uvs.data(), dst.uvs_count * sizeof(float));
-            }
-
-            // ✅ Copy vertex colors (RGBA values from primvars:color.timeSamples)
-            // This enables vertex colors from USD files in Unreal Engine
-            dst.vertex_colors_count = src.vertex_colors.size();
-            if (dst.vertex_colors_count > 0) {
-                dst.vertex_colors = new float[dst.vertex_colors_count];
-                std::memcpy(dst.vertex_colors, src.vertex_colors.data(),
-                           dst.vertex_colors_count * sizeof(float));
-            }
+            (*out_meshes)[i].sphere_radius = 0.0f;
         }
 
         return 1;
+
     } catch (...) {
-        // Cleanup on exception
         *out_count = 0;
         *out_meshes = nullptr;
         return 0;
@@ -394,14 +461,14 @@ int LoadUSDFromDisk_C(const char* filepath, CMeshData** out_meshes, size_t* out_
 
 /**
  * Load USD data from memory buffer with collision generation
- * Enhanced version of LoadUSDBuffer_C with collision support
+ * ENHANCED: Now includes USD geometry features + collision support
  */
 int LoadUSDBufferWithCollision_C(const unsigned char* buffer,
-                                 size_t buffer_size,
-                                 const char* filename,
-                                 int collision_complexity,
-                                 CMeshData** out_meshes,
-                                 size_t* out_count) {
+                                  size_t buffer_size,
+                                  const char* filename,
+                                  int collision_complexity,
+                                  CMeshData** out_meshes,
+                                  size_t* out_count) {
     // Validate input parameters
     if (!g_middleware || !buffer || !filename || !out_meshes || !out_count) {
         return 0;
@@ -424,12 +491,14 @@ int LoadUSDBufferWithCollision_C(const unsigned char* buffer,
         }
 
         // Convert C types to C++ types
-        std::vector<unsigned char> std_buffer(buffer, buffer + buffer_size);
+        std::vector<uint8_t> std_buffer(buffer, buffer + buffer_size);
         std::string std_filename(filename);
-        std::vector<anari_usd_middleware::MeshData> mesh_data;
+        std::vector<anari_usd_middleware::UsdProcessor::MeshData> mesh_data;
 
         // Call middleware USD processing (existing function)
-        bool result = g_middleware->LoadUSDBuffer(std_buffer, std_filename, mesh_data);
+        anari_usd_middleware::UsdProcessor processor;
+        bool result = processor.LoadUSDBuffer(std_buffer, std_filename, mesh_data);
+
         if (!result || mesh_data.empty()) {
             *out_count = 0;
             *out_meshes = nullptr;
@@ -445,62 +514,13 @@ int LoadUSDBufferWithCollision_C(const unsigned char* buffer,
             const auto& src = mesh_data[i];
             CMeshData& dst = (*out_meshes)[i];
 
-            // Initialize all pointers to null for safety
-            dst.points = nullptr;
-            dst.indices = nullptr;
-            dst.normals = nullptr;
-            dst.uvs = nullptr;
-            dst.vertex_colors = nullptr;
-            // Initialize collision fields
-            dst.collision_vertices = nullptr;
-            dst.collision_indices = nullptr;
+            // Use helper function for visual mesh conversion (includes USD features)
+            ConvertMeshDataToCFormat(src, dst);
 
-            // Safe string copying with bounds checking
-#ifdef _WIN32
-            strncpy_s(dst.element_name, sizeof(dst.element_name), src.elementName.c_str(), 255);
-            strncpy_s(dst.type_name, sizeof(dst.type_name), src.typeName.c_str(), 127);
-#else
-            std::strncpy(dst.element_name, src.elementName.c_str(), 255);
-            std::strncpy(dst.type_name, src.typeName.c_str(), 127);
-            dst.element_name[255] = '\0';
-            dst.type_name[127] = '\0';
-#endif
-
-            // Copy visual mesh data (same as existing LoadUSDBuffer_C)
-            dst.points_count = src.points.size();
-            if (dst.points_count > 0) {
-                dst.points = new float[dst.points_count];
-                std::memcpy(dst.points, src.points.data(), dst.points_count * sizeof(float));
-            }
-
-            dst.indices_count = src.indices.size();
-            if (dst.indices_count > 0) {
-                dst.indices = new unsigned int[dst.indices_count];
-                std::memcpy(dst.indices, src.indices.data(), dst.indices_count * sizeof(unsigned int));
-            }
-
-            dst.normals_count = src.normals.size();
-            if (dst.normals_count > 0) {
-                dst.normals = new float[dst.normals_count];
-                std::memcpy(dst.normals, src.normals.data(), dst.normals_count * sizeof(float));
-            }
-
-            dst.uvs_count = src.uvs.size();
-            if (dst.uvs_count > 0) {
-                dst.uvs = new float[dst.uvs_count];
-                std::memcpy(dst.uvs, src.uvs.data(), dst.uvs_count * sizeof(float));
-            }
-
-            dst.vertex_colors_count = src.vertex_colors.size();
-            if (dst.vertex_colors_count > 0) {
-                dst.vertex_colors = new float[dst.vertex_colors_count];
-                std::memcpy(dst.vertex_colors, src.vertex_colors.data(),
-                           dst.vertex_colors_count * sizeof(float));
-            }
-
-            // ✅ NEW: Generate collision data
+            // Set collision type
             dst.collision_type = collision_complexity;
 
+            // Generate collision data if requested
             if (collision_complexity != COLLISION_NONE) {
                 // Create collision data structure
                 anari_usd_middleware::CollisionData collisionData;
@@ -509,8 +529,17 @@ int LoadUSDBufferWithCollision_C(const unsigned char* buffer,
                 anari_usd_middleware::ECollisionComplexity complexity =
                     static_cast<anari_usd_middleware::ECollisionComplexity>(collision_complexity);
 
+                // Convert glm::vec3 points to flat float array
+                std::vector<float> flatPoints;
+                flatPoints.reserve(src.points.size() * 3);
+                for (const auto& p : src.points) {
+                    flatPoints.push_back(p.x);
+                    flatPoints.push_back(p.y);
+                    flatPoints.push_back(p.z);
+                }
+
                 bool collisionResult = g_collision_processor->generateCollision(
-                    src.points, src.indices, complexity, collisionData);
+                    flatPoints, src.indices, complexity, collisionData);
 
                 if (collisionResult && collisionData.isValid()) {
                     // Copy collision vertices
@@ -527,6 +556,11 @@ int LoadUSDBufferWithCollision_C(const unsigned char* buffer,
                         dst.collision_indices = new unsigned int[dst.collision_indices_count];
                         std::memcpy(dst.collision_indices, collisionData.indices.data(),
                                    dst.collision_indices_count * sizeof(unsigned int));
+
+                        // ✅ DEBUG PRINT
+                        std::cout << "🔍 COLLISION COPY: vertices=" << dst.collision_vertices_count
+                                  << " indices=" << dst.collision_indices_count
+                                  << " ptr=" << (void*)dst.collision_vertices << std::endl;
                     }
 
                     // Copy simple collision data
@@ -542,11 +576,14 @@ int LoadUSDBufferWithCollision_C(const unsigned char* buffer,
                     dst.sphere_center[1] = collisionData.sphereCenter.y;
                     dst.sphere_center[2] = collisionData.sphereCenter.z;
                     dst.sphere_radius = collisionData.sphereRadius;
+
                 } else {
                     // Collision generation failed, set defaults
+                    dst.collision_vertices = nullptr;
+                    dst.collision_indices = nullptr;
                     dst.collision_vertices_count = 0;
                     dst.collision_indices_count = 0;
-                    // Set default bounding box values
+
                     for (int j = 0; j < 3; j++) {
                         dst.bounding_box_min[j] = 0.0f;
                         dst.bounding_box_max[j] = 0.0f;
@@ -556,8 +593,11 @@ int LoadUSDBufferWithCollision_C(const unsigned char* buffer,
                 }
             } else {
                 // No collision requested
+                dst.collision_vertices = nullptr;
+                dst.collision_indices = nullptr;
                 dst.collision_vertices_count = 0;
                 dst.collision_indices_count = 0;
+
                 for (int j = 0; j < 3; j++) {
                     dst.bounding_box_min[j] = 0.0f;
                     dst.bounding_box_max[j] = 0.0f;
@@ -568,6 +608,7 @@ int LoadUSDBufferWithCollision_C(const unsigned char* buffer,
         }
 
         return 1;
+
     } catch (...) {
         // Cleanup on exception
         *out_count = 0;

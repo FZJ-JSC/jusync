@@ -46,6 +46,11 @@ public:
         std::vector<glm::vec3> normals; ///< Normal vectors (normalized)
         std::vector<glm::vec2> uvs;     ///< Texture coordinates (clamped)
         std::vector<glm::vec4> vertex_colors; ///vertex colors
+        std::string subdivisionScheme = "none";  // catmullClark, loop, bilinear, none
+        std::vector<uint32_t> faceVertexCounts;  // Original polygon vertex counts
+        bool doubleSided = false;                 // Backface culling control
+        std::vector<std::vector<glm::vec2>> uvSets;    // Multiple UV channels
+        std::vector<std::string> uvSetNames;            // UV channel names
 
         // Validation methods
         bool isValid() const {
@@ -77,6 +82,32 @@ public:
             indices.clear();
             normals.clear();
             uvs.clear();
+        }
+    };
+
+    struct CurveData {
+        std::string elementName;
+        std::vector<glm::vec3> points;
+        std::vector<int32_t> curveVertexCounts;
+        std::vector<float> widths;
+        std::string type = "linear";      // cubic, linear
+        std::string basis = "bspline";    // bezier, catmullRom, bspline
+
+        bool isValid() const {
+            return !points.empty() && !curveVertexCounts.empty();
+        }
+    };
+
+    struct InstancerData {
+        std::string elementName;
+        std::vector<int32_t> protoIndices;
+        std::vector<glm::vec3> positions;
+        std::vector<glm::quat> orientations;
+        std::vector<glm::vec3> scales;
+        std::vector<std::string> prototypePaths;
+
+        bool isValid() const {
+            return !protoIndices.empty() && !positions.empty();
         }
     };
 
