@@ -106,6 +106,7 @@ endif()
 add_library(${PROJECT_NAME} SHARED
     src/AnariUsdMiddleware.cpp
     src/ZmqConnector.cpp
+    src/AnariUsdClient.cpp
     src/HashVerifier.cpp
     src/UsdProcessor.cpp
     src/AnariUsdMiddleware_C.cpp
@@ -208,6 +209,21 @@ endif()
 # ------------------------------
 option(BUILD_TESTS "Build test and validation applications" ON)
 if(BUILD_TESTS)
+    # ANARI USD Client Test
+    add_executable(test_anari_usd_client
+        src/test_anari_usd_client.cpp
+    )
+    
+    target_link_libraries(test_anari_usd_client
+        PRIVATE
+            ${PROJECT_NAME}
+    )
+    
+    target_include_directories(test_anari_usd_client PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    
     # Enhanced USD Validation Tool with granular test modes
     add_executable(usd_validation_tool
         tests/src/usd_validation_tool.cpp

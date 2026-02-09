@@ -109,6 +109,19 @@ typedef struct {
     float sphere_center[3];      // Sphere center [x, y, z]
     float sphere_radius;         // Sphere radius
 
+    // ========== USD GEOMETRY FEATURES ==========
+    const char* subdivision_scheme;    // Subdivision scheme (e.g., "catmull-clark", "bilinear", "none")
+    int double_sided;            // Double-sided flag (0 = false, 1 = true)
+
+    // Face vertex counts for heterogenous polygons
+    unsigned int* face_vertex_counts;
+    size_t face_vertex_counts_size;
+
+    // Multiple UV sets
+    float** uv_sets;             // Array of UV set pointers (each is flat array [u,v,...])
+    const char** uv_set_names;   // Array of UV set name pointers
+    size_t uv_sets_count;        // Number of UV sets
+
 } CMeshData;
 
 /**
@@ -488,6 +501,205 @@ ANARI_USD_MIDDLEWARE_C_API void ResetProcessingStats_C(void);
  * @return Pointer to statistics string (valid until next call)
  */
 ANARI_USD_MIDDLEWARE_C_API const char* GetProcessingStats_C(void);
+
+// ============================================================================
+// BROKER CONNECTION AND FILE REQUEST FUNCTIONS
+// ============================================================================
+
+/**
+ * Connect to ANARI USD broker as DEALER client
+ *
+ * @param broker_endpoint Broker endpoint (e.g., "tcp://localhost:5555")
+ * @param timeout_ms Connection timeout in milliseconds
+ * @return 1 on success, 0 on failure
+ */
+ANARI_USD_MIDDLEWARE_C_API int ConnectToBroker_C(
+    const char* broker_endpoint,
+    int timeout_ms);
+
+/**
+ * Disconnect from broker
+ */
+ANARI_USD_MIDDLEWARE_C_API void DisconnectFromBroker_C(void);
+
+/**
+ * Check if connected to broker
+ *
+ * @return 1 if connected, 0 if not connected
+ */
+ANARI_USD_MIDDLEWARE_C_API int IsBrokerConnected_C(void);
+
+/**
+ * Request file list from specific worker rank
+ *
+ * @param target_rank Target worker rank
+ * @param out_files Pointer to receive array of filenames (caller must free with FreeFileList_C)
+ * @param out_count Pointer to receive number of files
+ * @param timeout_ms Timeout in milliseconds
+ * @return 1 on success, 0 on failure
+ */
+ANARI_USD_MIDDLEWARE_C_API int RequestFileList_C(
+    int32_t target_rank,
+    char*** out_files,
+    size_t* out_count,
+    int timeout_ms);
+
+/**
+ * Free file list allocated by RequestFileList_C
+ *
+ * @param files Array of filenames to free
+ * @param count Number of files in array
+ */
+ANARI_USD_MIDDLEWARE_C_API void FreeFileList_C(
+    char** files,
+    size_t count);
+
+/**
+ * Request specific file from worker rank
+ *
+ * @param filename Name of file to request
+ * @param target_rank Target worker rank
+ * @param out_data Pointer to receive file data (caller must free with FreeBuffer_C)
+ * @param out_size Pointer to receive data size
+ * @param timeout_ms Timeout in milliseconds
+ * @return 1 on success, 0 on failure
+ */
+ANARI_USD_MIDDLEWARE_C_API int RequestFile_C(
+    const char* filename,
+    int32_t target_rank,
+    unsigned char** out_data,
+    size_t* out_size,
+    int timeout_ms);
+
+/**
+ * Request frame (collection of files) from worker rank
+ *
+ * @param frame_number Frame number to request
+ * @param target_rank Target worker rank
+ * @param out_files Pointer to receive array of file data (caller must free with FreeFileData_C for each)
+ * @param out_count Pointer to receive number of files in frame
+ * @param timeout_ms Timeout in milliseconds
+ * @return 1 on success, 0 on failure
+ */
+ANARI_USD_MIDDLEWARE_C_API int RequestFrame_C(
+    int32_t frame_number,
+    int32_t target_rank,
+    CFileData** out_files,
+    size_t* out_count,
+    int timeout_ms);
+
+/**
+ * Request worker count excluding rank 0 (computational workers only)
+ * Uses binary protocol REQ_WORKER_COUNT/RESP_WORKER_COUNT
+ *
+ * @param out_count Pointer to receive worker count (excluding rank 0)
+ * @param timeout_ms Timeout in milliseconds
+ * @return 1 on success, 0 on failure
+ */
+ANARI_USD_MIDDLEWARE_C_API int RequestWorkerCountExcludingRank0_C(
+    uint32_t* out_count,
+    int timeout_ms);
+
+// ============================================================================
+// WORKER LIST / COUNT FUNCTIONS (Legacy String Protocol)
+// ============================================================================
+
+/**
+ * Request worker list from broker using legacy string protocol
+ * Returns list of all workers including rank 0
+ * Format: "rank:hostname:ip;rank:hostname:ip;..."
+ *
+ * @param out_worker_count Pointer to receive number of workers
+ * @param out_data Buffer to receive worker list data (caller must free with FreeBuffer_C)
+ * @param out_size Pointer to receive data size
+ * @param timeout_ms Timeout in milliseconds
+ * @return 1 on success, 0 on failure
+ */
+ANARI_USD_MIDDLEWARE_C_API int RequestWorkerListString_C(
+    uint32_t* out_worker_count,
+    unsigned char** out_data,
+    size_t* out_size,
+    int timeout_ms);
+
+/**
+ * Get total worker count including rank 0
+ * Wrapper around RequestWorkerListString_C that just returns the count
+ *
+ * @param out_total_count Pointer to receive total worker count
+ * @param timeout_ms Timeout in milliseconds
+ * @return 1 on success, 0 on failure
+ */
+ANARI_USD_MIDDLEWARE_C_API int RequestTotalWorkerCount_C(
+    uint32_t* out_total_count,
+    int timeout_ms);
+
+// ============================================================================
+// ASYNC BROKER FUNCTIONS (NON-BLOCKING)
+// ============================================================================
+
+/**
+ * Callback types for async broker operations
+ */
+typedef void (*WorkerCountCallback_C)(uint32_t worker_count);
+typedef void (*WorkerStatusCallback_C)(int32_t target_rank, const char* status_data, size_t status_size);
+typedef void (*FileListCallback_C)(int32_t target_rank, char** files, size_t file_count);
+typedef void (*BrokerErrorCallback_C)(const char* error_message);
+
+/**
+ * Request total worker count asynchronously (non-blocking)
+ * Calls callback on background thread when complete
+ *
+ * @param callback Function to call with worker count on success
+ * @param error_callback Function to call on error (can be NULL)
+ * @param timeout_ms Timeout in milliseconds
+ */
+ANARI_USD_MIDDLEWARE_C_API void RequestTotalWorkerCountAsync_C(
+    WorkerCountCallback_C callback,
+    BrokerErrorCallback_C error_callback,
+    int timeout_ms);
+
+/**
+ * Request worker count asynchronously (non-blocking)
+ * Calls callback on background thread when complete
+ *
+ * @param callback Function to call with worker count on success
+ * @param error_callback Function to call on error (can be NULL)
+ * @param timeout_ms Timeout in milliseconds
+ */
+ANARI_USD_MIDDLEWARE_C_API void RequestWorkerCountAsync_C(
+    WorkerCountCallback_C callback,
+    BrokerErrorCallback_C error_callback,
+    int timeout_ms);
+
+/**
+ * Request worker status asynchronously (non-blocking)
+ * Calls callback on background thread when complete
+ *
+ * @param target_rank Target worker rank (-1 for all workers)
+ * @param callback Function to call with worker status on success
+ * @param error_callback Function to call on error (can be NULL)
+ * @param timeout_ms Timeout in milliseconds
+ */
+ANARI_USD_MIDDLEWARE_C_API void RequestWorkerStatusAsync_C(
+    int32_t target_rank,
+    WorkerStatusCallback_C callback,
+    BrokerErrorCallback_C error_callback,
+    int timeout_ms);
+
+/**
+ * Request file list asynchronously (non-blocking)
+ * Calls callback on background thread when complete
+ *
+ * @param target_rank Target worker rank
+ * @param callback Function to call with file list on success
+ * @param error_callback Function to call on error (can be NULL)
+ * @param timeout_ms Timeout in milliseconds
+ */
+ANARI_USD_MIDDLEWARE_C_API void RequestFileListAsync_C(
+    int32_t target_rank,
+    FileListCallback_C callback,
+    BrokerErrorCallback_C error_callback,
+    int timeout_ms);
 
 #ifdef __cplusplus
 }

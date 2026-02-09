@@ -104,6 +104,446 @@ void UJUSYNCBlueprintLibrary::StopJUSYNCReceiving()
     }
 }
 
+// ========== DEALER CLIENT FOR HPC BROKER ==========
+
+bool UJUSYNCBlueprintLibrary::ConnectToANARIUSDBroker(const FString& BrokerEndpoint, int32 TimeoutMs)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
+        return false;
+    }
+
+    bool bResult = Subsystem->ConnectToBroker(BrokerEndpoint, TimeoutMs);
+    if (bResult)
+    {
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Connected to ANARI USD broker at %s"), *BrokerEndpoint);
+        //DisplayDebugMessage(FString::Printf(TEXT("Connected to broker: %s"), *BrokerEndpoint), 3.0f, FLinearColor::Green);
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to connect to broker at %s"), *BrokerEndpoint);
+        //DisplayDebugMessage(FString::Printf(TEXT("Failed to connect to broker: %s"), *BrokerEndpoint), 5.0f, FLinearColor::Red);
+    }
+
+    return bResult;
+}
+
+void UJUSYNCBlueprintLibrary::DisconnectFromANARIUSDBroker()
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (Subsystem)
+    {
+        Subsystem->DisconnectFromBroker();
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Disconnected from ANARI USD broker"));
+        //DisplayDebugMessage(TEXT("Disconnected from broker"), 3.0f, FLinearColor::Yellow);
+    }
+}
+
+bool UJUSYNCBlueprintLibrary::IsANARIUSDBrokerConnected()
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    return Subsystem ? Subsystem->IsBrokerConnected() : false;
+}
+
+bool UJUSYNCBlueprintLibrary::RequestFileListFromBroker(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
+        return false;
+    }
+
+    bool bResult = Subsystem->RequestFileList(TargetRank, TimeoutMs, OutFiles);
+    if (bResult)
+    {
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved %d files from broker"), OutFiles.Num());
+        //DisplayDebugMessage(FString::Printf(TEXT("Retrieved %d files from broker"), OutFiles.Num()), 3.0f, FLinearColor::Green);
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to retrieve file list from broker"));
+        //DisplayDebugMessage(TEXT("Failed to retrieve file list from broker"), 5.0f, FLinearColor::Red);
+    }
+
+    return bResult;
+}
+
+bool UJUSYNCBlueprintLibrary::RequestFileFromBroker(const FString& Filename, int32 TargetRank, int32 TimeoutMs, TArray<uint8>& OutData)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
+        return false;
+    }
+
+    bool bResult = Subsystem->RequestFile(Filename, TargetRank, TimeoutMs, OutData);
+    if (bResult)
+    {
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved file '%s' (%d bytes) from broker"), *Filename, OutData.Num());
+        //DisplayDebugMessage(FString::Printf(TEXT("Retrieved file: %s (%d bytes)"), *Filename, OutData.Num()), 3.0f, FLinearColor::Green);
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to retrieve file '%s' from broker"), *Filename);
+        //DisplayDebugMessage(FString::Printf(TEXT("Failed to retrieve file: %s"), *Filename), 5.0f, FLinearColor::Red);
+    }
+
+    return bResult;
+}
+
+bool UJUSYNCBlueprintLibrary::RequestFrameFromBroker(int32 FrameNumber, int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCFileData>& OutFiles)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
+        return false;
+    }
+
+    bool bResult = Subsystem->RequestFrame(FrameNumber, TargetRank, TimeoutMs, OutFiles);
+    if (bResult)
+    {
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved frame %d with %d files from broker"), FrameNumber, OutFiles.Num());
+        //DisplayDebugMessage(FString::Printf(TEXT("Retrieved frame %d with %d files"), FrameNumber, OutFiles.Num()), 3.0f, FLinearColor::Green);
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to retrieve frame %d from broker"), FrameNumber);
+        //DisplayDebugMessage(FString::Printf(TEXT("Failed to retrieve frame %d"), FrameNumber), 5.0f, FLinearColor::Red);
+    }
+
+    return bResult;
+}
+
+// ========== WORKER STATUS QUERIES ==========
+
+bool UJUSYNCBlueprintLibrary::RequestWorkerStatusFromBroker(int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCWorkerStatus>& OutWorkerStatus)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
+        return false;
+    }
+
+    bool bResult = Subsystem->RequestWorkerStatus(TargetRank, TimeoutMs, OutWorkerStatus);
+    if (bResult)
+    {
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved worker status for rank %d: %d workers"), TargetRank, OutWorkerStatus.Num());
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to retrieve worker status for rank %d"), TargetRank);
+    }
+
+    return bResult;
+}
+
+bool UJUSYNCBlueprintLibrary::RequestWorkerCountFromBroker(int32 TimeoutMs, int32& OutWorkerCount)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
+        return false;
+    }
+
+    bool bResult = Subsystem->RequestWorkerCount(TimeoutMs, OutWorkerCount);
+    if (bResult)
+    {
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved worker count: %d workers"), OutWorkerCount);
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to retrieve worker count"));
+    }
+
+    return bResult;
+}
+
+bool UJUSYNCBlueprintLibrary::RequestTotalWorkerCountFromBroker(int32 TimeoutMs, int32& OutTotalCount)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
+        return false;
+    }
+
+    bool bResult = Subsystem->RequestTotalWorkerCount(TimeoutMs, OutTotalCount);
+    if (bResult)
+    {
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved total worker count (including rank 0): %d"), OutTotalCount);
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to retrieve total worker count"));
+    }
+
+    return bResult;
+}
+
+bool UJUSYNCBlueprintLibrary::RequestWorkerCountExcludingRank0(int32 TimeoutMs, int32& OutWorkerCount)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
+        return false;
+    }
+
+    bool bResult = Subsystem->RequestWorkerCountExcludingRank0(TimeoutMs, OutWorkerCount);
+    if (bResult)
+    {
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved worker count (excluding rank 0): %d workers"), OutWorkerCount);
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to retrieve worker count"));
+    }
+
+    return bResult;
+}
+
+// ========== ASYNC WORKER QUERIES (NON-BLOCKING) ==========
+
+void UJUSYNCBlueprintLibrary::RequestTotalWorkerCountAsync(int32 TimeoutMs, const FOnTotalWorkerCountReceived& OnComplete, const FOnBrokerError& OnError)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
+        OnError.ExecuteIfBound(TEXT("Subsystem not available"));
+        return;
+    }
+
+    // Capture subsystem pointer for validity checking
+    TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
+    
+    // Launch async request on a background thread using Unreal's Async system
+    Async(EAsyncExecution::Thread, [WeakSubsystem, TimeoutMs, OnComplete, OnError]()
+    {
+        // Check if subsystem is still valid before making the request
+        if (!WeakSubsystem.IsValid())
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem no longer valid, cancelling async request"));
+            return; // Game stopped, exit early
+        }
+        
+        int32 TotalCount = 0;
+        bool bSuccess = false;
+        
+        // Make the broker request
+        if (WeakSubsystem.IsValid())
+        {
+            bSuccess = WeakSubsystem->RequestTotalWorkerCount(TimeoutMs, TotalCount);
+        }
+        
+        // Check again before calling back (game might have stopped during request)
+        if (!WeakSubsystem.IsValid())
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem destroyed during async request, cancelling callback"));
+            return; // Game stopped, don't call callbacks
+        }
+        
+        // Execute callback on game thread
+        if (IsInGameThread())
+        {
+            if (bSuccess) OnComplete.ExecuteIfBound(TotalCount);
+            else OnError.ExecuteIfBound(TEXT("Failed to retrieve total worker count"));
+        }
+        else
+        {
+            // Schedule on game thread
+            FFunctionGraphTask::CreateAndDispatchWhenReady(
+                [bSuccess, TotalCount, OnComplete, OnError]()
+                {
+                    if (bSuccess) OnComplete.ExecuteIfBound(TotalCount);
+                    else OnError.ExecuteIfBound(TEXT("Failed to retrieve total worker count"));
+                },
+                TStatId(), nullptr, ENamedThreads::GameThread);
+        }
+    });
+}
+
+void UJUSYNCBlueprintLibrary::RequestWorkerCountAsync(int32 TimeoutMs, const FOnWorkerCountReceived& OnComplete, const FOnBrokerError& OnError)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
+        OnError.ExecuteIfBound(TEXT("Subsystem not available"));
+        return;
+    }
+
+    // Capture subsystem pointer for validity checking
+    TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
+    
+    // Launch async request on a background thread using Unreal's Async system
+    Async(EAsyncExecution::Thread, [WeakSubsystem, TimeoutMs, OnComplete, OnError]()
+    {
+        // Check if subsystem is still valid before making the request
+        if (!WeakSubsystem.IsValid())
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem no longer valid, cancelling async request"));
+            return; // Game stopped, exit early
+        }
+        
+        int32 WorkerCount = 0;
+        bool bSuccess = false;
+        
+        // Make the broker request
+        if (WeakSubsystem.IsValid())
+        {
+            bSuccess = WeakSubsystem->RequestWorkerCount(TimeoutMs, WorkerCount);
+        }
+        
+        // Check again before calling back (game might have stopped during request)
+        if (!WeakSubsystem.IsValid())
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem destroyed during async request, cancelling callback"));
+            return; // Game stopped, don't call callbacks
+        }
+        
+        // Execute callback on game thread
+        if (IsInGameThread())
+        {
+            if (bSuccess) OnComplete.ExecuteIfBound(WorkerCount);
+            else OnError.ExecuteIfBound(TEXT("Failed to retrieve worker count"));
+        }
+        else
+        {
+            FFunctionGraphTask::CreateAndDispatchWhenReady(
+                [bSuccess, WorkerCount, OnComplete, OnError]()
+                {
+                    if (bSuccess) OnComplete.ExecuteIfBound(WorkerCount);
+                    else OnError.ExecuteIfBound(TEXT("Failed to retrieve worker count"));
+                },
+                TStatId(), nullptr, ENamedThreads::GameThread);
+        }
+    });
+}
+
+void UJUSYNCBlueprintLibrary::RequestWorkerStatusAsync(int32 TargetRank, int32 TimeoutMs, const FOnWorkerStatusReceived& OnComplete, const FOnBrokerError& OnError)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
+        OnError.ExecuteIfBound(TEXT("Subsystem not available"));
+        return;
+    }
+
+    // Capture subsystem pointer for validity checking
+    TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
+    
+    // Launch async request on a background thread using Unreal's Async system
+    Async(EAsyncExecution::Thread, [WeakSubsystem, TargetRank, TimeoutMs, OnComplete, OnError]()
+    {
+        // Check if subsystem is still valid before making the request
+        if (!WeakSubsystem.IsValid())
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem no longer valid, cancelling async request"));
+            return; // Game stopped, exit early
+        }
+        
+        TArray<FJUSYNCWorkerStatus> WorkerStatus;
+        bool bSuccess = false;
+        
+        // Make the broker request
+        if (WeakSubsystem.IsValid())
+        {
+            bSuccess = WeakSubsystem->RequestWorkerStatus(TargetRank, TimeoutMs, WorkerStatus);
+        }
+        
+        // Check again before calling back (game might have stopped during request)
+        if (!WeakSubsystem.IsValid())
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem destroyed during async request, cancelling callback"));
+            return; // Game stopped, don't call callbacks
+        }
+        
+        // Execute callback on game thread
+        if (IsInGameThread())
+        {
+            if (bSuccess) OnComplete.ExecuteIfBound(WorkerStatus);
+            else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve worker status for rank %d"), TargetRank));
+        }
+        else
+        {
+            FFunctionGraphTask::CreateAndDispatchWhenReady(
+                [bSuccess, WorkerStatus, TargetRank, OnComplete, OnError]()
+                {
+                    if (bSuccess) OnComplete.ExecuteIfBound(WorkerStatus);
+                    else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve worker status for rank %d"), TargetRank));
+                },
+                TStatId(), nullptr, ENamedThreads::GameThread);
+        }
+    });
+}
+
+void UJUSYNCBlueprintLibrary::RequestFileListAsync(int32 TargetRank, int32 TimeoutMs, const FOnFileListReceived& OnComplete, const FOnBrokerError& OnError)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
+        OnError.ExecuteIfBound(TEXT("Subsystem not available"));
+        return;
+    }
+
+    // Capture subsystem pointer for validity checking
+    TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
+    
+    // Launch async request on a background thread using Unreal's Async system
+    Async(EAsyncExecution::Thread, [WeakSubsystem, TargetRank, TimeoutMs, OnComplete, OnError]()
+    {
+        // Check if subsystem is still valid before making the request
+        if (!WeakSubsystem.IsValid())
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem no longer valid, cancelling async request"));
+            return; // Game stopped, exit early
+        }
+        
+        TArray<FString> FileList;
+        bool bSuccess = false;
+        
+        // Make the broker request
+        if (WeakSubsystem.IsValid())
+        {
+            bSuccess = WeakSubsystem->RequestFileList(TargetRank, TimeoutMs, FileList);
+        }
+        
+        // Check again before calling back (game might have stopped during request)
+        if (!WeakSubsystem.IsValid())
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem destroyed during async request, cancelling callback"));
+            return; // Game stopped, don't call callbacks
+        }
+        
+        // Execute callback on game thread
+        if (IsInGameThread())
+        {
+            if (bSuccess) OnComplete.ExecuteIfBound(FileList);
+            else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve file list from rank %d"), TargetRank));
+        }
+        else
+        {
+            FGraphEventRef Task = FFunctionGraphTask::CreateAndDispatchWhenReady(
+                [bSuccess, FileList, TargetRank, OnComplete, OnError]()
+                {
+                    if (bSuccess) OnComplete.ExecuteIfBound(FileList);
+                    else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve file list from rank %d"), TargetRank));
+                },
+                TStatId(), nullptr, ENamedThreads::GameThread);
+        }
+    });
+}
+
 // ========== USD PROCESSING WITH PREVIEW ==========
 
 bool UJUSYNCBlueprintLibrary::LoadUSDFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCMeshData>& OutMeshData, FString& OutPreview)

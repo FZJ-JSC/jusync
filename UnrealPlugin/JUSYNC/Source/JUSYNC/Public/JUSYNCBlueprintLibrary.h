@@ -17,6 +17,24 @@ class JUSYNC_API UJUSYNCBlueprintLibrary : public UBlueprintFunctionLibrary
     GENERATED_BODY()
 
 public:
+    // ========== EVENT DISPATCHERS FOR ASYNC OPERATIONS ==========
+    
+    // Worker count async result (use non-multicast for Blueprint function parameters)
+    DECLARE_DYNAMIC_DELEGATE_OneParam(FOnWorkerCountReceived, int32, WorkerCount);
+    
+    // Total worker count async result (including rank 0)
+    DECLARE_DYNAMIC_DELEGATE_OneParam(FOnTotalWorkerCountReceived, int32, TotalCount);
+    
+    // Worker status async result
+    DECLARE_DYNAMIC_DELEGATE_OneParam(FOnWorkerStatusReceived, const TArray<FJUSYNCWorkerStatus>&, WorkerStatus);
+    
+    // File list async result
+    DECLARE_DYNAMIC_DELEGATE_OneParam(FOnFileListReceived, const TArray<FString>&, FileList);
+    
+    // Generic error event
+    DECLARE_DYNAMIC_DELEGATE_OneParam(FOnBrokerError, FString, ErrorMessage);
+
+public:
     // ========== CONNECTION MANAGEMENT ==========
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Connection", CallInEditor)
     static bool InitializeJUSYNCMiddleware(const FString& Endpoint = TEXT(""));
@@ -35,6 +53,58 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Connection")
     static void StopJUSYNCReceiving();
+
+    // ========== DEALER CLIENT FOR HPC BROKER ==========
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker", DisplayName = "Connect to ANARI USD Broker")
+    static bool ConnectToANARIUSDBroker(const FString& BrokerEndpoint = TEXT("tcp://localhost:5556"), int32 TimeoutMs = 5000);
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker", DisplayName = "Disconnect from ANARI USD Broker")
+    static void DisconnectFromANARIUSDBroker();
+
+    UFUNCTION(BlueprintPure, Category = "JUSYNC|Broker", DisplayName = "Is ANARI USD Broker Connected")
+    static bool IsANARIUSDBrokerConnected();
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker", DisplayName = "Request File List From Broker")
+    static bool RequestFileListFromBroker(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles);
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker")
+    static bool RequestFileFromBroker(const FString& Filename, int32 TargetRank, int32 TimeoutMs, TArray<uint8>& OutData);
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker")
+    static bool RequestFrameFromBroker(int32 FrameNumber, int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCFileData>& OutFiles);
+
+    // ========== WORKER STATUS QUERIES ==========
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker")
+    static bool RequestWorkerStatusFromBroker(int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCWorkerStatus>& OutWorkerStatus);
+    
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker")
+    static bool RequestWorkerCountFromBroker(int32 TimeoutMs, int32& OutWorkerCount);
+
+    // Total worker count INCLUDING rank 0 (uses legacy string protocol)
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker")
+    static bool RequestTotalWorkerCountFromBroker(int32 TimeoutMs, int32& OutTotalCount);
+
+    // Worker count EXCLUDING rank 0 (computational workers only)
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker")
+    static bool RequestWorkerCountExcludingRank0(int32 TimeoutMs, int32& OutWorkerCount);
+
+    // ========== ASYNC WORKER QUERIES (NON-BLOCKING) ==========
+    
+    // Async total worker count - fires event when complete, doesn't block
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request Total Worker Count Async")
+    static void RequestTotalWorkerCountAsync(int32 TimeoutMs, const FOnTotalWorkerCountReceived& OnComplete, const FOnBrokerError& OnError);
+
+    // Async worker count - fires event when complete, doesn't block
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request Worker Count Async")
+    static void RequestWorkerCountAsync(int32 TimeoutMs, const FOnWorkerCountReceived& OnComplete, const FOnBrokerError& OnError);
+
+    // Async worker status - fires event when complete, doesn't block
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request Worker Status Async")
+    static void RequestWorkerStatusAsync(int32 TargetRank, int32 TimeoutMs, const FOnWorkerStatusReceived& OnComplete, const FOnBrokerError& OnError);
+
+    // Async file list - fires event when complete, doesn't block
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request File List Async")
+    static void RequestFileListAsync(int32 TargetRank, int32 TimeoutMs, const FOnFileListReceived& OnComplete, const FOnBrokerError& OnError);
 
     // ========== USD PROCESSING WITH PREVIEW ==========
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|USD", CallInEditor)

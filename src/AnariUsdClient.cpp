@@ -1,0 +1,1140 @@
+#include "AnariUsdClient.h"
+#include "MiddlewareLogging.h"
+
+#include <regex>
+#include <algorithm>
+#include <thread>
+#include <future>
+
+namespace anari_usd_middleware {
+
+AnariUsdClient::AnariUsdClient() {
+    MIDDLEWARE_LOG_INFO("AnariUsdClient created - DEALER client for ANARI USD broker");
+    connectionStats.reset();
+    lastHealthCheck = std::chrono::steady_clock::now();
+}
+
+AnariUsdClient::~AnariUsdClient() {
+    MIDDLEWARE_LOG_INFO("AnariUsdClient destructor called");
+    disconnect(500); // Quick shutdown in destructor
+}
+
+bool AnariUsdClient::connect(const char* brokerEndpoint, int timeoutMs) {
+    std::lock_guard<std::mutex> lock(connectionMutex);
+    
+    if (connectionStatus.load() == ConnectionStatus::Connected) {
+        MIDDLEWARE_LOG_WARNING("AnariUsdClient already connected");
+        return true;
+    }
+
+    MIDDLEWARE_LOG_INFO("Connecting to ANARI USD broker: %s (timeout %dms)", 
+                        brokerEndpoint ? brokerEndpoint : "default", timeoutMs);
+    connectionStatus.store(ConnectionStatus::Connecting);
+
+    try {
+        // Validate timeout
+        if (timeoutMs <= 0 || timeoutMs > 30000) {
+            MIDDLEWARE_LOG_ERROR("Invalid timeout value: %d (must be 1-30000ms)", timeoutMs);
+            connectionStatus.store(ConnectionStatus::Error);
+            return false;
+        }
+
+        // Initialize ZMQ context
+        zmqContext = std::make_unique<zmq::context_t>(1);
+        if (!zmqContext) {
+            MIDDLEWARE_LOG_ERROR("Failed to create ZMQ context");
+            connectionStatus.store(ConnectionStatus::Error);
+            return false;
+        }
+
+        // Set context options
+        zmqContext->set(zmq::ctxopt::max_sockets, 1024);
+        zmqContext->set(zmq::ctxopt::io_threads, 1);
+
+        // Create DEALER socket
+        zmqSocket = std::make_unique<zmq::socket_t>(*zmqContext, zmq::socket_type::dealer);
+        if (!zmqSocket) {
+            MIDDLEWARE_LOG_ERROR("Failed to create ZMQ DEALER socket");
+            cleanup();
+            connectionStatus.store(ConnectionStatus::Error);
+            return false;
+        }
+
+        // Configure socket
+        if (!configureSocket(timeoutMs)) {
+            MIDDLEWARE_LOG_ERROR("Failed to configure DEALER socket");
+            cleanup();
+            connectionStatus.store(ConnectionStatus::Error);
+            return false;
+        }
+
+        // Validate and set endpoint
+        std::string endpoint = brokerEndpoint ? brokerEndpoint : "tcp://localhost:5556";
+        if (!validateEndpoint(endpoint)) {
+            MIDDLEWARE_LOG_ERROR("Invalid broker endpoint: %s", endpoint.c_str());
+            cleanup();
+            connectionStatus.store(ConnectionStatus::Error);
+            return false;
+        }
+
+        // Connect to broker
+        try {
+            zmqSocket->connect(endpoint);
+            this->brokerEndpoint = endpoint;
+            MIDDLEWARE_LOG_INFO("Successfully connected to ANARI USD broker: %s", endpoint.c_str());
+        } catch (const zmq::error_t& e) {
+            MIDDLEWARE_LOG_ERROR("Failed to connect to broker %s: %s (errno: %d)",
+                                  endpoint.c_str(), e.what(), e.num());
+            cleanup();
+            connectionStatus.store(ConnectionStatus::Error);
+            return false;
+        }
+
+        // Reset statistics
+        connectionStats.reset();
+        shutdownRequested.store(false);
+
+        // Mark as connected
+        connectionStatus.store(ConnectionStatus::Connected);
+
+        MIDDLEWARE_LOG_INFO("AnariUsdClient connected successfully");
+        return true;
+
+    } catch (const zmq::error_t& e) {
+        MIDDLEWARE_LOG_ERROR("ZeroMQ error during connection: %s (errno: %d)", e.what(), e.num());
+        cleanup();
+        connectionStatus.store(ConnectionStatus::Error);
+        return false;
+    } catch (const std::exception& e) {
+        MIDDLEWARE_LOG_ERROR("Exception during connection: %s", e.what());
+        cleanup();
+        connectionStatus.store(ConnectionStatus::Error);
+        return false;
+    }
+}
+
+void AnariUsdClient::disconnect(int gracefulTimeoutMs) {
+    std::lock_guard<std::mutex> lock(connectionMutex);
+    
+    if (connectionStatus.load() == ConnectionStatus::Disconnected) {
+        return;
+    }
+
+    MIDDLEWARE_LOG_INFO("Disconnecting from ANARI USD broker (graceful timeout: %dms)", gracefulTimeoutMs);
+    connectionStatus.store(ConnectionStatus::ShuttingDown);
+    shutdownRequested.store(true);
+
+    // Give pending requests time to complete
+    if (gracefulTimeoutMs > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(gracefulTimeoutMs));
+    }
+
+    cleanup();
+    connectionStatus.store(ConnectionStatus::Disconnected);
+    MIDDLEWARE_LOG_INFO("AnariUsdClient disconnected");
+}
+
+bool AnariUsdClient::isConnected() const {
+    return connectionStatus.load() == ConnectionStatus::Connected;
+}
+
+AnariUsdClient::ConnectionStatus AnariUsdClient::getConnectionStatus() const {
+    return connectionStatus.load();
+}
+
+bool AnariUsdClient::configureSocket(int timeoutMs) {
+    try {
+        // Set socket options
+        zmqSocket->set(zmq::sockopt::linger, 0);
+        zmqSocket->set(zmq::sockopt::sndhwm, 1000);
+        zmqSocket->set(zmq::sockopt::rcvhwm, 1000);
+        zmqSocket->set(zmq::sockopt::sndtimeo, timeoutMs);
+        zmqSocket->set(zmq::sockopt::rcvtimeo, timeoutMs);
+        zmqSocket->set(zmq::sockopt::maxmsgsize, static_cast<int64_t>(maxMessageSize.load()));
+
+#if PLATFORM_WINDOWS
+        return configureWindowsSocket();
+#elif PLATFORM_LINUX
+        return configureLinuxSocket();
+#else
+        MIDDLEWARE_LOG_WARNING("Unknown platform - using default socket configuration");
+        return true;
+#endif
+
+    } catch (const zmq::error_t& e) {
+        MIDDLEWARE_LOG_ERROR("Failed to configure socket options: %s (errno: %d)", e.what(), e.num());
+        return false;
+    }
+}
+
+#if PLATFORM_WINDOWS
+bool AnariUsdClient::configureWindowsSocket() {
+    MIDDLEWARE_LOG_INFO("Applying Windows-specific ZMQ socket configuration");
+
+    try {
+        zmqSocket->set(zmq::sockopt::tcp_keepalive, 1);
+        zmqSocket->set(zmq::sockopt::tcp_keepalive_idle, 300);
+        zmqSocket->set(zmq::sockopt::tcp_keepalive_cnt, 3);
+        zmqSocket->set(zmq::sockopt::tcp_keepalive_intvl, 30);
+        zmqSocket->set(zmq::sockopt::sndbuf, 65536);
+        zmqSocket->set(zmq::sockopt::rcvbuf, 65536);
+
+        MIDDLEWARE_LOG_INFO("Windows ZMQ socket configuration applied successfully");
+        return true;
+    } catch (const zmq::error_t& e) {
+        MIDDLEWARE_LOG_ERROR("Windows socket configuration failed: %s (errno: %d)", e.what(), e.num());
+        return false;
+    }
+}
+#endif
+
+#if PLATFORM_LINUX
+bool AnariUsdClient::configureLinuxSocket() {
+    MIDDLEWARE_LOG_INFO("Applying Linux-specific ZMQ socket configuration");
+
+    try {
+        zmqSocket->set(zmq::sockopt::tcp_keepalive, 1);
+        zmqSocket->set(zmq::sockopt::tcp_keepalive_idle, 600);
+        zmqSocket->set(zmq::sockopt::tcp_keepalive_cnt, 5);
+        zmqSocket->set(zmq::sockopt::tcp_keepalive_intvl, 60);
+        zmqSocket->set(zmq::sockopt::sndbuf, 1048576);
+        zmqSocket->set(zmq::sockopt::rcvbuf, 1048576);
+
+        MIDDLEWARE_LOG_INFO("Linux ZMQ socket configuration applied successfully");
+        return true;
+    } catch (const zmq::error_t& e) {
+        MIDDLEWARE_LOG_ERROR("Linux socket configuration failed: %s (errno: %d)", e.what(), e.num());
+        return false;
+    }
+}
+#endif
+
+bool AnariUsdClient::validateEndpoint(const std::string& endpoint) const {
+    if (endpoint.empty()) {
+        return false;
+    }
+
+    // TCP endpoint validation: tcp://host:port
+    if (endpoint.find("tcp://") == 0) {
+        std::regex tcpPattern(R"(^tcp://([^:]+|localhost):(\d+)$)");
+        std::smatch matches;
+
+        if (!std::regex_match(endpoint, matches, tcpPattern)) {
+            return false;
+        }
+
+        // Validate port range
+        int port = std::stoi(matches[2]);
+        return (port > 0 && port <= 65535);
+    }
+
+    return false;
+}
+
+bool AnariUsdClient::requestFileList(int32_t targetRank, FileListCallback callback, int timeoutMs) {
+    if (connectionStatus.load() != ConnectionStatus::Connected || !zmqSocket) {
+        MIDDLEWARE_LOG_ERROR("AnariUsdClient not connected");
+        return false;
+    }
+
+    try {
+        // Create file list request
+        ZmqFileRequest request;
+        request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_LIST_FILES);
+        request.request_id = generateRequestId();
+        request.target_rank = targetRank;
+        request.chunk_size = 0; // Not applicable for file list
+        request.setFilename(""); // No filename for list request
+
+        MIDDLEWARE_LOG_INFO("Requesting file list from rank %d (request_id: %u)", 
+                            targetRank, request.request_id);
+
+        // Send request
+        if (!sendRequest(&request, sizeof(request), request.request_id)) {
+            MIDDLEWARE_LOG_ERROR("Failed to send file list request");
+            return false;
+        }
+
+        // Wait for response
+        if (!waitForResponse(request.request_id, timeoutMs)) {
+            MIDDLEWARE_LOG_ERROR("Timeout waiting for file list response");
+            return false;
+        }
+
+        // Receive response header
+        ZmqFileListResponse response;
+        if (!receiveResponse(&response, sizeof(response), timeoutMs)) {
+            MIDDLEWARE_LOG_ERROR("Failed to receive file list response header");
+            return false;
+        }
+
+        // Validate response
+        if (!MessageUtils::isValidMagic(response.magic)) {
+            MIDDLEWARE_LOG_ERROR("Invalid magic number in file list response");
+            return false;
+        }
+
+        if (response.message_type != static_cast<uint32_t>(ZmqMessageType::RESP_FILE_LIST)) {
+            MIDDLEWARE_LOG_ERROR("Unexpected message type in file list response: %u", 
+                                response.message_type);
+            return false;
+        }
+
+        MIDDLEWARE_LOG_INFO("Received file list response: %u files from rank %d", 
+                            response.file_count, response.source_rank);
+
+        // Receive file list data
+        std::vector<uint8_t> fileData(response.file_count * 256);
+        if (response.file_count > 0) {
+            if (!receiveResponse(fileData.data(), fileData.size(), timeoutMs)) {
+                MIDDLEWARE_LOG_ERROR("Failed to receive file list data");
+                return false;
+            }
+        }
+
+        // Parse file list
+        std::vector<std::string> files;
+        for (uint32_t i = 0; i < response.file_count; i++) {
+            const char* filename = reinterpret_cast<const char*>(fileData.data() + i * 256);
+            std::string fname(filename, strnlen(filename, 256));
+            if (!fname.empty()) {
+                files.push_back(fname);
+            }
+        }
+
+        // Trigger callback
+        if (callback) {
+            callback(files);
+        }
+
+        connectionStats.totalResponsesReceived.fetch_add(1);
+        connectionStats.lastActivityTime = std::chrono::steady_clock::now();
+
+        return true;
+
+    } catch (const zmq::error_t& e) {
+        MIDDLEWARE_LOG_ERROR("ZeroMQ error in requestFileList: %s (errno: %d)", e.what(), e.num());
+        return false;
+    } catch (const std::exception& e) {
+        MIDDLEWARE_LOG_ERROR("Exception in requestFileList: %s", e.what());
+        return false;
+    }
+}
+
+bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank,
+                                  FileChunkCallback chunkCallback,
+                                  FileCompleteCallback completeCallback,
+                                  ErrorCallback errorCallback,
+                                  int timeoutMs) {
+    if (connectionStatus.load() != ConnectionStatus::Connected || !zmqSocket) {
+        MIDDLEWARE_LOG_ERROR("AnariUsdClient not connected");
+        return false;
+    }
+
+    try {
+        // Create file request
+        ZmqFileRequest request;
+        request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_GET_FILE);
+        request.request_id = generateRequestId();
+        request.target_rank = targetRank;
+        request.chunk_size = DEFAULT_CHUNK_SIZE;
+        request.setFilename(filename);
+
+        MIDDLEWARE_LOG_INFO("Requesting file '%s' from rank %d (request_id: %u)", 
+                            filename.c_str(), targetRank, request.request_id);
+
+        // Send request
+        if (!sendRequest(&request, sizeof(request), request.request_id)) {
+            MIDDLEWARE_LOG_ERROR("Failed to send file request");
+            return false;
+        }
+
+        // Receive file in chunks
+        bool fileComplete = false;
+        uint64_t totalSize = 0;
+
+        while (!fileComplete && !shutdownRequested.load()) {
+            // Poll for message
+            zmq::pollitem_t items[] = {{ zmqSocket->handle(), 0, ZMQ_POLLIN, 0 }};
+            int pollResult = zmq::poll(items, 1, std::chrono::milliseconds(timeoutMs));
+
+            if (pollResult <= 0) {
+                MIDDLEWARE_LOG_ERROR("Timeout waiting for file chunk");
+                if (errorCallback) {
+                    errorCallback("Timeout waiting for file chunk");
+                }
+                return false;
+            }
+
+            // Receive message type
+            uint32_t messageType;
+            zmq::message_t msgType;
+            auto res = zmqSocket->recv(msgType, zmq::recv_flags::none);
+            if (!res || res.value() != sizeof(messageType)) {
+                MIDDLEWARE_LOG_ERROR("Failed to receive message type");
+                return false;
+            }
+            messageType = *static_cast<uint32_t*>(msgType.data());
+
+            // Handle based on message type
+            switch (static_cast<ZmqMessageType>(messageType)) {
+                case ZmqMessageType::RESP_FILE_CHUNK: {
+                    ZmqFileChunk chunk;
+                    if (!receiveResponse(&chunk, sizeof(chunk), timeoutMs)) {
+                        MIDDLEWARE_LOG_ERROR("Failed to receive file chunk header");
+                        return false;
+                    }
+
+                    // Receive chunk data
+                    std::vector<uint8_t> chunkData(chunk.chunk_size);
+                    if (chunk.chunk_size > 0) {
+                        if (!receiveResponse(chunkData.data(), chunkData.size(), timeoutMs)) {
+                            MIDDLEWARE_LOG_ERROR("Failed to receive chunk data");
+                            return false;
+                        }
+                    }
+
+                    // Trigger chunk callback
+                    if (chunkCallback) {
+                        chunkCallback(chunk.getFilename(), chunkData, chunk.chunk_offset, chunk.file_size);
+                    }
+
+                    connectionStats.totalBytesReceived.fetch_add(chunk.chunk_size);
+                    totalSize = chunk.file_size;
+                    break;
+                }
+
+                case ZmqMessageType::RESP_FILE_COMPLETE: {
+                    ZmqFileComplete complete;
+                    if (!receiveResponse(&complete, sizeof(complete), timeoutMs)) {
+                        MIDDLEWARE_LOG_ERROR("Failed to receive file complete message");
+                        return false;
+                    }
+
+                    fileComplete = true;
+                    if (completeCallback) {
+                        completeCallback(complete.getFilename(), complete.total_size);
+                    }
+
+                    MIDDLEWARE_LOG_INFO("File transfer complete: %s (%zu bytes)", 
+                                        complete.getFilename().c_str(), complete.total_size);
+                    break;
+                }
+
+                case ZmqMessageType::RESP_NO_FILE: {
+                    MIDDLEWARE_LOG_ERROR("File not found: %s", filename.c_str());
+                    if (errorCallback) {
+                        errorCallback("File not found: " + filename);
+                    }
+                    return false;
+                }
+
+                case ZmqMessageType::RESP_ERROR: {
+                    ZmqErrorResponse error;
+                    if (!receiveResponse(&error, sizeof(error), timeoutMs)) {
+                        MIDDLEWARE_LOG_ERROR("Failed to receive error message");
+                        return false;
+                    }
+
+                    MIDDLEWARE_LOG_ERROR("Error response: %s", error.getErrorMessage().c_str());
+                    if (errorCallback) {
+                        errorCallback(error.getErrorMessage());
+                    }
+                    return false;
+                }
+
+                default:
+                    MIDDLEWARE_LOG_WARNING("Unknown message type: %u", messageType);
+                    break;
+            }
+
+            connectionStats.totalResponsesReceived.fetch_add(1);
+        }
+
+        connectionStats.lastActivityTime = std::chrono::steady_clock::now();
+        return fileComplete;
+
+    } catch (const zmq::error_t& e) {
+        MIDDLEWARE_LOG_ERROR("ZeroMQ error in requestFile: %s (errno: %d)", e.what(), e.num());
+        return false;
+    } catch (const std::exception& e) {
+        MIDDLEWARE_LOG_ERROR("Exception in requestFile: %s", e.what());
+        return false;
+    }
+}
+
+bool AnariUsdClient::requestFrame(int32_t frameNumber, int32_t targetRank,
+                                   FileChunkCallback chunkCallback,
+                                   FileCompleteCallback completeCallback,
+                                   ErrorCallback errorCallback,
+                                   int timeoutMs) {
+    if (connectionStatus.load() != ConnectionStatus::Connected || !zmqSocket) {
+        MIDDLEWARE_LOG_ERROR("AnariUsdClient not connected");
+        return false;
+    }
+
+    try {
+        // Create frame request
+        ZmqFileRequest request;
+        request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_GET_FRAME);
+        request.request_id = generateRequestId();
+        request.target_rank = targetRank;
+        request.chunk_size = DEFAULT_CHUNK_SIZE;
+        
+        // Encode frame number in filename
+        std::string frameFilename = "frame_" + std::to_string(frameNumber);
+        request.setFilename(frameFilename);
+
+        MIDDLEWARE_LOG_INFO("Requesting frame %d from rank %d (request_id: %u)", 
+                            frameNumber, targetRank, request.request_id);
+
+        // Send request
+        if (!sendRequest(&request, sizeof(request), request.request_id)) {
+            MIDDLEWARE_LOG_ERROR("Failed to send frame request");
+            return false;
+        }
+
+        // Receive frame files (similar to requestFile but may receive multiple files)
+        bool frameComplete = false;
+        int filesReceived = 0;
+
+        while (!frameComplete && !shutdownRequested.load()) {
+            // Poll for message
+            zmq::pollitem_t items[] = {{ zmqSocket->handle(), 0, ZMQ_POLLIN, 0 }};
+            int pollResult = zmq::poll(items, 1, std::chrono::milliseconds(timeoutMs));
+
+            if (pollResult <= 0) {
+                MIDDLEWARE_LOG_ERROR("Timeout waiting for frame data");
+                if (errorCallback) {
+                    errorCallback("Timeout waiting for frame data");
+                }
+                return false;
+            }
+
+            // Receive message type
+            uint32_t messageType;
+            zmq::message_t msgType;
+            auto res = zmqSocket->recv(msgType, zmq::recv_flags::none);
+            if (!res || res.value() != sizeof(messageType)) {
+                MIDDLEWARE_LOG_ERROR("Failed to receive message type");
+                return false;
+            }
+            messageType = *static_cast<uint32_t*>(msgType.data());
+
+            // Handle based on message type
+            switch (static_cast<ZmqMessageType>(messageType)) {
+                case ZmqMessageType::RESP_FILE_CHUNK: {
+                    ZmqFileChunk chunk;
+                    if (!receiveResponse(&chunk, sizeof(chunk), timeoutMs)) {
+                        MIDDLEWARE_LOG_ERROR("Failed to receive file chunk header");
+                        return false;
+                    }
+
+                    // Receive chunk data
+                    std::vector<uint8_t> chunkData(chunk.chunk_size);
+                    if (chunk.chunk_size > 0) {
+                        if (!receiveResponse(chunkData.data(), chunkData.size(), timeoutMs)) {
+                            MIDDLEWARE_LOG_ERROR("Failed to receive chunk data");
+                            return false;
+                        }
+                    }
+
+                    // Trigger chunk callback
+                    if (chunkCallback) {
+                        chunkCallback(chunk.getFilename(), chunkData, chunk.chunk_offset, chunk.file_size);
+                    }
+
+                    connectionStats.totalBytesReceived.fetch_add(chunk.chunk_size);
+                    break;
+                }
+
+                case ZmqMessageType::RESP_FILE_COMPLETE: {
+                    ZmqFileComplete complete;
+                    if (!receiveResponse(&complete, sizeof(complete), timeoutMs)) {
+                        MIDDLEWARE_LOG_ERROR("Failed to receive file complete message");
+                        return false;
+                    }
+
+                    filesReceived++;
+                    if (completeCallback) {
+                        completeCallback(complete.getFilename(), complete.total_size);
+                    }
+
+                    MIDDLEWARE_LOG_INFO("Frame file %d complete: %s (%zu bytes)", 
+                                        filesReceived, complete.getFilename().c_str(), complete.total_size);
+                    break;
+                }
+
+                case ZmqMessageType::RESP_NO_FILE: {
+                    MIDDLEWARE_LOG_ERROR("Frame not found: %d", frameNumber);
+                    if (errorCallback) {
+                        errorCallback("Frame not found: " + std::to_string(frameNumber));
+                    }
+                    return false;
+                }
+
+                case ZmqMessageType::RESP_ERROR: {
+                    ZmqErrorResponse error;
+                    if (!receiveResponse(&error, sizeof(error), timeoutMs)) {
+                        MIDDLEWARE_LOG_ERROR("Failed to receive error message");
+                        return false;
+                    }
+
+                    MIDDLEWARE_LOG_ERROR("Error response: %s", error.getErrorMessage().c_str());
+                    if (errorCallback) {
+                        errorCallback(error.getErrorMessage());
+                    }
+                    return false;
+                }
+
+                default:
+                    MIDDLEWARE_LOG_WARNING("Unknown message type: %u", messageType);
+                    break;
+            }
+
+            connectionStats.totalResponsesReceived.fetch_add(1);
+        }
+
+        connectionStats.lastActivityTime = std::chrono::steady_clock::now();
+        return true;
+
+    } catch (const zmq::error_t& e) {
+        MIDDLEWARE_LOG_ERROR("ZeroMQ error in requestFrame: %s (errno: %d)", e.what(), e.num());
+        return false;
+    } catch (const std::exception& e) {
+        MIDDLEWARE_LOG_ERROR("Exception in requestFrame: %s", e.what());
+        return false;
+    }
+}
+
+bool AnariUsdClient::getFileSync(const std::string& filename, int32_t targetRank,
+                                  std::vector<uint8_t>& fileData, int timeoutMs) {
+    struct FileData {
+        std::vector<uint8_t> data;
+        uint64_t totalSize = 0;
+        bool complete = false;
+    };
+
+    FileData file;
+    
+    auto chunkCallback = [&file](const std::string& fname, const std::vector<uint8_t>& chunk,
+                                  uint64_t offset, uint64_t totalSize) {
+        file.totalSize = totalSize;
+        if (file.data.size() < offset + chunk.size()) {
+            file.data.resize(offset + chunk.size());
+        }
+        std::copy(chunk.begin(), chunk.end(), file.data.begin() + offset);
+    };
+
+    auto completeCallback = [&file](const std::string& fname, uint64_t totalSize) {
+        file.complete = true;
+        file.data.resize(totalSize);
+    };
+
+    if (!requestFile(filename, targetRank, chunkCallback, completeCallback, nullptr, timeoutMs)) {
+        return false;
+    }
+
+    fileData = std::move(file.data);
+    return file.complete;
+}
+
+bool AnariUsdClient::getFileListSync(int32_t targetRank, std::vector<std::string>& files, int timeoutMs) {
+    bool received = false;
+    
+    auto callback = [&files, &received](const std::vector<std::string>& fileList) {
+        files = fileList;
+        received = true;
+    };
+
+    if (!requestFileList(targetRank, callback, timeoutMs)) {
+        return false;
+    }
+
+    return received;
+}
+
+bool AnariUsdClient::sendRequest(const void* data, size_t size, uint32_t requestId) {
+    try {
+        std::lock_guard<std::mutex> lock(requestMutex);
+        
+        zmq::message_t msg(size);
+        memcpy(msg.data(), data, size);
+        auto result = zmqSocket->send(msg, zmq::send_flags::none);
+        
+        if (!result || result.value() != size) {
+            MIDDLEWARE_LOG_ERROR("Failed to send request (request_id: %u)", requestId);
+            connectionStats.failedRequests.fetch_add(1);
+            return false;
+        }
+
+        connectionStats.totalRequestsSent.fetch_add(1);
+        return true;
+
+    } catch (const zmq::error_t& e) {
+        MIDDLEWARE_LOG_ERROR("ZeroMQ error sending request: %s (errno: %d)", e.what(), e.num());
+        connectionStats.failedRequests.fetch_add(1);
+        return false;
+    }
+}
+
+bool AnariUsdClient::receiveResponse(void* buffer, size_t size, int timeoutMs) {
+    // First wait for data to be available with cancellation support
+    if (!waitForResponse(0, timeoutMs)) { // Use 0 as requestId since we already waited
+        return false;
+    }
+    
+    try {
+        zmq::message_t msg;
+        auto result = zmqSocket->recv(msg, zmq::recv_flags::none);
+        
+        if (!result || result.value() != size) {
+            MIDDLEWARE_LOG_ERROR("Failed to receive response (expected %zu bytes, got %zu)",
+                                size, result ? result.value() : 0);
+            return false;
+        }
+
+        memcpy(buffer, msg.data(), size);
+        return true;
+
+    } catch (const zmq::error_t& e) {
+        MIDDLEWARE_LOG_ERROR("ZeroMQ error receiving response: %s (errno: %d)", e.what(), e.num());
+        return false;
+    }
+}
+
+uint32_t AnariUsdClient::generateRequestId() {
+    return nextRequestId.fetch_add(1);
+}
+
+bool AnariUsdClient::waitForResponse(uint32_t requestId, int timeoutMs) {
+    // For DEALER socket, we just poll for availability
+    // Use polling with smaller intervals to allow cancellation checks
+    const int POLL_INTERVAL_MS = 100; // Check every 100ms
+    
+    int remainingTime = timeoutMs;
+    auto startTime = std::chrono::steady_clock::now();
+    
+    while (remainingTime > 0) {
+        // Check if we should cancel (connection status changed or shutdown requested)
+        auto status = connectionStatus.load();
+        if (status != ConnectionStatus::Connected || shutdownRequested.load()) {
+            MIDDLEWARE_LOG_WARNING("Connection status changed during wait (status: %d, shutdown: %d), cancelling",
+                                  static_cast<int>(status), shutdownRequested.load());
+            return false;
+        }
+        
+        // Poll with smaller interval
+        int pollTimeout = std::min(POLL_INTERVAL_MS, remainingTime);
+        zmq::pollitem_t items[] = {{ zmqSocket->handle(), 0, ZMQ_POLLIN, 0 }};
+        int pollResult = zmq::poll(items, 1, std::chrono::milliseconds(pollTimeout));
+        
+        if (pollResult > 0) {
+            return true; // Data available
+        }
+        
+        // Update remaining time
+        auto currentTime = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(currentTime - startTime);
+        remainingTime = timeoutMs - static_cast<int>(elapsed.count());
+    }
+    
+    return false; // Timeout
+}
+
+AnariUsdClient::ConnectionStats::Snapshot AnariUsdClient::getConnectionStats() const {
+    return connectionStats.getSnapshot();
+}
+
+void AnariUsdClient::resetConnectionStats() {
+    connectionStats.reset();
+}
+
+void AnariUsdClient::setMaxMessageSize(size_t maxSizeBytes) {
+    maxMessageSize.store(maxSizeBytes);
+}
+
+size_t AnariUsdClient::getMaxMessageSize() const {
+    return maxMessageSize.load();
+}
+
+bool AnariUsdClient::testConnection() {
+    if (connectionStatus.load() != ConnectionStatus::Connected) {
+        return false;
+    }
+
+    try {
+        // Send a simple file list request to test connection
+        return requestFileList(0, nullptr, 1000);
+    } catch (...) {
+        return false;
+    }
+}
+
+void AnariUsdClient::updateHealthStatus() {
+    lastHealthCheck = std::chrono::steady_clock::now();
+    // Additional health checks can be added here
+}
+
+bool AnariUsdClient::requestWorkerListString(std::vector<std::tuple<int32_t, std::string, std::string>>& outWorkers, int timeoutMs) {
+    if (connectionStatus.load() != ConnectionStatus::Connected || !zmqSocket) {
+        MIDDLEWARE_LOG_ERROR("AnariUsdClient not connected");
+        return false;
+    }
+
+    try {
+        MIDDLEWARE_LOG_INFO("Requesting worker list using string protocol 'GET_WORKERS'");
+        
+        // Send GET_WORKERS string (following the Python client pattern)
+        // Python client sends: empty frame with SNDMORE, then "GET_WORKERS"
+        std::lock_guard<std::mutex> lock(requestMutex);
+        
+        // Send empty frame with SNDMORE flag
+        zmq::message_t emptyFrame(0);
+        auto result = zmqSocket->send(emptyFrame, zmq::send_flags::sndmore);
+        if (!result) {
+            MIDDLEWARE_LOG_ERROR("Failed to send empty frame");
+            connectionStats.failedRequests.fetch_add(1);
+            return false;
+        }
+        
+        // Send "GET_WORKERS" string
+        zmq::message_t requestMsg(strlen("GET_WORKERS"));
+        memcpy(requestMsg.data(), "GET_WORKERS", strlen("GET_WORKERS"));
+        result = zmqSocket->send(requestMsg, zmq::send_flags::none);
+        
+        if (!result || result.value() != strlen("GET_WORKERS")) {
+            MIDDLEWARE_LOG_ERROR("Failed to send GET_WORKERS request");
+            connectionStats.failedRequests.fetch_add(1);
+            return false;
+        }
+
+        connectionStats.totalRequestsSent.fetch_add(1);
+
+        // Wait for response with cancellation support
+        if (!waitForResponse(0, timeoutMs)) {
+            MIDDLEWARE_LOG_ERROR("Timeout waiting for worker list response");
+            return false;
+        }
+
+        // Receive response
+        zmq::message_t responseMsg;
+        auto recvResult = zmqSocket->recv(responseMsg, zmq::recv_flags::none);
+        if (!recvResult) {
+            MIDDLEWARE_LOG_ERROR("Failed to receive worker list response");
+            return false;
+        }
+
+        // Parse response: "WORKER_LIST|rank1:hostname1:ip1;rank2:hostname2:ip2;..."
+        std::string responseStr(static_cast<const char*>(responseMsg.data()), responseMsg.size());
+        MIDDLEWARE_LOG_INFO("Received worker list response: %s", responseStr.c_str());
+
+        // Check if response starts with "WORKER_LIST|"
+        if (responseStr.find("WORKER_LIST|") != 0) {
+            MIDDLEWARE_LOG_ERROR("Invalid worker list response format: %s", responseStr.c_str());
+            return false;
+        }
+
+        // Extract worker data
+        std::string workerData = responseStr.substr(12); // Skip "WORKER_LIST|"
+        outWorkers.clear();
+        
+        size_t pos = 0;
+        while (pos < workerData.length()) {
+            size_t semicolonPos = workerData.find(';', pos);
+            std::string workerStr;
+            if (semicolonPos == std::string::npos) {
+                workerStr = workerData.substr(pos);
+                pos = workerData.length();
+            } else {
+                workerStr = workerData.substr(pos, semicolonPos - pos);
+                pos = semicolonPos + 1;
+            }
+            
+            if (workerStr.empty()) {
+                continue;
+            }
+            
+            // Parse "rank:hostname:ip"
+            size_t colon1 = workerStr.find(':');
+            size_t colon2 = workerStr.find(':', colon1 + 1);
+            
+            if (colon1 != std::string::npos && colon2 != std::string::npos) {
+                try {
+                    int32_t rank = std::stoi(workerStr.substr(0, colon1));
+                    std::string hostname = workerStr.substr(colon1 + 1, colon2 - colon1 - 1);
+                    std::string ip = workerStr.substr(colon2 + 1);
+                    
+                    outWorkers.push_back(std::make_tuple(rank, hostname, ip));
+                } catch (const std::exception& e) {
+                    MIDDLEWARE_LOG_WARNING("Failed to parse worker entry: %s", workerStr.c_str());
+                }
+            }
+        }
+
+        MIDDLEWARE_LOG_INFO("Parsed %zu workers from response", outWorkers.size());
+        connectionStats.totalResponsesReceived.fetch_add(1);
+        connectionStats.lastActivityTime = std::chrono::steady_clock::now();
+
+        return true;
+
+    } catch (const zmq::error_t& e) {
+        MIDDLEWARE_LOG_ERROR("ZeroMQ error in requestWorkerListString: %s (errno: %d)", e.what(), e.num());
+        return false;
+    } catch (const std::exception& e) {
+        MIDDLEWARE_LOG_ERROR("Exception in requestWorkerListString: %s", e.what());
+        return false;
+    }
+}
+
+bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeoutMs) {
+    if (connectionStatus.load() != ConnectionStatus::Connected || !zmqSocket) {
+        MIDDLEWARE_LOG_ERROR("AnariUsdClient not connected");
+        return false;
+    }
+
+    try {
+        MIDDLEWARE_LOG_INFO("Requesting worker count using string protocol 'GET_WORKERS'");
+        
+        // Send GET_WORKERS string (following the Python client pattern)
+        // Python client sends: empty frame with SNDMORE, then "GET_WORKERS"
+        std::lock_guard<std::mutex> lock(requestMutex);
+        
+        // Send empty frame with SNDMORE flag
+        zmq::message_t emptyFrame(0);
+        auto result = zmqSocket->send(emptyFrame, zmq::send_flags::sndmore);
+        if (!result) {
+            MIDDLEWARE_LOG_ERROR("Failed to send empty frame");
+            connectionStats.failedRequests.fetch_add(1);
+            return false;
+        }
+        
+        // Send "GET_WORKERS" string
+        zmq::message_t requestMsg(strlen("GET_WORKERS"));
+        memcpy(requestMsg.data(), "GET_WORKERS", strlen("GET_WORKERS"));
+        result = zmqSocket->send(requestMsg, zmq::send_flags::none);
+        
+        if (!result || result.value() != strlen("GET_WORKERS")) {
+            MIDDLEWARE_LOG_ERROR("Failed to send GET_WORKERS request");
+            connectionStats.failedRequests.fetch_add(1);
+            return false;
+        }
+
+        connectionStats.totalRequestsSent.fetch_add(1);
+
+        // Wait for response with cancellation support
+        if (!waitForResponse(0, timeoutMs)) {
+            MIDDLEWARE_LOG_ERROR("Timeout waiting for worker list response");
+            return false;
+        }
+
+        // Receive response
+        zmq::message_t responseMsg;
+        auto recvResult = zmqSocket->recv(responseMsg, zmq::recv_flags::none);
+        if (!recvResult) {
+            MIDDLEWARE_LOG_ERROR("Failed to receive worker list response");
+            return false;
+        }
+
+        // Parse response: "WORKER_LIST|rank1:hostname1:ip1;rank2:hostname2:ip2;..."
+        std::string responseStr(static_cast<const char*>(responseMsg.data()), responseMsg.size());
+        MIDDLEWARE_LOG_INFO("Received worker list response: %s", responseStr.c_str());
+
+        // Check if response starts with "WORKER_LIST|"
+        if (responseStr.find("WORKER_LIST|") != 0) {
+            MIDDLEWARE_LOG_ERROR("Invalid worker list response format: %s", responseStr.c_str());
+            return false;
+        }
+
+        // Extract worker data
+        std::string workerData = responseStr.substr(12); // Skip "WORKER_LIST|"
+        
+        // Count workers by counting semicolons
+        uint32_t workerCount = 0;
+        if (!workerData.empty()) {
+            // Count semicolons + 1 (for last entry)
+            workerCount = 1; // Start with 1 for the first worker
+            for (char c : workerData) {
+                if (c == ';') {
+                    workerCount++;
+                }
+            }
+            // If string ends with semicolon, adjust
+            if (workerData.back() == ';') {
+                workerCount--;
+            }
+        }
+        
+        // Total workers = workers in list + broker (rank 0)
+        uint32_t totalWorkers = workerCount + 1;
+        
+        MIDDLEWARE_LOG_INFO("Parsed %u workers from response, total including rank 0: %u",
+                           workerCount, totalWorkers);
+
+        // Trigger callback
+        if (callback) {
+            callback(totalWorkers);
+        }
+
+        connectionStats.totalResponsesReceived.fetch_add(1);
+        connectionStats.lastActivityTime = std::chrono::steady_clock::now();
+
+        return true;
+
+    } catch (const zmq::error_t& e) {
+        MIDDLEWARE_LOG_ERROR("ZeroMQ error in requestWorkerCount: %s (errno: %d)", e.what(), e.num());
+        return false;
+    } catch (const std::exception& e) {
+        MIDDLEWARE_LOG_ERROR("Exception in requestWorkerCount: %s", e.what());
+        return false;
+    }
+}
+
+bool AnariUsdClient::requestWorkerStatus(int32_t targetRank, WorkerStatusCallback callback, int timeoutMs) {
+    if (connectionStatus.load() != ConnectionStatus::Connected || !zmqSocket) {
+        MIDDLEWARE_LOG_ERROR("AnariUsdClient not connected");
+        return false;
+    }
+
+    try {
+        // Create worker status request
+        ZmqWorkerStatusRequest request;
+        request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_WORKER_STATUS);
+        request.request_id = generateRequestId();
+        request.target_rank = targetRank;
+
+        MIDDLEWARE_LOG_INFO("Requesting worker status for rank %d (request_id: %u)", 
+                            targetRank, request.request_id);
+
+        // Send request
+        if (!sendRequest(&request, sizeof(request), request.request_id)) {
+            MIDDLEWARE_LOG_ERROR("Failed to send worker status request");
+            return false;
+        }
+
+        // Wait for response
+        if (!waitForResponse(request.request_id, timeoutMs)) {
+            MIDDLEWARE_LOG_ERROR("Timeout waiting for worker status response");
+            return false;
+        }
+
+        // Receive response
+        ZmqWorkerStatusResponse response;
+        if (!receiveResponse(&response, sizeof(response), timeoutMs)) {
+            MIDDLEWARE_LOG_ERROR("Failed to receive worker status response");
+            return false;
+        }
+
+        // Validate response
+        if (!MessageUtils::isValidMagic(response.magic)) {
+            MIDDLEWARE_LOG_ERROR("Invalid magic number in worker status response");
+            return false;
+        }
+
+        if (response.message_type != static_cast<uint32_t>(ZmqMessageType::RESP_WORKER_STATUS)) {
+            MIDDLEWARE_LOG_ERROR("Unexpected message type in worker status response: %u", 
+                                response.message_type);
+            return false;
+        }
+
+        MIDDLEWARE_LOG_INFO("Received worker status response for rank %d: status=%u, hostname=%s", 
+                            response.source_rank, response.worker_status, response.getHostname().c_str());
+
+        // Trigger callback
+        if (callback) {
+            callback(response.source_rank, response.worker_status, 
+                     response.getHostname(), response.getGpuInfo(), response.last_heartbeat);
+        }
+
+        connectionStats.totalResponsesReceived.fetch_add(1);
+        connectionStats.lastActivityTime = std::chrono::steady_clock::now();
+
+        return true;
+
+    } catch (const zmq::error_t& e) {
+        MIDDLEWARE_LOG_ERROR("ZeroMQ error in requestWorkerStatus: %s (errno: %d)", e.what(), e.num());
+        return false;
+    } catch (const std::exception& e) {
+        MIDDLEWARE_LOG_ERROR("Exception in requestWorkerStatus: %s", e.what());
+        return false;
+    }
+}
+
+bool AnariUsdClient::getWorkerCountSync(uint32_t& workerCount, int timeoutMs) {
+    std::promise<uint32_t> promise;
+    std::future<uint32_t> future = promise.get_future();
+    
+    bool success = requestWorkerCount([&promise](uint32_t count) {
+        promise.set_value(count);
+    }, timeoutMs);
+    
+    if (!success) {
+        return false;
+    }
+    
+    auto status = future.wait_for(std::chrono::milliseconds(timeoutMs));
+    if (status == std::future_status::ready) {
+        workerCount = future.get();
+        return true;
+    }
+    
+    return false;
+}
+
+bool AnariUsdClient::getWorkerStatusSync(int32_t targetRank,
+                                         std::vector<std::tuple<int32_t, uint32_t, std::string, std::string, uint64_t>>& workers,
+                                         int timeoutMs) {
+    // For now, just get single worker status
+    std::promise<bool> promise;
+    std::future<bool> future = promise.get_future();
+    
+    bool success = requestWorkerStatus(targetRank, 
+        [&promise, &workers](int32_t rank, uint32_t status, const std::string& hostname, 
+                             const std::string& gpuInfo, uint64_t lastHeartbeat) {
+            workers.push_back(std::make_tuple(rank, status, hostname, gpuInfo, lastHeartbeat));
+            promise.set_value(true);
+        }, timeoutMs);
+    
+    if (!success) {
+        return false;
+    }
+    
+    auto status = future.wait_for(std::chrono::milliseconds(timeoutMs));
+    return status == std::future_status::ready;
+}
+
+bool AnariUsdClient::getTotalWorkerCountSync(uint32_t& totalCount, int timeoutMs) {
+    std::vector<std::tuple<int32_t, std::string, std::string>> workers;
+    
+    if (!requestWorkerListString(workers, timeoutMs)) {
+        return false;
+    }
+    
+    totalCount = static_cast<uint32_t>(workers.size());
+    MIDDLEWARE_LOG_INFO("Total worker count (including rank 0): %u", totalCount);
+    return true;
+}
+
+void AnariUsdClient::cleanup() {
+    if (zmqSocket) {
+        try {
+            zmqSocket->close();
+        } catch (...) {
+            // Ignore errors during cleanup
+        }
+        zmqSocket.reset();
+    }
+
+    if (zmqContext) {
+        try {
+            zmqContext->close();
+        } catch (...) {
+            // Ignore errors during cleanup
+        }
+        zmqContext.reset();
+    }
+
+    pendingRequests.clear();
+}
+
+} // namespace anari_usd_middleware

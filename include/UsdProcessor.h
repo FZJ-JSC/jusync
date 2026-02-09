@@ -28,6 +28,9 @@ namespace tinyusdz {
 
 namespace anari_usd_middleware {
 
+// Forward declaration of MeshData from AnariUsdMiddleware.h
+struct MeshData;
+
 /**
  * Thread-safe USD processing engine with comprehensive error handling and memory safety
  * features for Unreal Engine 5.5 compatibility. Handles USD file conversion, mesh extraction,
@@ -37,6 +40,7 @@ class ANARI_USD_MIDDLEWARE_API UsdProcessor {
 public:
     /**
      * Enhanced mesh data structure with validation and bounds checking
+     * ENHANCED: Now includes USD geometry features (subdivision, multi-UV, etc.)
      */
     struct MeshData {
         std::string elementName;        ///< Name of the USD element (validated)
@@ -45,12 +49,14 @@ public:
         std::vector<uint32_t> indices;  ///< Triangle indices (validated)
         std::vector<glm::vec3> normals; ///< Normal vectors (normalized)
         std::vector<glm::vec2> uvs;     ///< Texture coordinates (clamped)
-        std::vector<glm::vec4> vertex_colors; ///vertex colors
-        std::string subdivisionScheme = "none";  // catmullClark, loop, bilinear, none
-        std::vector<uint32_t> faceVertexCounts;  // Original polygon vertex counts
-        bool doubleSided = false;                 // Backface culling control
-        std::vector<std::vector<glm::vec2>> uvSets;    // Multiple UV channels
-        std::vector<std::string> uvSetNames;            // UV channel names
+        std::vector<glm::vec4> vertex_colors; ///< Vertex colors
+
+        // NEW: USD geometry features
+        std::string subdivisionScheme;  ///< Subdivision scheme (e.g., "catmull-clark", "bilinear", "none")
+        bool doubleSided = false;       ///< Double-sided flag from USD
+        std::vector<uint32_t> faceVertexCounts;  ///< Face vertex counts for heterogenous polygons
+        std::vector<std::vector<glm::vec2>> uvSets;  ///< Multiple UV sets (channels)
+        std::vector<std::string> uvSetNames;  ///< Names of UV sets
 
         // Validation methods
         bool isValid() const {
@@ -67,6 +73,8 @@ public:
         size_t getTriangleCount() const { return indices.size() / 3; }
         bool hasNormals() const { return !normals.empty(); }
         bool hasUVs() const { return !uvs.empty(); }
+        bool hasSubdivision() const { return !subdivisionScheme.empty() && subdivisionScheme != "none"; }
+        size_t getUVSetCount() const { return uvSets.size(); }
 
         // Calculate bounding box
         std::pair<glm::vec3, glm::vec3> getBounds() const;
@@ -82,33 +90,16 @@ public:
             indices.clear();
             normals.clear();
             uvs.clear();
+            vertex_colors.clear();
+            subdivisionScheme.clear();
+            doubleSided = false;
+            faceVertexCounts.clear();
+            uvSets.clear();
+            uvSetNames.clear();
         }
-    };
 
-    struct CurveData {
-        std::string elementName;
-        std::vector<glm::vec3> points;
-        std::vector<int32_t> curveVertexCounts;
-        std::vector<float> widths;
-        std::string type = "linear";      // cubic, linear
-        std::string basis = "bspline";    // bezier, catmullRom, bspline
-
-        bool isValid() const {
-            return !points.empty() && !curveVertexCounts.empty();
-        }
-    };
-
-    struct InstancerData {
-        std::string elementName;
-        std::vector<int32_t> protoIndices;
-        std::vector<glm::vec3> positions;
-        std::vector<glm::quat> orientations;
-        std::vector<glm::vec3> scales;
-        std::vector<std::string> prototypePaths;
-
-        bool isValid() const {
-            return !protoIndices.empty() && !positions.empty();
-        }
+        // Convert to AnariUsdMiddleware::MeshData format
+        MeshData toMiddlewareMeshData() const;
     };
 
     /**

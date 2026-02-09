@@ -106,7 +106,40 @@ public:
 
     UFUNCTION()
     void HandleMessageReceivedForLibrary(const FString& Message);
-    
+
+    // DEALER Client Functions for HPC Broker Communication
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker")
+    bool ConnectToBroker(const FString& BrokerEndpoint = TEXT("tcp://localhost:5556"), int32 TimeoutMs = 5000);
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker")
+    void DisconnectFromBroker();
+
+    UFUNCTION(BlueprintPure, Category = "JUSYNC Broker")
+    bool IsBrokerConnected() const;
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker")
+    bool RequestFileList(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles);
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker")
+    bool RequestFile(const FString& Filename, int32 TargetRank, int32 TimeoutMs, TArray<uint8>& OutData);
+UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker")
+bool RequestFrame(int32 FrameNumber, int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCFileData>& OutFiles);
+
+// Worker status queries
+UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker")
+bool RequestWorkerStatus(int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCWorkerStatus>& OutWorkerStatus);
+
+UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker")
+bool RequestWorkerCount(int32 TimeoutMs, int32& OutWorkerCount);
+
+// Total worker count INCLUDING rank 0 (uses legacy string protocol)
+UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker")
+bool RequestTotalWorkerCount(int32 TimeoutMs, int32& OutTotalCount);
+
+// Worker count EXCLUDING rank 0 (computational workers only)
+UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker")
+bool RequestWorkerCountExcludingRank0(int32 TimeoutMs, int32& OutWorkerCount);
+     
 
 private:
 #ifdef WITH_ANARI_USD_MIDDLEWARE

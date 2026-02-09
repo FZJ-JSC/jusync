@@ -28,6 +28,9 @@ namespace tinyusdz {
 
 namespace anari_usd_middleware {
 
+// Forward declaration of MeshData from AnariUsdMiddleware.h
+struct MeshData;
+
 /**
  * Thread-safe USD processing engine with comprehensive error handling and memory safety
  * features for Unreal Engine 5.5 compatibility. Handles USD file conversion, mesh extraction,
@@ -37,6 +40,7 @@ class ANARI_USD_MIDDLEWARE_API UsdProcessor {
 public:
     /**
      * Enhanced mesh data structure with validation and bounds checking
+     * ENHANCED: Now includes USD geometry features (subdivision, multi-UV, etc.)
      */
     struct MeshData {
         std::string elementName;        ///< Name of the USD element (validated)
@@ -45,7 +49,14 @@ public:
         std::vector<uint32_t> indices;  ///< Triangle indices (validated)
         std::vector<glm::vec3> normals; ///< Normal vectors (normalized)
         std::vector<glm::vec2> uvs;     ///< Texture coordinates (clamped)
-        std::vector<glm::vec4> vertex_colors; ///vertex colors
+        std::vector<glm::vec4> vertex_colors; ///< Vertex colors
+
+        // NEW: USD geometry features
+        std::string subdivisionScheme;  ///< Subdivision scheme (e.g., "catmull-clark", "bilinear", "none")
+        bool doubleSided = false;       ///< Double-sided flag from USD
+        std::vector<uint32_t> faceVertexCounts;  ///< Face vertex counts for heterogenous polygons
+        std::vector<std::vector<glm::vec2>> uvSets;  ///< Multiple UV sets (channels)
+        std::vector<std::string> uvSetNames;  ///< Names of UV sets
 
         // Validation methods
         bool isValid() const {
@@ -62,6 +73,8 @@ public:
         size_t getTriangleCount() const { return indices.size() / 3; }
         bool hasNormals() const { return !normals.empty(); }
         bool hasUVs() const { return !uvs.empty(); }
+        bool hasSubdivision() const { return !subdivisionScheme.empty() && subdivisionScheme != "none"; }
+        size_t getUVSetCount() const { return uvSets.size(); }
 
         // Calculate bounding box
         std::pair<glm::vec3, glm::vec3> getBounds() const;
@@ -77,7 +90,16 @@ public:
             indices.clear();
             normals.clear();
             uvs.clear();
+            vertex_colors.clear();
+            subdivisionScheme.clear();
+            doubleSided = false;
+            faceVertexCounts.clear();
+            uvSets.clear();
+            uvSetNames.clear();
         }
+
+        // Convert to AnariUsdMiddleware::MeshData format
+        MeshData toMiddlewareMeshData() const;
     };
 
     /**

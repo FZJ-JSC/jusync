@@ -1,6 +1,7 @@
 #include "AnariUsdMiddleware.h"
 #include "CollisionProcessor.h"
 #include "ZmqConnector.h"
+#include "AnariUsdClient.h"
 #include "HashVerifier.h"
 #include "UsdProcessor.h"
 #include "MiddlewareLogging.h"
@@ -15,6 +16,8 @@
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_set>
+#include <sstream>
+#include <map>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
@@ -29,6 +32,7 @@ class AnariUsdMiddleware::Impl {
 public:
     // Core components
     ZmqConnector zmqConnector;
+    std::unique_ptr<AnariUsdClient> anariUsdClient;  // ✅ NEW: ANARI USD DEALER client
     std::unique_ptr<UsdProcessor> usdProcessor;
     std::unique_ptr<CollisionProcessor> collisionProcessor;  // ✅ NEW: Collision processor
 
@@ -132,6 +136,13 @@ public:
         try {
             zmqConnector.disconnect(1000);
 
+            // ✅ NEW: Disconnect ANARI USD client
+            if (anariUsdClient) {
+                anariUsdClient->disconnect(1000);
+                anariUsdClient.reset();
+                MIDDLEWARE_LOG_INFO("ANARI USD client disconnected");
+            }
+
             if (usdProcessor) {
                 auto stats = usdProcessor->getProcessingStats();
                 MIDDLEWARE_LOG_INFO("Final processing stats - Files: %llu, Meshes: %llu, Errors: %llu",
@@ -162,7 +173,9 @@ public:
     }
 
     bool isConnected() const {
-        return initialized.load() && zmqConnector.isConnected() && !shutdownRequested.load();
+        // DEALER-ONLY ARCHITECTURE: Don't check zmqConnector.isConnected() since we don't have ROUTER socket
+        // In DEALER-only mode, connection status is based on AnariUsdClient DEALER socket
+        return initialized.load() && !shutdownRequested.load();
     }
 
     // ✅ NEW: Collision configuration methods
@@ -260,47 +273,38 @@ public:
     }
 
     bool startReceiving() {
+        // DEALER-ONLY ARCHITECTURE: No receiver thread needed
+        // In DEALER-only mode, all communication is synchronous through the DEALER socket
+        // The receiver thread was for polling ROUTER socket, which no longer exists
         if (running.load()) {
-            MIDDLEWARE_LOG_INFO("Receiver thread already running");
+            MIDDLEWARE_LOG_INFO("Receiver thread already marked as running");
             return true;
         }
 
         if (!isConnected()) {
-            MIDDLEWARE_LOG_ERROR("Cannot start receiver thread: not connected");
+            MIDDLEWARE_LOG_ERROR("Cannot start receiver: middleware not initialized");
             return false;
         }
 
-        try {
-            running.store(true);
-            receiverThread = std::thread(&Impl::receiverLoop, this);
-            MIDDLEWARE_LOG_INFO("Receiver thread started successfully");
-            return true;
-        } catch (const std::exception& e) {
-            MIDDLEWARE_LOG_ERROR("Failed to start receiver thread: %s", e.what());
-            running.store(false);
-            return false;
-        }
+        // In DEALER-only mode, we don't start a receiver thread
+        // File transfers happen synchronously through request/response
+        MIDDLEWARE_LOG_INFO("DEALER-only mode: Receiver thread not needed (synchronous communication)");
+        running.store(true); // Mark as "running" to satisfy API
+        return true;
     }
 
     void stopReceiving() {
+        // DEALER-ONLY ARCHITECTURE: No receiver thread to stop
         if (!running.load()) {
             return;
         }
 
-        MIDDLEWARE_LOG_INFO("Stopping receiver thread...");
+        MIDDLEWARE_LOG_INFO("Stopping receiver (DEALER-only mode)...");
         running.store(false);
-
-        // Give the thread time to observe the flag
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-        if (receiverThread.joinable()) {
-            try {
-                receiverThread.join();
-                MIDDLEWARE_LOG_INFO("Receiver thread joined successfully");
-            } catch (const std::exception& e) {
-                MIDDLEWARE_LOG_ERROR("Exception joining receiver thread: %s", e.what());
-            }
-        }
+        
+        // In DEALER-only mode, there's no thread to join
+        // Just mark as stopped
+        MIDDLEWARE_LOG_INFO("Receiver stopped (DEALER-only mode)");
     }
 
     // Enhanced USD loading methods with collision support
@@ -1042,11 +1046,216 @@ bool AnariUsdMiddleware::GetGradientLineAsPNGBuffer(const std::vector<uint8_t>& 
     return pImpl->GetGradientLineAsPNGBuffer(buffer, outPngBuffer);
 }
 
+// ✅ NEW: ANARI USD DEALER client methods
+bool AnariUsdMiddleware::connectToBroker(const char* brokerEndpoint, int timeoutMs) {
+    if (!pImpl->anariUsdClient) {
+        pImpl->anariUsdClient = std::make_unique<AnariUsdClient>();
+    }
+    return pImpl->anariUsdClient->connect(brokerEndpoint, timeoutMs);
+}
+
+void AnariUsdMiddleware::disconnectFromBroker() {
+    if (pImpl->anariUsdClient) {
+        pImpl->anariUsdClient->disconnect(1000);
+    }
+}
+
+bool AnariUsdMiddleware::isBrokerConnected() const {
+    return pImpl->anariUsdClient && pImpl->anariUsdClient->isConnected();
+}
+
+bool AnariUsdMiddleware::requestFileList(int32_t targetRank, std::vector<std::string>& outFiles, int timeoutMs) {
+    if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
+        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
+        return false;
+    }
+    return pImpl->anariUsdClient->getFileListSync(targetRank, outFiles, timeoutMs);
+}
+
+bool AnariUsdMiddleware::requestFile(const std::string& filename, int32_t targetRank,
+                                      std::vector<uint8_t>& outFileData, int timeoutMs) {
+    if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
+        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
+        return false;
+    }
+    return pImpl->anariUsdClient->getFileSync(filename, targetRank, outFileData, timeoutMs);
+}
+
+bool AnariUsdMiddleware::requestFrame(int32_t frameNumber, int32_t targetRank,
+                                       std::vector<std::pair<std::string, std::vector<uint8_t>>>& outFrameFiles,
+                                       int timeoutMs) {
+    if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
+        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
+        return false;
+    }
+    
+    // Collect frame files using callbacks
+    std::map<std::string, std::vector<uint8_t>> frameFiles;
+    std::mutex frameFilesMutex;
+    bool frameComplete = false;
+    
+    auto chunkCallback = [&frameFiles, &frameFilesMutex](const std::string& fname,
+                                                          const std::vector<uint8_t>& chunk,
+                                                          uint64_t offset, uint64_t totalSize) {
+        std::lock_guard<std::mutex> lock(frameFilesMutex);
+        if (frameFiles[fname].size() < offset + chunk.size()) {
+            frameFiles[fname].resize(offset + chunk.size());
+        }
+        std::copy(chunk.begin(), chunk.end(), frameFiles[fname].begin() + offset);
+    };
+    
+    auto completeCallback = [&frameFiles, &frameFilesMutex, &frameComplete](const std::string& fname, uint64_t totalSize) {
+        std::lock_guard<std::mutex> lock(frameFilesMutex);
+        frameFiles[fname].resize(totalSize);
+        frameComplete = true;
+    };
+    
+    if (!pImpl->anariUsdClient->requestFrame(frameNumber, targetRank, chunkCallback, completeCallback, nullptr, timeoutMs)) {
+        return false;
+    }
+    
+    // Convert to output format
+    outFrameFiles.clear();
+    for (const auto& pair : frameFiles) {
+        outFrameFiles.push_back({pair.first, pair.second});
+    }
+    
+    return true;
+}
+
+bool AnariUsdMiddleware::requestWorkerCount(uint32_t& outWorkerCount, int timeoutMs) {
+    if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
+        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
+        return false;
+    }
+    return pImpl->anariUsdClient->getWorkerCountSync(outWorkerCount, timeoutMs);
+}
+
+bool AnariUsdMiddleware::requestTotalWorkerCount(uint32_t& outTotalCount, int timeoutMs) {
+    if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
+        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
+        return false;
+    }
+    return pImpl->anariUsdClient->getTotalWorkerCountSync(outTotalCount, timeoutMs);
+}
+
+bool AnariUsdMiddleware::requestWorkerStatus(int32_t targetRank,
+                                             std::vector<std::tuple<int32_t, uint32_t, std::string, std::string, uint64_t>>& outWorkerStatus,
+                                             int timeoutMs) {
+    if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
+        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
+        return false;
+    }
+    return pImpl->anariUsdClient->getWorkerStatusSync(targetRank, outWorkerStatus, timeoutMs);
+}
+
+// ============================================================================
+// ASYNC WORKER QUERIES (NON-BLOCKING)
+// ============================================================================
+
+void AnariUsdMiddleware::requestWorkerCountAsync(int timeoutMs, WorkerCountCallback callback, BrokerErrorCallback errorCallback) {
+    if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
+        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
+        if (errorCallback) {
+            errorCallback("ANARI USD client not connected");
+        }
+        return;
+    }
+    
+    // Launch async request on background thread
+    std::thread([this, timeoutMs, callback, errorCallback]() {
+        uint32_t workerCount = 0;
+        bool success = pImpl->anariUsdClient->getWorkerCountSync(workerCount, timeoutMs);
+        
+        if (success && callback) {
+            callback(workerCount);
+        } else if (errorCallback) {
+            errorCallback(success ? "Unknown error" : "Failed to retrieve worker count");
+        }
+    }).detach();
+}
+
+void AnariUsdMiddleware::requestTotalWorkerCountAsync(int timeoutMs, WorkerCountCallback callback, BrokerErrorCallback errorCallback) {
+    if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
+        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
+        if (errorCallback) {
+            errorCallback("ANARI USD client not connected");
+        }
+        return;
+    }
+    
+    // Launch async request on background thread
+    std::thread([this, timeoutMs, callback, errorCallback]() {
+        uint32_t totalCount = 0;
+        bool success = pImpl->anariUsdClient->getTotalWorkerCountSync(totalCount, timeoutMs);
+        
+        if (success && callback) {
+            callback(totalCount);
+        } else if (errorCallback) {
+            errorCallback(success ? "Unknown error" : "Failed to retrieve total worker count");
+        }
+    }).detach();
+}
+
+void AnariUsdMiddleware::requestWorkerStatusAsync(int32_t targetRank, int timeoutMs, WorkerStatusCallback callback, BrokerErrorCallback errorCallback) {
+    if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
+        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
+        if (errorCallback) {
+            errorCallback("ANARI USD client not connected");
+        }
+        return;
+    }
+    
+    // Launch async request on background thread
+    std::thread([this, targetRank, timeoutMs, callback, errorCallback]() {
+        std::vector<std::tuple<int32_t, uint32_t, std::string, std::string, uint64_t>> workerStatus;
+        bool success = pImpl->anariUsdClient->getWorkerStatusSync(targetRank, workerStatus, timeoutMs);
+        
+        if (success && callback) {
+            callback(workerStatus);
+        } else if (errorCallback) {
+            errorCallback(success ? "Unknown error" : "Failed to retrieve worker status");
+        }
+    }).detach();
+}
+
+void AnariUsdMiddleware::requestFileListAsync(int32_t targetRank, int timeoutMs, FileListCallback callback, BrokerErrorCallback errorCallback) {
+    if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
+        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
+        if (errorCallback) {
+            errorCallback("ANARI USD client not connected");
+        }
+        return;
+    }
+    
+    // Launch async request on background thread
+    std::thread([this, targetRank, timeoutMs, callback, errorCallback]() {
+        std::vector<std::string> files;
+        bool success = pImpl->anariUsdClient->getFileListSync(targetRank, files, timeoutMs);
+        
+        if (success && callback) {
+            callback(files);
+        } else if (errorCallback) {
+            errorCallback(success ? "Unknown error" : "Failed to retrieve file list");
+        }
+    }).detach();
+}
+
+bool AnariUsdMiddleware::requestWorkerListString(std::vector<std::tuple<int32_t, std::string, std::string>>& outWorkers, int timeoutMs) {
+    if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
+        MIDDLEWARE_LOG_ERROR("Cannot request worker list - broker not connected");
+        return false;
+    }
+    
+    return pImpl->anariUsdClient->requestWorkerListString(outWorkers, timeoutMs);
+}
+
 std::string AnariUsdMiddleware::getStatusInfo() const {
     try {
         std::ostringstream status;
         status << "AnariUsdMiddleware Status (with Collision Support):\n";
         status << " Connected: " << (isConnected() ? "Yes" : "No") << "\n";
+        status << " Broker Connected: " << (isBrokerConnected() ? "Yes" : "No") << "\n";
         status << " Default Collision: " << CollisionProcessor::getComplexityName(getDefaultCollisionComplexity()) << "\n";
         return status.str();
     } catch (const std::exception& e) {

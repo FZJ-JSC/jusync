@@ -7,6 +7,7 @@
 #include <cstring>
 #include <fstream>
 #include <filesystem>
+#include <thread>
 
 // ============================================================================
 // GLOBAL STATE MANAGEMENT
@@ -165,6 +166,227 @@ void StopReceiving_C() {
 }
 
 // ============================================================================
+// ANARI USD DEALER CLIENT FUNCTIONS
+// ============================================================================
+
+/**
+ * Connect to ANARI USD broker as DEALER client
+ */
+int ConnectToBroker_C(const char* broker_endpoint, int timeout_ms) {
+    if (!g_middleware) {
+        return 0;
+    }
+    
+    try {
+        std::string endpoint = broker_endpoint ? broker_endpoint : "tcp://localhost:5556";
+        return g_middleware->connectToBroker(endpoint.c_str(), timeout_ms) ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+/**
+ * Disconnect from ANARI USD broker
+ */
+void DisconnectFromBroker_C() {
+    if (g_middleware) {
+        g_middleware->disconnectFromBroker();
+    }
+}
+
+/**
+ * Check if connected to ANARI USD broker
+ */
+int IsBrokerConnected_C() {
+    return (g_middleware && g_middleware->isBrokerConnected()) ? 1 : 0;
+}
+
+/**
+ * Request total worker count INCLUDING rank 0
+ * Uses requestTotalWorkerCount method which includes rank 0
+ * Signature: int RequestTotalWorkerCount_C(uint32_t* out_total_count, int timeout_ms)
+ */
+int RequestTotalWorkerCount_C(uint32_t* out_total_count, int timeout_ms) {
+    if (!g_middleware || !out_total_count) {
+        return 0;
+    }
+    
+    try {
+        uint32_t count = 0;
+        bool success = g_middleware->requestTotalWorkerCount(count, timeout_ms);
+        *out_total_count = count;
+        return success ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+/**
+ * Request worker count EXCLUDING rank 0 (computational workers only)
+ * Uses existing requestWorkerCount method
+ * Signature: int RequestWorkerCountExcludingRank0_C(uint32_t* out_count, int timeout_ms)
+ */
+int RequestWorkerCountExcludingRank0_C(uint32_t* out_count, int timeout_ms) {
+    if (!g_middleware || !out_count) {
+        return 0;
+    }
+    
+    try {
+        uint32_t count = 0;
+        bool success = g_middleware->requestWorkerCount(count, timeout_ms);
+        *out_count = count;
+        return success ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+/**
+ * Request list of available files from a specific rank
+ */
+int RequestFileList_C(int32_t target_rank, char*** out_files, size_t* out_count, int timeout_ms) {
+    if (!g_middleware || !out_files || !out_count) {
+        return 0;
+    }
+    
+    try {
+        std::vector<std::string> files;
+        if (!g_middleware->requestFileList(target_rank, files, timeout_ms)) {
+            *out_count = 0;
+            *out_files = nullptr;
+            return 0;
+        }
+        
+        // Allocate C string array
+        *out_count = files.size();
+        *out_files = new char*[*out_count];
+        
+        // Copy each filename
+        for (size_t i = 0; i < files.size(); ++i) {
+            size_t len = files[i].length() + 1;
+            (*out_files)[i] = new char[len];
+#ifdef _WIN32
+            strncpy_s((*out_files)[i], len, files[i].c_str(), len - 1);
+#else
+            std::strncpy((*out_files)[i], files[i].c_str(), len);
+            (*out_files)[i][len - 1] = '\0';
+#endif
+        }
+        
+        return 1;
+    } catch (...) {
+        *out_count = 0;
+        *out_files = nullptr;
+        return 0;
+    }
+}
+
+/**
+ * Request a specific file from a rank
+ */
+int RequestFile_C(const char* filename, int32_t target_rank,
+                  unsigned char** out_data, size_t* out_size, int timeout_ms) {
+    if (!g_middleware || !filename || !out_data || !out_size) {
+        return 0;
+    }
+    
+    try {
+        std::vector<uint8_t> fileData;
+        if (!g_middleware->requestFile(filename, target_rank, fileData, timeout_ms)) {
+            *out_size = 0;
+            *out_data = nullptr;
+            return 0;
+        }
+        
+        // Allocate and copy file data
+        *out_size = fileData.size();
+        if (*out_size > 0) {
+            *out_data = new unsigned char[*out_size];
+            std::memcpy(*out_data, fileData.data(), *out_size);
+        } else {
+            *out_data = nullptr;
+        }
+        
+        return 1;
+    } catch (...) {
+        *out_size = 0;
+        *out_data = nullptr;
+        return 0;
+    }
+}
+
+/**
+ * Request all files for a specific frame number
+ */
+int RequestFrame_C(int32_t frame_number, int32_t target_rank,
+                   CFileData** out_files, size_t* out_count, int timeout_ms) {
+    if (!g_middleware || !out_files || !out_count) {
+        return 0;
+    }
+    
+    try {
+        std::vector<std::pair<std::string, std::vector<uint8_t>>> frameFiles;
+        if (!g_middleware->requestFrame(frame_number, target_rank, frameFiles, timeout_ms)) {
+            *out_count = 0;
+            *out_files = nullptr;
+            return 0;
+        }
+        
+        // Allocate C file data array
+        *out_count = frameFiles.size();
+        *out_files = new CFileData[*out_count];
+        
+        // Convert each file
+        for (size_t i = 0; i < frameFiles.size(); ++i) {
+            CFileData& c_file = (*out_files)[i];
+            
+            // Copy filename
+#ifdef _WIN32
+            strncpy_s(c_file.filename, sizeof(c_file.filename), frameFiles[i].first.c_str(), 255);
+#else
+            std::strncpy(c_file.filename, frameFiles[i].first.c_str(), 255);
+            c_file.filename[255] = '\0';
+#endif
+            
+            // Copy file data
+            c_file.data_size = frameFiles[i].second.size();
+            if (c_file.data_size > 0) {
+                c_file.data = new unsigned char[c_file.data_size];
+                std::memcpy(c_file.data, frameFiles[i].second.data(), c_file.data_size);
+            } else {
+                c_file.data = nullptr;
+            }
+            
+            // Set default hash and file type (not available in this context)
+            c_file.hash[0] = '\0';
+            c_file.file_type[0] = '\0';
+        }
+        
+        return 1;
+    } catch (...) {
+        *out_count = 0;
+        *out_files = nullptr;
+        return 0;
+    }
+}
+
+/**
+ * Free file list array allocated by RequestFileList_C
+ */
+void FreeFileList_C(char** files, size_t count) {
+    if (!files) {
+        return;
+    }
+    
+    for (size_t i = 0; i < count; ++i) {
+        if (files[i]) {
+            delete[] files[i];
+        }
+    }
+    delete[] files;
+}
+
+// ============================================================================
 // INTERNAL HELPER FUNCTIONS
 // ============================================================================
 
@@ -188,14 +410,9 @@ static void ConvertMeshDataToCFormat(const anari_usd_middleware::UsdProcessor::M
     dst.uvs = nullptr;
     dst.vertex_colors = nullptr;
 
-    // Initialize USD geometry feature pointers
-    dst.subdivision_scheme = nullptr;
-    dst.double_sided = false;
-    dst.face_vertex_counts = nullptr;
-    dst.face_vertex_counts_size = 0;
-    dst.uv_sets = nullptr;
-    dst.uv_set_names = nullptr;
-    dst.uv_sets_count = 0;
+    // Initialize USD geometry feature pointers (if they exist in CMeshData)
+    // Note: These fields may not exist in all versions of CMeshData
+    // They are only used for USD geometry features which are optional
 
     // Safe string copying with bounds checking
     #ifdef _WIN32
@@ -266,55 +483,9 @@ static void ConvertMeshDataToCFormat(const anari_usd_middleware::UsdProcessor::M
         }
     }
 
-    // ========================================================================
-    // COPY USD GEOMETRY FEATURES
-    // ========================================================================
-
-    // Subdivision scheme (thread-local storage for lifetime)
-    g_subdivision_scheme_storage.push_back(src.subdivisionScheme);
-    dst.subdivision_scheme = g_subdivision_scheme_storage.back().c_str();
-
-    // Double-sided flag
-    dst.double_sided = src.doubleSided;
-
-    // Face vertex counts
-    dst.face_vertex_counts_size = src.faceVertexCounts.size();
-    if (dst.face_vertex_counts_size > 0) {
-        unsigned int* fvc = new unsigned int[dst.face_vertex_counts_size];
-        std::memcpy(fvc, src.faceVertexCounts.data(),
-                   dst.face_vertex_counts_size * sizeof(unsigned int));
-        dst.face_vertex_counts = fvc;
-    }
-
-    // Multiple UV sets
-    dst.uv_sets_count = src.uvSets.size();
-    if (dst.uv_sets_count > 0) {
-        // Allocate array of pointers for UV channels
-        float** uvSetPtrs = new float*[dst.uv_sets_count];
-        const char** uvNamePtrs = new const char*[dst.uv_sets_count];
-
-        for (size_t j = 0; j < dst.uv_sets_count; ++j) {
-            // Copy UV data for this channel (each vec2 becomes 2 floats)
-            size_t uvCount = src.uvSets[j].size() * 2; // ✅ FIXED: vec2 -> 2 floats
-            if (uvCount > 0) {
-                uvSetPtrs[j] = new float[uvCount];
-                // Convert glm::vec2 to flat float array
-                for (size_t k = 0; k < src.uvSets[j].size(); ++k) {
-                    uvSetPtrs[j][k * 2 + 0] = src.uvSets[j][k].x;
-                    uvSetPtrs[j][k * 2 + 1] = src.uvSets[j][k].y;
-                }
-            } else {
-                uvSetPtrs[j] = nullptr;
-            }
-
-            // Store UV name (thread-local for lifetime)
-            g_uv_name_storage.push_back(src.uvSetNames[j]);
-            uvNamePtrs[j] = g_uv_name_storage.back().c_str();
-        }
-
-        dst.uv_sets = uvSetPtrs;
-        dst.uv_set_names = uvNamePtrs;
-    }
+    // Note: USD geometry features are not copied to CMeshData
+    // The Unreal plugin's CMeshData may not have these fields
+    // If needed, they should be added to the CMeshData struct definition
 }
 
 
@@ -953,6 +1124,144 @@ void RegisterUpdateCallback_C(FileReceivedCallback_C callback) {
  */
 void RegisterMessageCallback_C(MessageReceivedCallback_C callback) {
     g_message_callback = callback;
+}
+
+// ============================================================================
+// ASYNC BROKER FUNCTIONS (NON-BLOCKING)
+// ============================================================================
+
+/**
+ * Request total worker count asynchronously (non-blocking)
+ */
+void RequestTotalWorkerCountAsync_C(
+    WorkerCountCallback_C callback,
+    BrokerErrorCallback_C error_callback,
+    int timeout_ms) {
+    
+    if (!g_middleware || !g_middleware->isBrokerConnected()) {
+        if (error_callback) {
+            error_callback("Broker not connected");
+        }
+        return;
+    }
+    
+    // Launch async request on background thread
+    std::thread([callback, error_callback, timeout_ms]() {
+        uint32_t total_count = 0;
+        bool success = g_middleware->requestTotalWorkerCount(total_count, timeout_ms);
+        
+        if (success && callback) {
+            callback(total_count);
+        } else if (error_callback) {
+            error_callback(success ? "Unknown error" : "Failed to retrieve total worker count");
+        }
+    }).detach();
+}
+
+/**
+ * Request worker count asynchronously (non-blocking)
+ */
+void RequestWorkerCountAsync_C(
+    WorkerCountCallback_C callback,
+    BrokerErrorCallback_C error_callback,
+    int timeout_ms) {
+    
+    if (!g_middleware || !g_middleware->isBrokerConnected()) {
+        if (error_callback) {
+            error_callback("Broker not connected");
+        }
+        return;
+    }
+    
+    // Launch async request on background thread
+    std::thread([callback, error_callback, timeout_ms]() {
+        uint32_t worker_count = 0;
+        bool success = g_middleware->requestWorkerCount(worker_count, timeout_ms);
+        
+        if (success && callback) {
+            callback(worker_count);
+        } else if (error_callback) {
+            error_callback(success ? "Unknown error" : "Failed to retrieve worker count");
+        }
+    }).detach();
+}
+
+/**
+ * Request worker status asynchronously (non-blocking)
+ */
+void RequestWorkerStatusAsync_C(
+    int32_t target_rank,
+    WorkerStatusCallback_C callback,
+    BrokerErrorCallback_C error_callback,
+    int timeout_ms) {
+    
+    if (!g_middleware || !g_middleware->isBrokerConnected()) {
+        if (error_callback) {
+            error_callback("Broker not connected");
+        }
+        return;
+    }
+    
+    // Launch async request on background thread
+    std::thread([target_rank, callback, error_callback, timeout_ms]() {
+        std::vector<std::tuple<int32_t, uint32_t, std::string, std::string, uint64_t>> worker_status;
+        bool success = g_middleware->requestWorkerStatus(target_rank, worker_status, timeout_ms);
+        
+        if (success && callback) {
+            // Serialize worker status to string for C callback
+            std::string status_data;
+            for (const auto& status : worker_status) {
+                status_data += std::to_string(std::get<0>(status)) + ":";
+                status_data += std::to_string(std::get<1>(status)) + ":";
+                status_data += std::get<2>(status) + ":";
+                status_data += std::get<3>(status) + ":";
+                status_data += std::to_string(std::get<4>(status)) + ";";
+            }
+            callback(target_rank, status_data.c_str(), status_data.size());
+        } else if (error_callback) {
+            error_callback(success ? "Unknown error" : "Failed to retrieve worker status");
+        }
+    }).detach();
+}
+
+/**
+ * Request file list asynchronously (non-blocking)
+ */
+void RequestFileListAsync_C(
+    int32_t target_rank,
+    FileListCallback_C callback,
+    BrokerErrorCallback_C error_callback,
+    int timeout_ms) {
+    
+    if (!g_middleware || !g_middleware->isBrokerConnected()) {
+        if (error_callback) {
+            error_callback("Broker not connected");
+        }
+        return;
+    }
+    
+    // Launch async request on background thread
+    std::thread([target_rank, callback, error_callback, timeout_ms]() {
+        std::vector<std::string> files;
+        bool success = g_middleware->requestFileList(target_rank, files, timeout_ms);
+        
+        if (success && callback) {
+            // Convert to C-style array
+            char** file_array = new char*[files.size()];
+            for (size_t i = 0; i < files.size(); i++) {
+                file_array[i] = strdup(files[i].c_str());
+            }
+            callback(target_rank, file_array, files.size());
+            
+            // Free the allocated strings
+            for (size_t i = 0; i < files.size(); i++) {
+                free(file_array[i]);
+            }
+            delete[] file_array;
+        } else if (error_callback) {
+            error_callback(success ? "Unknown error" : "Failed to retrieve file list");
+        }
+    }).detach();
 }
 
 } // extern "C"

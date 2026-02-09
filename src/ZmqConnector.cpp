@@ -72,24 +72,12 @@ bool ZmqConnector::initialize(const char* endpoint, int timeoutMs) {
         zmqContext->set(zmq::ctxopt::max_sockets, 1024);
         zmqContext->set(zmq::ctxopt::io_threads, 1);
 
-        // Create ROUTER socket with enhanced configuration
-        zmqSocket = std::make_unique<zmq::socket_t>(*zmqContext, zmq::socket_type::router);
-        if (!zmqSocket) {
-            MIDDLEWARE_LOG_ERROR("Failed to create ZMQ ROUTER socket");
-            cleanup();
-            connectionStatus.store(ConnectionStatus::Error);
-            return false;
-        }
-
-        // Apply platform-specific socket configuration
-        if (!configurePlatformSpecificSocket(timeoutMs)) {
-            MIDDLEWARE_LOG_ERROR("Platform-specific socket configuration failed");
-            cleanup();
-            connectionStatus.store(ConnectionStatus::Error);
-            return false;
-        }
-
-        // Determine and validate endpoint
+        // DEALER-ONLY ARCHITECTURE: No ROUTER socket creation
+        // In DEALER-only architecture, we don't create a ROUTER socket here
+        // Instead, we'll use the AnariUsdClient DEALER socket for all communication
+        zmqSocket.reset(); // No socket created
+        
+        // Determine and validate endpoint (but don't bind)
         currentEndpoint = endpoint ? endpoint : getDefaultEndpoint();
 
         if (!validateEndpoint(currentEndpoint)) {
@@ -99,22 +87,7 @@ bool ZmqConnector::initialize(const char* endpoint, int timeoutMs) {
             return false;
         }
 
-        // Try binding to the primary endpoint
-        try {
-            zmqSocket->bind(currentEndpoint);
-            MIDDLEWARE_LOG_INFO("ZMQ Router bound successfully to %s", currentEndpoint.c_str());
-        } catch (const zmq::error_t& e) {
-            MIDDLEWARE_LOG_WARNING("Failed to bind to primary endpoint %s: %s (errno: %d)",
-                                  currentEndpoint.c_str(), e.what(), e.num());
-
-            // Try alternative endpoints with cross-platform support
-            if (!tryAlternativeEndpoints(currentEndpoint)) {
-                MIDDLEWARE_LOG_ERROR("All binding attempts failed");
-                cleanup();
-                connectionStatus.store(ConnectionStatus::Error);
-                return false;
-            }
-        }
+        MIDDLEWARE_LOG_INFO("ZmqConnector initialized in DEALER-only mode (no ROUTER socket)");
 
         // Reset statistics
         messageStats.reset();
@@ -140,6 +113,14 @@ bool ZmqConnector::initialize(const char* endpoint, int timeoutMs) {
 }
 
 bool ZmqConnector::configurePlatformSpecificSocket(int timeoutMs) {
+    // DEALER-ONLY ARCHITECTURE: No socket to configure
+    // In DEALER-only mode, we don't have a ROUTER socket to configure
+    // Socket configuration will be handled by AnariUsdClient for the DEALER socket
+    if (!zmqSocket) {
+        MIDDLEWARE_LOG_INFO("No socket to configure in DEALER-only mode");
+        return true;
+    }
+    
     try {
         // Set comprehensive socket options for safety and performance
         zmqSocket->set(zmq::sockopt::linger, 0); // No lingering on close

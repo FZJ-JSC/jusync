@@ -63,6 +63,12 @@ struct MeshData {
     std::vector<float>   vertex_colors; // rgba…
     /* NEW: collision */
     CollisionData        collision;
+    /* NEW: USD geometry features */
+    std::string          subdivisionScheme;  // e.g., "catmull-clark", "bilinear", "none"
+    bool                 doubleSided = false;
+    std::vector<uint32_t>faceVertexCounts;  // For heterogenous polygons
+    std::vector<std::vector<float>> uvSets; // Multiple UV sets (each as flat array)
+    std::vector<std::string> uvSetNames;    // Names of UV sets
 
     bool isValid() const {
         return !elementName.empty() &&
@@ -76,6 +82,8 @@ struct MeshData {
     }
     size_t getVertexCount()   const { return points.size()   / 3; }
     size_t getTriangleCount() const { return indices.size()  / 3; }
+    size_t getUVSetCount()    const { return uvSets.size(); }
+    bool hasSubdivision()     const { return !subdivisionScheme.empty() && subdivisionScheme != "none"; }
     void clear() { *this = MeshData(); }
 };
 
@@ -109,6 +117,40 @@ public:
     bool initialize(const char* endpoint = nullptr);
     void shutdown();
     bool isConnected() const;
+
+    /* NEW: ANARI USD DEALER client methods */
+    bool connectToBroker(const char* brokerEndpoint, int timeoutMs = 5000);
+    void disconnectFromBroker();
+    bool isBrokerConnected() const;
+    
+    /* NEW: File request methods */
+    bool requestFileList(int32_t targetRank, std::vector<std::string>& outFiles, int timeoutMs = 10000);
+    bool requestFile(const std::string& filename, int32_t targetRank,
+                     std::vector<uint8_t>& outFileData, int timeoutMs = 30000);
+    bool requestFrame(int32_t frameNumber, int32_t targetRank,
+                      std::vector<std::pair<std::string, std::vector<uint8_t>>>& outFrameFiles,
+                      int timeoutMs = 60000);
+
+    /* NEW: Worker status queries (synchronous) */
+    bool requestWorkerCount(uint32_t& outWorkerCount, int timeoutMs = 5000);
+    bool requestTotalWorkerCount(uint32_t& outTotalCount, int timeoutMs = 5000);  // Includes rank 0
+    bool requestWorkerStatus(int32_t targetRank,
+                             std::vector<std::tuple<int32_t, uint32_t, std::string, std::string, uint64_t>>& outWorkerStatus,
+                             int timeoutMs = 10000);
+    
+    /* NEW: Worker status queries (async with callbacks) */
+    using WorkerCountCallback = std::function<void(uint32_t workerCount)>;
+    using WorkerStatusCallback = std::function<void(const std::vector<std::tuple<int32_t, uint32_t, std::string, std::string, uint64_t>>& workerStatus)>;
+    using FileListCallback = std::function<void(const std::vector<std::string>& files)>;
+    using BrokerErrorCallback = std::function<void(const std::string& error)>;
+    
+    void requestWorkerCountAsync(int timeoutMs, WorkerCountCallback callback, BrokerErrorCallback errorCallback = nullptr);
+    void requestTotalWorkerCountAsync(int timeoutMs, WorkerCountCallback callback, BrokerErrorCallback errorCallback = nullptr);
+    void requestWorkerStatusAsync(int32_t targetRank, int timeoutMs, WorkerStatusCallback callback, BrokerErrorCallback errorCallback = nullptr);
+    void requestFileListAsync(int32_t targetRank, int timeoutMs, FileListCallback callback, BrokerErrorCallback errorCallback = nullptr);
+      
+    /* NEW: String-based worker list (compatible with Python broker) */
+    bool requestWorkerListString(std::vector<std::tuple<int32_t, std::string, std::string>>& outWorkers, int timeoutMs = 5000);
 
     /* callbacks */
     int  registerUpdateCallback (FileUpdateCallback cb);

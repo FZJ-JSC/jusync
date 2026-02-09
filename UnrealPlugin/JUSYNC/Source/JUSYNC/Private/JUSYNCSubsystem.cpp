@@ -18,6 +18,7 @@
 extern "C" {
 #include "AnariUsdMiddleware_C.h"
 }
+#include <cstdint>  // For uint32_t
 #endif
 
 // Global callback handlers for C interface
@@ -426,8 +427,8 @@ bool UJUSYNCSubsystem::InitializeMiddleware(const FString& Endpoint)
     
     if (Result == 1)
     {
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ ROUTER socket bound to: %s"), UTF8_TO_TCHAR(EndpointCStr));
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ Waiting for DEALER connections..."));
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ USD processors initialized (DEALER-only mode)"));
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Ready to connect to broker via DEALER socket"));
         
         // Test connection status
         int ConnectionStatus = IsConnected_C();
@@ -437,7 +438,7 @@ bool UJUSYNCSubsystem::InitializeMiddleware(const FString& Endpoint)
         const char* StatusInfo = GetStatusInfo_C();
         UE_LOG(LogJUSYNC, Log, TEXT("Middleware status: %s"), UTF8_TO_TCHAR(StatusInfo));
         
-        UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Middleware initialized successfully on %s"), *Endpoint);
+        UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Middleware initialized successfully (DEALER-only mode)"));
     }
     else
     {
@@ -1263,5 +1264,454 @@ TArray<FVector> UJUSYNCBlueprintLibrary::GetSpawnPointLocations(const FString& T
     return SpawnLocations;
 }
 
+// ============================================================================
+// DEALER CLIENT FUNCTIONS FOR HPC BROKER COMMUNICATION
+// ============================================================================
+
+bool UJUSYNCSubsystem::ConnectToBroker(const FString& BrokerEndpoint, int32 TimeoutMs)
+{
+    FScopeLock Lock(&MiddlewareMutex);
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("=== CONNECTING TO ANARI USD BROKER ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Broker Endpoint: %s"), *BrokerEndpoint);
+    UE_LOG(LogJUSYNC, Log, TEXT("Timeout: %d ms"), TimeoutMs);
+    
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (!bIsInitialized.load())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot connect to broker - middleware not initialized"));
+        return false;
+    }
+    
+    // Convert FString to C string
+    FTCHARToUTF8 EndpointConverter(*BrokerEndpoint);
+    const char* EndpointCStr = BrokerEndpoint.IsEmpty() ? "tcp://localhost:5556" : EndpointConverter.Get();
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("Calling ConnectToBroker_C..."));
+    int Result = ConnectToBroker_C(EndpointCStr, TimeoutMs);
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("ConnectToBroker_C returned: %d"), Result);
+    
+    if (Result == 1)
+    {
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Connected to ANARI USD broker at %s"), *BrokerEndpoint);
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ DEALER socket connected through SSH tunnel"));
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Ready for synchronous file requests"));
+        return true;
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to connect to broker (Result: %d)"), Result);
+        return false;
+    }
+#endif
+    return false;
+}
+
+void UJUSYNCSubsystem::DisconnectFromBroker()
+{
+    FScopeLock Lock(&MiddlewareMutex);
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("=== DISCONNECTING FROM ANARI USD BROKER ==="));
+    
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    DisconnectFromBroker_C();
+    UE_LOG(LogJUSYNC, Log, TEXT("✅ Disconnected from ANARI USD broker"));
+#endif
+}
+
+bool UJUSYNCSubsystem::IsBrokerConnected() const
+{
+    FScopeLock Lock(&MiddlewareMutex);
+    
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (!bIsInitialized.load())
+    {
+        return false;
+    }
+    
+    int Result = IsBrokerConnected_C();
+    bool bConnected = (Result == 1);
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("Broker connection status: %s"), bConnected ? TEXT("CONNECTED") : TEXT("DISCONNECTED"));
+    return bConnected;
+#endif
+    return false;
+}
+
+bool UJUSYNCSubsystem::RequestFileList(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles)
+{
+    FScopeLock Lock(&MiddlewareMutex);
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING FILE LIST FROM BROKER ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Target Rank: %d"), TargetRank);
+    UE_LOG(LogJUSYNC, Log, TEXT("Timeout: %d ms"), TimeoutMs);
+    
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (!bIsInitialized.load())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request file list - middleware not initialized"));
+        return false;
+    }
+    
+    if (!IsBrokerConnected())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request file list - not connected to broker"));
+        return false;
+    }
+    
+    char** FileList = nullptr;
+    size_t FileCount = 0;
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("Calling RequestFileList_C..."));
+    int Result = RequestFileList_C(TargetRank, &FileList, &FileCount, TimeoutMs);
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("RequestFileList_C returned: %d, FileCount: %d"), Result, FileCount);
+    
+    if (Result == 1 && FileList && FileCount > 0)
+    {
+        OutFiles.Empty();
+        OutFiles.Reserve(FileCount);
+        
+        for (size_t i = 0; i < FileCount; ++i)
+        {
+            if (FileList[i])
+            {
+                OutFiles.Add(FString(UTF8_TO_TCHAR(FileList[i])));
+            }
+        }
+        
+        // Free C memory
+        FreeFileList_C(FileList, FileCount);
+        
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved %d files from broker"), OutFiles.Num());
+        return true;
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to request file list (Result: %d)"), Result);
+        if (FileList)
+        {
+            FreeFileList_C(FileList, FileCount);
+        }
+    }
+#endif
+    return false;
+}
+
+bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, int32 TimeoutMs, TArray<uint8>& OutData)
+{
+    FScopeLock Lock(&MiddlewareMutex);
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING FILE FROM BROKER ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Filename: %s"), *Filename);
+    UE_LOG(LogJUSYNC, Log, TEXT("Target Rank: %d"), TargetRank);
+    UE_LOG(LogJUSYNC, Log, TEXT("Timeout: %d ms"), TimeoutMs);
+    
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (!bIsInitialized.load())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request file - middleware not initialized"));
+        return false;
+    }
+    
+    if (!IsBrokerConnected())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request file - not connected to broker"));
+        return false;
+    }
+    
+    // Convert FString to C string
+    FTCHARToUTF8 FilenameConverter(*Filename);
+    const char* FilenameCStr = FilenameConverter.Get();
+    
+    unsigned char* FileData = nullptr;
+    size_t FileSize = 0;
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("Calling RequestFile_C..."));
+    int Result = RequestFile_C(FilenameCStr, TargetRank, &FileData, &FileSize, TimeoutMs);
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("RequestFile_C returned: %d, FileSize: %d bytes"), Result, FileSize);
+    
+    if (Result == 1 && FileData && FileSize > 0)
+    {
+        OutData.Empty();
+        OutData.SetNum(FileSize);
+        FMemory::Memcpy(OutData.GetData(), FileData, FileSize);
+        
+        // Free C memory
+        delete[] FileData;
+        
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved file '%s' (%d bytes) from broker"), *Filename, OutData.Num());
+        return true;
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to request file (Result: %d)"), Result);
+        if (FileData)
+        {
+            delete[] FileData;
+        }
+    }
+#endif
+    return false;
+}
+
+bool UJUSYNCSubsystem::RequestFrame(int32 FrameNumber, int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCFileData>& OutFiles)
+{
+    FScopeLock Lock(&MiddlewareMutex);
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING FRAME FROM BROKER ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Frame Number: %d"), FrameNumber);
+    UE_LOG(LogJUSYNC, Log, TEXT("Target Rank: %d"), TargetRank);
+    UE_LOG(LogJUSYNC, Log, TEXT("Timeout: %d ms"), TimeoutMs);
+    
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (!bIsInitialized.load())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request frame - middleware not initialized"));
+        return false;
+    }
+    
+    if (!IsBrokerConnected())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request frame - not connected to broker"));
+        return false;
+    }
+    
+    CFileData* CFrameFiles = nullptr;
+    size_t FileCount = 0;
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("Calling RequestFrame_C..."));
+    int Result = RequestFrame_C(FrameNumber, TargetRank, &CFrameFiles, &FileCount, TimeoutMs);
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("RequestFrame_C returned: %d, FileCount: %d"), Result, FileCount);
+    
+    if (Result == 1 && CFrameFiles && FileCount > 0)
+    {
+        OutFiles.Empty();
+        OutFiles.Reserve(FileCount);
+        
+        for (size_t i = 0; i < FileCount; ++i)
+        {
+            FJUSYNCFileData FileData;
+            FileData.Filename = FString(UTF8_TO_TCHAR(CFrameFiles[i].filename));
+            FileData.Hash = FString(UTF8_TO_TCHAR(CFrameFiles[i].hash));
+            FileData.FileType = FString(UTF8_TO_TCHAR(CFrameFiles[i].file_type));
+            
+            if (CFrameFiles[i].data && CFrameFiles[i].data_size > 0)
+            {
+                FileData.Data.SetNum(CFrameFiles[i].data_size);
+                FMemory::Memcpy(FileData.Data.GetData(), CFrameFiles[i].data, CFrameFiles[i].data_size);
+            }
+            
+            OutFiles.Add(FileData);
+        }
+        
+        // Free C memory
+        for (size_t i = 0; i < FileCount; ++i)
+        {
+            if (CFrameFiles[i].data)
+            {
+                delete[] CFrameFiles[i].data;
+            }
+        }
+        delete[] CFrameFiles;
+        
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved frame %d with %d files from broker"), FrameNumber, OutFiles.Num());
+        return true;
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to request frame (Result: %d)"), Result);
+        if (CFrameFiles)
+        {
+            for (size_t i = 0; i < FileCount; ++i)
+            {
+                if (CFrameFiles[i].data)
+                {
+                    delete[] CFrameFiles[i].data;
+                }
+            }
+            delete[] CFrameFiles;
+        }
+    }
+#endif
+    return false;
+}
+
+bool UJUSYNCSubsystem::RequestWorkerStatus(int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCWorkerStatus>& OutWorkerStatus)
+{
+    FScopeLock Lock(&MiddlewareMutex);
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING WORKER STATUS FROM BROKER ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Target Rank: %d"), TargetRank);
+    UE_LOG(LogJUSYNC, Log, TEXT("Timeout: %d ms"), TimeoutMs);
+    
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (!bIsInitialized.load())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request worker status - middleware not initialized"));
+        return false;
+    }
+    
+    if (!IsBrokerConnected())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request worker status - not connected to broker"));
+        return false;
+    }
+    
+    // Request worker list using string protocol (compatible with Python broker)
+    std::vector<std::tuple<int32_t, std::string, std::string>> workerList;
+    bool bSuccess = Middleware->requestWorkerListString(workerList, TimeoutMs);
+    
+    if (bSuccess)
+    {
+        OutWorkerStatus.Empty();
+        for (const auto& worker : workerList)
+        {
+            FJUSYNCWorkerStatus Status;
+            Status.Rank = std::get<0>(worker);
+            Status.Hostname = FString(UTF8_TO_TCHAR(std::get<1>(worker).c_str()));
+            Status.GpuInfo = TEXT(""); // Not available in string protocol
+            Status.LastHeartbeat = 0;  // Not available in string protocol
+            
+            // Set default status (1 = idle) since string protocol doesn't provide status
+            Status.Status = 1;
+            
+            OutWorkerStatus.Add(Status);
+        }
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Successfully retrieved worker list: %d workers"), OutWorkerStatus.Num());
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to retrieve worker list from middleware"));
+        OutWorkerStatus.Empty();
+    }
+    
+    return bSuccess;
+#endif
+    return false;
+}
+
+bool UJUSYNCSubsystem::RequestWorkerCount(int32 TimeoutMs, int32& OutWorkerCount)
+{
+    FScopeLock Lock(&MiddlewareMutex);
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING WORKER COUNT FROM BROKER ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Timeout: %d ms"), TimeoutMs);
+    
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (!bIsInitialized.load())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request worker count - middleware not initialized"));
+        return false;
+    }
+    
+    if (!IsBrokerConnected())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request worker count - not connected to broker"));
+        return false;
+    }
+    
+    // Get worker count by requesting worker list (string protocol)
+    std::vector<std::tuple<int32_t, std::string, std::string>> workerList;
+    bool bSuccess = Middleware->requestWorkerListString(workerList, TimeoutMs);
+    
+    if (bSuccess)
+    {
+        OutWorkerCount = static_cast<int32>(workerList.size());
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Successfully retrieved worker count: %d workers"), OutWorkerCount);
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to retrieve worker count from middleware"));
+        OutWorkerCount = 0;
+    }
+    
+    return bSuccess;
+#endif
+    return false;
+}
+
+bool UJUSYNCSubsystem::RequestTotalWorkerCount(int32 TimeoutMs, int32& OutTotalCount)
+{
+    FScopeLock Lock(&MiddlewareMutex);
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING TOTAL WORKER COUNT (INCLUDING RANK 0) ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Timeout: %d ms"), TimeoutMs);
+    
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (!bIsInitialized.load())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request total worker count - middleware not initialized"));
+        return false;
+    }
+    
+    if (!IsBrokerConnected())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request total worker count - not connected to broker"));
+        return false;
+    }
+    
+    // Use C-wrapper function to get total worker count (includes rank 0)
+    uint32_t TotalCount = 0;
+    int Result = RequestTotalWorkerCount_C(&TotalCount, TimeoutMs);
+    
+    if (Result == 1)
+    {
+        OutTotalCount = static_cast<int32>(TotalCount);
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Total worker count (including rank 0): %d"), OutTotalCount);
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to retrieve total worker count"));
+        OutTotalCount = 0;
+    }
+    
+    return Result == 1;
+#endif
+    return false;
+}
+
+bool UJUSYNCSubsystem::RequestWorkerCountExcludingRank0(int32 TimeoutMs, int32& OutWorkerCount)
+{
+    FScopeLock Lock(&MiddlewareMutex);
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING WORKER COUNT (EXCLUDING RANK 0) ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Timeout: %d ms"), TimeoutMs);
+    
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (!bIsInitialized.load())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request worker count - middleware not initialized"));
+        return false;
+    }
+    
+    if (!IsBrokerConnected())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request worker count - not connected to broker"));
+        return false;
+    }
+    
+    // Use C-wrapper function to get worker count (excludes rank 0)
+    uint32_t WorkerCount = 0;
+    int Result = RequestWorkerCountExcludingRank0_C(&WorkerCount, TimeoutMs);
+    
+    if (Result == 1)
+    {
+        OutWorkerCount = static_cast<int32>(WorkerCount);
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Worker count (excluding rank 0): %d"), OutWorkerCount);
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to retrieve worker count"));
+        OutWorkerCount = 0;
+    }
+    
+    return Result == 1;
+#endif
+    return false;
+}
 
 

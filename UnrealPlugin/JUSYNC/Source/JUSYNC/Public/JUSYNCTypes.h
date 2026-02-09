@@ -189,7 +189,56 @@ struct JUSYNC_API FJUSYNCTextureData
     }
 };
 
+USTRUCT(BlueprintType)
+struct JUSYNC_API FJUSYNCWorkerStatus
+{
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Worker")
+    int32 Rank;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Worker")
+    int32 Status;  // 0=offline, 1=idle, 2=busy, 3=error
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Worker")
+    FString Hostname;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Worker")
+    FString GpuInfo;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Worker")
+    int64 LastHeartbeat;  // Unix timestamp
+
+    FJUSYNCWorkerStatus()
+    {
+        Rank = -1;
+        Status = 0;
+        Hostname = TEXT("");
+        GpuInfo = TEXT("");
+        LastHeartbeat = 0;
+    }
+
+    bool IsOnline() const { return Status > 0; }
+    bool IsIdle() const { return Status == 1; }
+    bool IsBusy() const { return Status == 2; }
+    bool HasError() const { return Status == 3; }
+    
+    FString GetStatusString() const
+    {
+        switch(Status)
+        {
+            case 0: return TEXT("Offline");
+            case 1: return TEXT("Idle");
+            case 2: return TEXT("Busy");
+            case 3: return TEXT("Error");
+            default: return TEXT("Unknown");
+        }
+    }
+};
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCFileReceived, const FJUSYNCFileData&, FileData);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCMessageReceived, const FString&, Message);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FJUSYNCProcessingProgress, float, Progress, const FString&, Status);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FJUSYNCError, const FString&, ErrorType, const FString&, ErrorMessage);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCWorkerStatusReceived, const TArray<FJUSYNCWorkerStatus>&, WorkerStatus);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCWorkerCountReceived, int32, WorkerCount);
