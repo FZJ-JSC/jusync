@@ -31,6 +31,9 @@ public:
     // File list async result
     DECLARE_DYNAMIC_DELEGATE_OneParam(FOnFileListReceived, const TArray<FString>&, FileList);
     
+    // File list with sizes async result
+    DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnFileListWithSizesReceived, const TArray<FString>&, FileList, const TArray<int64>&, FileSizes);
+    
     // File async result
     DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnFileReceived, const FString&, Filename, const TArray<uint8>&, FileData);
     
@@ -70,8 +73,14 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker", DisplayName = "Request File List From Broker")
     static bool RequestFileListFromBroker(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles);
 
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker", DisplayName = "Request File List With Sizes From Broker")
+    static bool RequestFileListWithSizesFromBroker(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles, TArray<int64>& OutSizes);
+
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker", DisplayName = "Get Last File List From Broker")
     static bool GetLastFileListFromBroker(TArray<FString>& OutFileList);
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker", DisplayName = "Get Last File List With Sizes From Broker")
+    static bool GetLastFileListWithSizesFromBroker(TArray<FString>& OutFileList, TArray<int64>& OutFileSizes);
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker")
     static bool RequestFileFromBroker(const FString& Filename, int32 TargetRank, int32 TimeoutMs, TArray<uint8>& OutData);
@@ -111,6 +120,10 @@ public:
     // Async file list - fires event when complete, doesn't block
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request File List Async")
     static void RequestFileListAsync(int32 TargetRank, int32 TimeoutMs, const FOnFileListReceived& OnComplete, const FOnBrokerError& OnError);
+
+    // Async file list with sizes - fires event when complete, doesn't block
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request File List With Sizes Async")
+    static void RequestFileListWithSizesAsync(int32 TargetRank, int32 TimeoutMs, const FOnFileListWithSizesReceived& OnComplete, const FOnBrokerError& OnError);
 
     // Async file request - fires event when complete, doesn't block
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request File Async")
@@ -210,6 +223,24 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Validation")
     static bool FilterFileBySize(const TArray<uint8>& FileBuffer, int32 MinimumSizeBytes);
 
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Validation", DisplayName = "Filter File List By Size")
+    static void FilterFileListBySize(const TArray<FString>& FileList, const TArray<int64>& FileSizes, int32 MinimumSizeBytes, TArray<FString>& OutFilteredFiles, TArray<int64>& OutFilteredSizes);
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Validation", DisplayName = "Filter File List By Extension (Enum)")
+    static void FilterFileListByExtensionEnum(const TArray<FString>& FileList, EJUSYNCExtension ExtensionFilter, TArray<FString>& OutFilteredFiles);
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Validation", DisplayName = "Filter File List By Extension (Enum) With Sizes")
+    static void FilterFileListByExtensionEnumWithSizes(const TArray<FString>& FileList, const TArray<int64>& FileSizes, EJUSYNCExtension ExtensionFilter, TArray<FString>& OutFilteredFiles, TArray<int64>& OutFilteredSizes);
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Validation", DisplayName = "Filter File List By Extensions (Array)")
+    static void FilterFileListByExtensions(const TArray<FString>& FileList, const TArray<FString>& AllowedExtensions, TArray<FString>& OutFilteredFiles);
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Validation", DisplayName = "Filter File List By Extensions (Array) With Sizes")
+    static void FilterFileListByExtensionsWithSizes(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<FString>& AllowedExtensions, TArray<FString>& OutFilteredFiles, TArray<int64>& OutFilteredSizes);
+
+    UFUNCTION(BlueprintPure, Category = "JUSYNC|Utilities", DisplayName = "Calculate Timeout From File Size")
+    static int32 CalculateTimeoutFromFileSize(int64 FileSizeBytes, int32 BaseTimeoutMs = 1000, float BandwidthBytesPerSecond = 1000000.0f);
+
     UFUNCTION(BlueprintPure, Category = "JUSYNC|Utilities")
     static FString GetJUSYNCMeshStatistics(const FJUSYNCMeshData& MeshData);
 
@@ -280,6 +311,11 @@ UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning", CallInEd
     // Last file list retrieved from broker (for async node output)
     static TArray<FString> LastFileList;
     static FCriticalSection LastFileListMutex;
+
+    // Last file list with sizes retrieved from broker (for async node output)
+    static TArray<FString> LastFileListWithSizes_Names;
+    static TArray<int64> LastFileListWithSizes_Sizes;
+    static FCriticalSection LastFileListWithSizesMutex;
 
     static void ApplyEnhancedDefaultMaterial(URealtimeMeshComponent* MeshComp);
     static FString DetectUSDContentType(const TArray<uint8>& Buffer);

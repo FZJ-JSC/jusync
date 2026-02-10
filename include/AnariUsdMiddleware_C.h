@@ -545,6 +545,23 @@ ANARI_USD_MIDDLEWARE_C_API int RequestFileList_C(
     int timeout_ms);
 
 /**
+ * Request file list with sizes from worker rank
+ *
+ * @param target_rank Target worker rank
+ * @param out_names Pointer to receive array of filenames (caller must free with FreeFileList_C)
+ * @param out_sizes Pointer to receive array of file sizes (caller must free with FreeBuffer_C)
+ * @param out_count Pointer to receive number of files
+ * @param timeout_ms Timeout in milliseconds
+ * @return 1 on success, 0 on failure
+ */
+ANARI_USD_MIDDLEWARE_C_API int RequestFileListWithSizes_C(
+    int32_t target_rank,
+    char*** out_names,
+    uint64_t** out_sizes,
+    size_t* out_count,
+    int timeout_ms);
+
+/**
  * Free file list allocated by RequestFileList_C
  *
  * @param files Array of filenames to free
@@ -552,6 +569,18 @@ ANARI_USD_MIDDLEWARE_C_API int RequestFileList_C(
  */
 ANARI_USD_MIDDLEWARE_C_API void FreeFileList_C(
     char** files,
+    size_t count);
+
+/**
+ * Free file list with sizes allocated by RequestFileListWithSizes_C
+ *
+ * @param names Array of filenames to free
+ * @param sizes Array of file sizes to free
+ * @param count Number of files in array
+ */
+ANARI_USD_MIDDLEWARE_C_API void FreeFileListWithSizes_C(
+    char** names,
+    uint64_t* sizes,
     size_t count);
 
 /**

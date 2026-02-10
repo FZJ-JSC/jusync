@@ -400,4 +400,15 @@ namespace MessageUtils {
     }
 }
 
+/**
+ * File information (name + size)
+ */
+struct FileInfo {
+    std::string name;
+    uint64_t size;
+
+    FileInfo() : size(0) {}
+    FileInfo(const std::string& n, uint64_t s) : name(n), size(s) {}
+};
+
 } // namespace anari_usd_middleware

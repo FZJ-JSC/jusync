@@ -121,6 +121,9 @@ public:
     bool RequestFileList(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles);
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker")
+    bool RequestFileListWithSizes(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles, TArray<int64>& OutSizes);
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker")
     bool RequestFile(const FString& Filename, int32 TargetRank, int32 TimeoutMs, TArray<uint8>& OutData);
 UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker")
 bool RequestFrame(int32 FrameNumber, int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCFileData>& OutFiles);

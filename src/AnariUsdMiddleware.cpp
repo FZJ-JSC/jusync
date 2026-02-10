@@ -1072,6 +1072,14 @@ bool AnariUsdMiddleware::requestFileList(int32_t targetRank, std::vector<std::st
     return pImpl->anariUsdClient->getFileListSync(targetRank, outFiles, timeoutMs);
 }
 
+bool AnariUsdMiddleware::requestFileListWithSizes(int32_t targetRank, std::vector<FileInfo>& outFiles, int timeoutMs) {
+    if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
+        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
+        return false;
+    }
+    return pImpl->anariUsdClient->getFileListWithSizesSync(targetRank, outFiles, timeoutMs);
+}
+
 bool AnariUsdMiddleware::requestFile(const std::string& filename, int32_t targetRank,
                                       std::vector<uint8_t>& outFileData, int timeoutMs) {
     if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
@@ -1232,6 +1240,28 @@ void AnariUsdMiddleware::requestFileListAsync(int32_t targetRank, int timeoutMs,
     std::thread([this, targetRank, timeoutMs, callback, errorCallback]() {
         std::vector<std::string> files;
         bool success = pImpl->anariUsdClient->getFileListSync(targetRank, files, timeoutMs);
+        
+        if (success && callback) {
+            callback(files);
+        } else if (errorCallback) {
+            errorCallback(success ? "Unknown error" : "Failed to retrieve file list");
+        }
+    }).detach();
+}
+
+void AnariUsdMiddleware::requestFileListWithSizesAsync(int32_t targetRank, int timeoutMs, FileListWithSizesCallback callback, BrokerErrorCallback errorCallback) {
+    if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
+        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
+        if (errorCallback) {
+            errorCallback("ANARI USD client not connected");
+        }
+        return;
+    }
+    
+    // Launch async request on background thread
+    std::thread([this, targetRank, timeoutMs, callback, errorCallback]() {
+        std::vector<FileInfo> files;
+        bool success = pImpl->anariUsdClient->getFileListWithSizesSync(targetRank, files, timeoutMs);
         
         if (success && callback) {
             callback(files);

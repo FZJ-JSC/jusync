@@ -50,6 +50,7 @@ public:
     using FileCompleteCallback = std::function<void(const std::string& filename,
                                                     uint64_t totalSize)>;
     using FileListCallback = std::function<void(const std::vector<std::string>& files)>;
+    using FileListWithSizesCallback = std::function<void(const std::vector<FileInfo>& files)>;
     using ErrorCallback = std::function<void(const std::string& error)>;
     
     // Worker status callback types
@@ -116,6 +117,7 @@ public:
 
     // File request methods
     bool requestFileList(int32_t targetRank, FileListCallback callback, int timeoutMs = 10000);
+    bool requestFileListWithSizes(int32_t targetRank, FileListWithSizesCallback callback, int timeoutMs = 10000);
     bool requestFile(const std::string& filename, int32_t targetRank, 
                      FileChunkCallback chunkCallback, 
                      FileCompleteCallback completeCallback,
@@ -131,6 +133,7 @@ public:
     bool getFileSync(const std::string& filename, int32_t targetRank,
                      std::vector<uint8_t>& fileData, int timeoutMs = 30000);
     bool getFileListSync(int32_t targetRank, std::vector<std::string>& files, int timeoutMs = 10000);
+    bool getFileListWithSizesSync(int32_t targetRank, std::vector<FileInfo>& files, int timeoutMs = 10000);
 
     // Worker status queries
     bool requestWorkerStatus(int32_t targetRank, WorkerStatusCallback callback, int timeoutMs = 5000);
@@ -177,6 +180,9 @@ private:
     bool handleFileListResponse(const ZmqFileListResponse& list,
                                  const std::vector<uint8_t>& data,
                                  FileListCallback callback);
+    bool handleFileListWithSizesResponse(const ZmqFileListResponse& list,
+                                          const std::vector<uint8_t>& data,
+                                          FileListWithSizesCallback callback);
     bool handleErrorResponse(const ZmqErrorResponse& error,
                              ErrorCallback errorCallback);
 
@@ -202,7 +208,7 @@ private:
 
     // Thread safety
     mutable std::mutex connectionMutex;
-    mutable std::mutex requestMutex;
+    mutable std::recursive_mutex requestMutex;
 
     // Request tracking
     std::atomic<uint32_t> nextRequestId{1};

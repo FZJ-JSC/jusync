@@ -236,6 +236,17 @@ struct JUSYNC_API FJUSYNCWorkerStatus
     }
 };
 
+UENUM(BlueprintType)
+enum class EJUSYNCExtension : uint8
+{
+    USD      UMETA(DisplayName = ".usda / .usd"),
+    PNG      UMETA(DisplayName = ".png"),
+    JSON     UMETA(DisplayName = ".json"),
+    TXT      UMETA(DisplayName = ".txt"),
+    BIN      UMETA(DisplayName = ".bin"),
+    ALL      UMETA(DisplayName = "All Files")
+};
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCFileReceived, const FJUSYNCFileData&, FileData);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCMessageReceived, const FString&, Message);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FJUSYNCProcessingProgress, float, Progress, const FString&, Status);

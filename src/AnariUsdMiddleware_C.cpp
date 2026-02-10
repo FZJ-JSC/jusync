@@ -2,12 +2,14 @@
 #include "AnariUsdMiddleware.h"
 #include "CollisionProcessor.h"
 #include "UsdProcessor.h"
+#include "AnariUsdMessages.h"
 
 #include <memory>
 #include <cstring>
 #include <fstream>
 #include <filesystem>
 #include <thread>
+#include <mutex>
 
 // ============================================================================
 // GLOBAL STATE MANAGEMENT
@@ -25,6 +27,9 @@ static MessageReceivedCallback_C g_message_callback = nullptr;
 
 // Default collision complexity setting
 static int g_default_collision_complexity = COLLISION_COMPLEX;
+
+// Global mutex for thread-safe access to g_middleware and g_collision_processor
+static std::mutex g_middleware_mutex;
 
 // ============================================================================
 // C INTERFACE IMPLEMENTATION
@@ -282,6 +287,52 @@ int RequestFileList_C(int32_t target_rank, char*** out_files, size_t* out_count,
 }
 
 /**
+ * Request file list with sizes from a specific rank
+ */
+int RequestFileListWithSizes_C(int32_t target_rank, char*** out_names, uint64_t** out_sizes, size_t* out_count, int timeout_ms) {
+    if (!g_middleware || !out_names || !out_sizes || !out_count) {
+        return 0;
+    }
+    
+    std::lock_guard<std::mutex> lock(g_middleware_mutex);
+    
+    try {
+        std::vector<anari_usd_middleware::FileInfo> files;
+        if (!g_middleware->requestFileListWithSizes(target_rank, files, timeout_ms)) {
+            *out_count = 0;
+            *out_names = nullptr;
+            *out_sizes = nullptr;
+            return 0;
+        }
+        
+        // Allocate C string array and size array
+        *out_count = files.size();
+        *out_names = new char*[*out_count];
+        *out_sizes = new uint64_t[*out_count];
+        
+        // Copy each filename and size
+        for (size_t i = 0; i < files.size(); ++i) {
+            size_t len = files[i].name.length() + 1;
+            (*out_names)[i] = new char[len];
+#ifdef _WIN32
+            strncpy_s((*out_names)[i], len, files[i].name.c_str(), _TRUNCATE);
+#else
+            std::strncpy((*out_names)[i], files[i].name.c_str(), len);
+            (*out_names)[i][len - 1] = '\0';
+#endif
+            (*out_sizes)[i] = files[i].size;
+        }
+        
+        return 1;
+    } catch (...) {
+        *out_count = 0;
+        *out_names = nullptr;
+        *out_sizes = nullptr;
+        return 0;
+    }
+}
+
+/**
  * Request a specific file from a rank
  */
 int RequestFile_C(const char* filename, int32_t target_rank,
@@ -290,23 +341,47 @@ int RequestFile_C(const char* filename, int32_t target_rank,
         return 0;
     }
     
+    std::lock_guard<std::mutex> lock(g_middleware_mutex);
+    
     try {
         std::vector<uint8_t> fileData;
-        if (!g_middleware->requestFile(filename, target_rank, fileData, timeout_ms)) {
+        MIDDLEWARE_LOG_INFO("RequestFile_C: Calling g_middleware->requestFile('%s', %d, timeout=%d)", 
+                           filename, target_rank, timeout_ms);
+        bool requestResult = g_middleware->requestFile(filename, target_rank, fileData, timeout_ms);
+        if (!requestResult) {
+            MIDDLEWARE_LOG_ERROR("RequestFile_C: g_middleware->requestFile failed for '%s'", filename);
             *out_size = 0;
             *out_data = nullptr;
             return 0;
         }
+        MIDDLEWARE_LOG_INFO("RequestFile_C: g_middleware->requestFile succeeded, file size: %zu", fileData.size());
         
         // Allocate and copy file data
         *out_size = fileData.size();
         if (*out_size > 0) {
-            *out_data = new unsigned char[*out_size];
+            // Validate size is reasonable (max 100GB to catch obviously wrong values)
+            const size_t MAX_REASONABLE_FILE_SIZE = 100ULL * 1024 * 1024 * 1024; // 100GB
+            if (*out_size > MAX_REASONABLE_FILE_SIZE) {
+                MIDDLEWARE_LOG_ERROR("File size suspiciously large: %zu bytes (max 100GB)", *out_size);
+                *out_size = 0;
+                *out_data = nullptr;
+                return 0;
+            }
+            
+            *out_data = new (std::nothrow) unsigned char[*out_size];
+            if (!*out_data) {
+                MIDDLEWARE_LOG_ERROR("Memory allocation failed for %zu bytes", *out_size);
+                *out_size = 0;
+                return 0;
+            }
             std::memcpy(*out_data, fileData.data(), *out_size);
+            MIDDLEWARE_LOG_DEBUG("Allocated %zu bytes at %p", *out_size, (void*)*out_data);
         } else {
             *out_data = nullptr;
+            MIDDLEWARE_LOG_WARNING("File size is 0 bytes");
         }
         
+        MIDDLEWARE_LOG_INFO("RequestFile_C succeeded: %zu bytes for '%s'", *out_size, filename);
         return 1;
     } catch (...) {
         *out_size = 0;
@@ -384,6 +459,23 @@ void FreeFileList_C(char** files, size_t count) {
         }
     }
     delete[] files;
+}
+
+void FreeFileListWithSizes_C(char** names, uint64_t* sizes, size_t count) {
+    if (!names && !sizes) {
+        return;
+    }
+    if (names) {
+        for (size_t i = 0; i < count; ++i) {
+            if (names[i]) {
+                delete[] names[i];
+            }
+        }
+        delete[] names;
+    }
+    if (sizes) {
+        delete[] sizes;
+    }
 }
 
 // ============================================================================

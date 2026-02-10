@@ -12,6 +12,7 @@
 #include "Engine/GameInstance.h"
 #include "Kismet/GameplayStatics.h"
 #include "RealtimeMeshSimple.h" 
+#include <atomic>  // For std::atomic
 
 // Include the C-wrapper header
 #ifdef WITH_ANARI_USD_MIDDLEWARE
@@ -22,7 +23,8 @@ extern "C" {
 #endif
 
 // Global callback handlers for C interface
-static UJUSYNCSubsystem* g_SubsystemInstance = nullptr;
+// Use atomic for thread-safe access from ZMQ callback threads
+static std::atomic<UJUSYNCSubsystem*> g_SubsystemInstance = nullptr;
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
 
@@ -43,7 +45,8 @@ extern "C" void FileReceivedCallback_Static(const CFileData* file_data)
     UE_LOG(LogJUSYNC, Log, TEXT("  - Data Size: %d bytes"), file_data->data_size);
     UE_LOG(LogJUSYNC, Log, TEXT("  - Hash: %s"), UTF8_TO_TCHAR(file_data->hash));
     
-    if (!g_SubsystemInstance)
+    UJUSYNCSubsystem* Subsystem = g_SubsystemInstance.load();
+    if (!Subsystem)
     {
         UE_LOG(LogJUSYNC, Error, TEXT("FileReceivedCallback_Static: g_SubsystemInstance is NULL"));
         return;
@@ -64,7 +67,8 @@ extern "C" void FileReceivedCallback_Static(const CFileData* file_data)
     {
         UE_LOG(LogJUSYNC, Log, TEXT("=== ASYNC TASK EXECUTING ON GAME THREAD ==="));
         
-        if (!g_SubsystemInstance)
+        UJUSYNCSubsystem* Subsystem = g_SubsystemInstance.load();
+        if (!Subsystem)
         {
             UE_LOG(LogJUSYNC, Error, TEXT("Async Task: g_SubsystemInstance is NULL on game thread"));
             return;
@@ -85,10 +89,10 @@ extern "C" void FileReceivedCallback_Static(const CFileData* file_data)
         UE_LOG(LogJUSYNC, Log, TEXT("  - UE Data Size: %d"), UEFileData.Data.Num());
         
         // Send to Blueprint Library FIRST
-        g_SubsystemInstance->HandleFileReceivedForLibrary(UEFileData);
+        Subsystem->HandleFileReceivedForLibrary(UEFileData);
         
         // Broadcast to subsystem events
-        g_SubsystemInstance->OnFileReceived.Broadcast(UEFileData);
+        Subsystem->OnFileReceived.Broadcast(UEFileData);
         
         UE_LOG(LogJUSYNC, Log, TEXT("=== FILE PROCESSING COMPLETE ==="));
 
@@ -111,22 +115,17 @@ extern "C" void MessageReceivedCallback_Static(const char* message)
     
     UE_LOG(LogJUSYNC, Log, TEXT("ZMQ Message: %s"), UTF8_TO_TCHAR(message));
     
-    if (!g_SubsystemInstance)
-    {
-        UE_LOG(LogJUSYNC, Error, TEXT("MessageReceivedCallback_Static: g_SubsystemInstance is NULL"));
-        return;
-    }
-    
     // Create a copy of the message for the lambda
     FString MessageCopy = FString(UTF8_TO_TCHAR(message));
     
     AsyncTask(ENamedThreads::GameThread, [MessageCopy]()
     {
-        if (g_SubsystemInstance)
+        UJUSYNCSubsystem* Subsystem = g_SubsystemInstance.load();
+        if (Subsystem)
         {
             UE_LOG(LogJUSYNC, Log, TEXT("Broadcasting message to Blueprint: %s"), *MessageCopy);
-            g_SubsystemInstance->OnMessageReceived.Broadcast(MessageCopy);
-            g_SubsystemInstance->HandleMessageReceivedForLibrary(MessageCopy);
+            Subsystem->OnMessageReceived.Broadcast(MessageCopy);
+            Subsystem->HandleMessageReceivedForLibrary(MessageCopy);
         }
     });
 }
@@ -363,10 +362,10 @@ void UJUSYNCSubsystem::Initialize(FSubsystemCollectionBase& Collection)
     Super::Initialize(Collection);
     
     // Set global instance for callbacks
-    g_SubsystemInstance = this;
-    
+    g_SubsystemInstance.store(this);
+
     UE_LOG(LogJUSYNC, Log, TEXT("=== JUSYNC SUBSYSTEM INITIALIZED ==="));
-    UE_LOG(LogJUSYNC, Log, TEXT("Global instance set: %p"), g_SubsystemInstance);
+    UE_LOG(LogJUSYNC, Log, TEXT("Global instance set: %p"), g_SubsystemInstance.load());
     UE_LOG(LogJUSYNC, Log, TEXT("JUSYNCSubsystem initialized with C-wrapper interface"));
 }
 
@@ -377,7 +376,7 @@ void UJUSYNCSubsystem::Deinitialize()
     ShutdownMiddleware();
     
     // Clear global instance
-    g_SubsystemInstance = nullptr;
+    g_SubsystemInstance.store(nullptr);
     
     Super::Deinitialize();
     UE_LOG(LogJUSYNC, Log, TEXT("JUSYNCSubsystem deinitialized"));
@@ -395,13 +394,13 @@ bool UJUSYNCSubsystem::InitializeMiddleware(const FString& Endpoint)
     UE_LOG(LogJUSYNC, Log, TEXT("=== INITIALIZING JUSYNC MIDDLEWARE ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Requested Endpoint: %s"), *Endpoint);
     UE_LOG(LogJUSYNC, Log, TEXT("Subsystem instance: %p"), this);
-    UE_LOG(LogJUSYNC, Log, TEXT("Global instance: %p"), g_SubsystemInstance);
-    
+    UE_LOG(LogJUSYNC, Log, TEXT("Global instance: %p"), g_SubsystemInstance.load());
+
     // Ensure global instance is set
-    if (!g_SubsystemInstance)
+    if (!g_SubsystemInstance.load())
     {
-        g_SubsystemInstance = this;
-        UE_LOG(LogJUSYNC, Log, TEXT("Set global instance: %p"), g_SubsystemInstance);
+        g_SubsystemInstance.store(this);
+        UE_LOG(LogJUSYNC, Log, TEXT("Set global instance: %p"), g_SubsystemInstance.load());
     }
     
 #ifdef WITH_ANARI_USD_MIDDLEWARE
@@ -1399,6 +1398,70 @@ bool UJUSYNCSubsystem::RequestFileList(int32 TargetRank, int32 TimeoutMs, TArray
     return false;
 }
 
+bool UJUSYNCSubsystem::RequestFileListWithSizes(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles, TArray<int64>& OutSizes)
+{
+    FScopeLock Lock(&MiddlewareMutex);
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING FILE LIST WITH SIZES FROM BROKER ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Target Rank: %d"), TargetRank);
+    UE_LOG(LogJUSYNC, Log, TEXT("Timeout: %d ms"), TimeoutMs);
+    
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (!bIsInitialized.load())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request file list - middleware not initialized"));
+        return false;
+    }
+    
+    if (!IsBrokerConnected())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request file list - not connected to broker"));
+        return false;
+    }
+    
+    char** FileList = nullptr;
+    uint64_t* FileSizes = nullptr;
+    size_t FileCount = 0;
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("Calling RequestFileListWithSizes_C..."));
+    int Result = RequestFileListWithSizes_C(TargetRank, &FileList, &FileSizes, &FileCount, TimeoutMs);
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("RequestFileListWithSizes_C returned: %d, FileCount: %d"), Result, FileCount);
+    
+    if (Result == 1 && FileList && FileSizes && FileCount > 0)
+    {
+        OutFiles.Empty();
+        OutSizes.Empty();
+        OutFiles.Reserve(FileCount);
+        OutSizes.Reserve(FileCount);
+        
+        for (size_t i = 0; i < FileCount; ++i)
+        {
+            if (FileList[i])
+            {
+                OutFiles.Add(FString(UTF8_TO_TCHAR(FileList[i])));
+                OutSizes.Add(static_cast<int64>(FileSizes[i]));
+            }
+        }
+        
+        // Free C memory
+        FreeFileListWithSizes_C(FileList, FileSizes, FileCount);
+        
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved %d files with sizes from broker"), OutFiles.Num());
+        return true;
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to request file list with sizes (Result: %d)"), Result);
+        if (FileList || FileSizes)
+        {
+            FreeFileListWithSizes_C(FileList, FileSizes, FileCount);
+        }
+    }
+#endif
+    return false;
+}
+
 bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, int32 TimeoutMs, TArray<uint8>& OutData)
 {
     FScopeLock Lock(&MiddlewareMutex);
@@ -1435,18 +1498,60 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
     size_t FileSize = 0;
     
     UE_LOG(LogJUSYNC, Log, TEXT("Calling RequestFile_C..."));
-    int Result = RequestFile_C(FilenameCStr, TargetRank, &FileData, &FileSize, TimeoutMs);
+    int Result = 0;
+    try
+    {
+        Result = RequestFile_C(FilenameCStr, TargetRank, &FileData, &FileSize, TimeoutMs);
+    }
+    catch (...)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Exception caught in RequestFile_C"));
+        if (FileData)
+        {
+            delete[] FileData;
+            FileData = nullptr;
+        }
+        return false;
+    }
     
     UE_LOG(LogJUSYNC, Log, TEXT("RequestFile_C returned: %d, FileSize: %d bytes"), Result, FileSize);
     
     if (Result == 1 && FileData && FileSize > 0)
     {
+        // Additional safety check: validate FileSize is reasonable (max 100GB)
+        const size_t MAX_REASONABLE_FILE_SIZE = 100ULL * 1024 * 1024 * 1024; // 100GB
+        if (FileSize > MAX_REASONABLE_FILE_SIZE)
+        {
+            UE_LOG(LogJUSYNC, Error, TEXT("❌ File size suspiciously large: %llu bytes (max: %llu)"), FileSize, MAX_REASONABLE_FILE_SIZE);
+            delete[] FileData;
+            return false;
+        }
+        
         OutData.Empty();
         OutData.SetNum(FileSize);
-        FMemory::Memcpy(OutData.GetData(), FileData, FileSize);
+        
+        // Safety check: ensure allocation succeeded
+        if (OutData.Num() != static_cast<int32>(FileSize))
+        {
+            UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to allocate buffer for file (requested: %llu, got: %d)"), FileSize, OutData.Num());
+            delete[] FileData;
+            return false;
+        }
+        
+        // Safety check: ensure we have a valid destination pointer
+        uint8* DestPtr = OutData.GetData();
+        if (!DestPtr && FileSize > 0)
+        {
+            UE_LOG(LogJUSYNC, Error, TEXT("❌ Destination buffer is null for non-zero file size"));
+            delete[] FileData;
+            return false;
+        }
+        
+        FMemory::Memcpy(DestPtr, FileData, FileSize);
         
         // Free C memory
         delete[] FileData;
+        FileData = nullptr; // Prevent accidental reuse
         
         UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved file '%s' (%d bytes) from broker"), *Filename, OutData.Num());
         return true;
@@ -1457,6 +1562,7 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
         if (FileData)
         {
             delete[] FileData;
+            FileData = nullptr;
         }
     }
 #endif

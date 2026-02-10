@@ -412,6 +412,182 @@ bool AnariUsdClient::requestFileList(int32_t targetRank, FileListCallback callba
     }
 }
 
+bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSizesCallback callback, int timeoutMs) {
+    if (connectionStatus.load() != ConnectionStatus::Connected || !zmqSocket) {
+        MIDDLEWARE_LOG_ERROR("AnariUsdClient not connected");
+        return false;
+    }
+
+    try {
+        // Create file list request (same as requestFileList)
+        ZmqFileRequest request;
+        request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_LIST_FILES);
+        request.request_id = generateRequestId();
+        request.target_rank = targetRank;
+        request.chunk_size = 0; // Not applicable for file list
+        request.setFilename(""); // No filename for list request
+
+        MIDDLEWARE_LOG_INFO("Requesting file list with sizes from rank %d (request_id: %u)", 
+                            targetRank, request.request_id);
+
+        // Send request
+        if (!sendRequest(&request, sizeof(request), request.request_id)) {
+            MIDDLEWARE_LOG_ERROR("Failed to send file list request");
+            return false;
+        }
+
+        // Wait for response
+        if (!waitForResponse(request.request_id, timeoutMs)) {
+            MIDDLEWARE_LOG_ERROR("Timeout waiting for file list response");
+            return false;
+        }
+
+        // Receive empty delimiter frame (zero-length)
+        zmq::message_t emptyDelimiter;
+        auto delimResult = zmqSocket->recv(emptyDelimiter, zmq::recv_flags::none);
+        if (!delimResult) {
+            MIDDLEWARE_LOG_ERROR("Failed to receive empty delimiter");
+            return false;
+        }
+        if (delimResult.value() != 0) {
+            MIDDLEWARE_LOG_WARNING("Empty delimiter frame has non-zero size: %zu", delimResult.value());
+        }
+
+        // Receive the combined header+data ZeroMQ message
+        zmq::message_t msg;
+        auto result = zmqSocket->recv(msg, zmq::recv_flags::none);
+        
+        if (!result) {
+            MIDDLEWARE_LOG_ERROR("Failed to receive file list response");
+            return false;
+        }
+        
+        size_t totalSize = result.value();
+        MIDDLEWARE_LOG_INFO("Received file list response: %zu bytes total", totalSize);
+        
+        size_t headerSize = sizeof(ZmqFileChunk);
+        // Check minimum size (header)
+        if (totalSize < headerSize) {
+            MIDDLEWARE_LOG_ERROR("File list response too small: %zu bytes (expected at least %zu)", 
+                                totalSize, headerSize);
+            return false;
+        }
+        
+        // Parse header from first part of message
+        const uint8_t* msgData = static_cast<const uint8_t*>(msg.data());
+        const ZmqFileChunk* chunk = reinterpret_cast<const ZmqFileChunk*>(msgData);
+        
+        // Validate response
+        if (!MessageUtils::isValidMagic(chunk->magic)) {
+            MIDDLEWARE_LOG_ERROR("Invalid magic number in file list response");
+            return false;
+        }
+
+        if (chunk->message_type != static_cast<uint32_t>(ZmqMessageType::RESP_FILE_CHUNK)) {
+            MIDDLEWARE_LOG_ERROR("Unexpected message type in file list response: %u (expected RESP_FILE_CHUNK=201)", 
+                                chunk->message_type);
+            return false;
+        }
+
+        // Check if this is a file list response (filename should be "filelist.json")
+        std::string filename = chunk->getFilename();
+        if (filename != "filelist.json") {
+            MIDDLEWARE_LOG_WARNING("File list response has unexpected filename: %s", filename.c_str());
+        }
+
+        MIDDLEWARE_LOG_INFO("Received file list chunk header: %llu bytes from rank %d, chunk size: %u", 
+                            chunk->file_size, chunk->source_rank, chunk->chunk_size);
+        
+        // Extract JSON data from remaining part of message
+        std::vector<uint8_t> jsonData;
+        if (chunk->chunk_size > 0) {
+            // Check if we have enough data
+            size_t expectedTotalSize = headerSize + chunk->chunk_size;
+            if (totalSize < expectedTotalSize) {
+                MIDDLEWARE_LOG_ERROR("Incomplete file list response: got %zu bytes, expected %zu", 
+                                    totalSize, expectedTotalSize);
+                return false;
+            }
+            
+            // Copy JSON data from message
+            jsonData.assign(msgData + headerSize, msgData + headerSize + chunk->chunk_size);
+            MIDDLEWARE_LOG_INFO("Extracted JSON data: %zu bytes", jsonData.size());
+        } else {
+            MIDDLEWARE_LOG_WARNING("File list response has zero chunk size");
+        }
+
+        // Parse JSON into FileInfo vector
+        std::vector<FileInfo> fileInfos;
+        try {
+            std::string jsonStr(reinterpret_cast<const char*>(jsonData.data()), jsonData.size());
+            auto json = json::parse(jsonStr);
+            
+            // Check JSON structure: {"rank": X, "files": [{"name": "...", "size": N, "mime": "..."}, ...]}
+            if (json.contains("files") && json["files"].is_array()) {
+                for (const auto& fileObj : json["files"]) {
+                    if (fileObj.contains("name") && fileObj["name"].is_string()) {
+                        std::string fname = fileObj["name"].get<std::string>();
+                        if (!fname.empty()) {
+                            uint64_t fsize = 0;
+                            if (fileObj.contains("size") && fileObj["size"].is_number()) {
+                                fsize = fileObj["size"].get<uint64_t>();
+                            }
+                            fileInfos.push_back({fname, fsize});
+                        }
+                    }
+                }
+            }
+            
+            MIDDLEWARE_LOG_INFO("Parsed %zu files with sizes from JSON file list", fileInfos.size());
+        } catch (const std::exception& e) {
+            MIDDLEWARE_LOG_ERROR("Failed to parse file list JSON: %s", e.what());
+            return false;
+        }
+
+        // Receive empty delimiter for complete message
+        zmq::message_t emptyDelimiter2;
+        auto delimResult2 = zmqSocket->recv(emptyDelimiter2, zmq::recv_flags::none);
+        if (!delimResult2) {
+            MIDDLEWARE_LOG_ERROR("Failed to receive empty delimiter for complete message");
+            return false;
+        }
+        if (delimResult2.value() != 0) {
+            MIDDLEWARE_LOG_WARNING("Empty delimiter frame has non-zero size: %zu", delimResult2.value());
+        }
+
+        // Receive ZmqFileComplete header
+        zmq::message_t completeMsg;
+        auto completeResult = zmqSocket->recv(completeMsg, zmq::recv_flags::none);
+        if (!completeResult || completeResult.value() != sizeof(ZmqFileComplete)) {
+            MIDDLEWARE_LOG_ERROR("Failed to receive file complete message");
+            return false;
+        }
+        const ZmqFileComplete* complete = reinterpret_cast<const ZmqFileComplete*>(completeMsg.data());
+
+        if (complete->message_type != static_cast<uint32_t>(ZmqMessageType::RESP_FILE_COMPLETE)) {
+            MIDDLEWARE_LOG_WARNING("Expected RESP_FILE_COMPLETE after file list, got: %u",
+                                  complete->message_type);
+        }
+
+        // Trigger callback
+        if (callback) {
+            callback(fileInfos);
+        }
+
+        connectionStats.totalResponsesReceived.fetch_add(1);
+        connectionStats.lastActivityTime = std::chrono::steady_clock::now();
+
+        return true;
+
+    } catch (const zmq::error_t& e) {
+        MIDDLEWARE_LOG_ERROR("ZeroMQ error in requestFileListWithSizes: %s (errno: %d)", e.what(), e.num());
+        return false;
+    } catch (const std::exception& e) {
+        MIDDLEWARE_LOG_ERROR("Exception in requestFileListWithSizes: %s", e.what());
+        return false;
+    }
+}
+
 bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank,
                                   FileChunkCallback chunkCallback,
                                   FileCompleteCallback completeCallback,
@@ -430,6 +606,9 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
         }
         return false;
     }
+
+    // Lock to prevent multiple concurrent file requests
+    std::lock_guard<std::recursive_mutex> lock(requestMutex);
 
     try {
         // Create file request
@@ -602,6 +781,9 @@ bool AnariUsdClient::requestFrame(int32_t frameNumber, int32_t targetRank,
         MIDDLEWARE_LOG_ERROR("AnariUsdClient not connected");
         return false;
     }
+
+    // Lock to prevent multiple concurrent frame requests
+    std::lock_guard<std::recursive_mutex> lock(requestMutex);
 
     try {
         // Create frame request
@@ -784,9 +966,24 @@ bool AnariUsdClient::getFileListSync(int32_t targetRank, std::vector<std::string
     return received;
 }
 
+bool AnariUsdClient::getFileListWithSizesSync(int32_t targetRank, std::vector<FileInfo>& files, int timeoutMs) {
+    bool received = false;
+    
+    auto callback = [&files, &received](const std::vector<FileInfo>& fileList) {
+        files = fileList;
+        received = true;
+    };
+
+    if (!requestFileListWithSizes(targetRank, callback, timeoutMs)) {
+        return false;
+    }
+
+    return received;
+}
+
 bool AnariUsdClient::sendRequest(const void* data, size_t size, uint32_t requestId) {
     try {
-        std::lock_guard<std::mutex> lock(requestMutex);
+        std::lock_guard<std::recursive_mutex> lock(requestMutex);
         
         zmq::message_t msg(size);
         memcpy(msg.data(), data, size);
@@ -919,7 +1116,7 @@ bool AnariUsdClient::requestWorkerListString(std::vector<std::tuple<int32_t, std
         // DEALER sends: [empty delimiter] + "GET_WORKERS" (2 frames)
         // ROUTER receives: [identity] + [empty delimiter] + "GET_WORKERS" (3 frames)
         // ZeroMQ automatically adds identity frame for DEALER→ROUTER communication
-        std::lock_guard<std::mutex> lock(requestMutex);
+        std::lock_guard<std::recursive_mutex> lock(requestMutex);
         
         // Send empty delimiter frame with SNDMORE flag
         zmq::message_t emptyFrame(0);
@@ -1032,7 +1229,7 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
         // DEALER sends: [empty delimiter] + "GET_WORKERS" (2 frames)
         // ROUTER receives: [identity] + [empty delimiter] + "GET_WORKERS" (3 frames)
         // ZeroMQ automatically adds identity frame for DEALER→ROUTER communication
-        std::lock_guard<std::mutex> lock(requestMutex);
+        std::lock_guard<std::recursive_mutex> lock(requestMutex);
         
         // Send empty delimiter frame with SNDMORE flag
         zmq::message_t emptyFrame(0);

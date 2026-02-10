@@ -258,27 +258,11 @@ def Xform "Frame"
                         filename = data[16:272].split(b'\x00')[0].decode('utf-8', errors='ignore')
                         print(f"  Requested file: {filename}")
                         
-                        # Check if it's a cube file
-                        if filename.startswith("cube_rank") and filename.endswith(".usda"):
-                            try:
-                                rank_str = filename.replace("cube_rank", "").replace(".usda", "")
-                                rank = int(rank_str)
-                                if 1 <= rank <= self.worker_count:
-                                    # Generate cube for this rank
-                                    color_idx = (rank - 1) % len(self.cube_colors)
-                                    position = ((rank - 1) * 3.0, 0, 0)
-                                    cube_data = self.generate_cube_usda(rank, self.cube_colors[color_idx], position)
-                                    response = self.create_file_response(filename, cube_data)
-                                    self.send_binary_response(identity, response)
-                                    print(f"  🎨 Generated {self.get_color_name(self.cube_colors[color_idx])} cube for rank {rank}")
-                                    return True
-                            except ValueError:
-                                pass
-                        
-                        # Default: send generic cube
-                        cube_data = self.generate_cube_usda(1, self.cube_colors[0])
-                        response = self.create_file_response("default_cube.usda", cube_data)
+                        # Generate appropriate data for the requested filename
+                        file_data = self.generate_file_data(filename)
+                        response = self.create_file_response(filename, file_data)
                         self.send_binary_response(identity, response)
+                        print(f"  📦 Generated {len(file_data)} bytes for {filename}")
                     return True
                 elif message_type == 102:  # REQ_GET_FRAME
                     print("  🎬 REQ_GET_FRAME request")
@@ -322,21 +306,7 @@ def Xform "Frame"
     def create_file_list_response(self):
         """Create HPC-compliant file list response with JSON data"""
         # Create JSON data with file list
-        files = []
-        for rank, _, _ in self.workers:
-            filename = f"cube_rank{rank}.usda"
-            files.append({
-                "name": filename,
-                "size": 1024,  # Approximate size
-                "mime": "application/usd"
-            })
-        
-        # Add frame file
-        files.append({
-            "name": "frame_1.usda",
-            "size": 2048,
-            "mime": "application/usd"
-        })
+        files = self.get_file_list_with_sizes()
         
         json_data = {
             "rank": 0,
@@ -498,6 +468,94 @@ def Xform "Frame"
         
         print(f"📤 Sent reply: {reply}")
         return True
+    
+    def get_file_list_with_sizes(self):
+        """Return a list of files with varying sizes for testing filtering"""
+        files = []
+        # Cube files (above threshold)
+        for rank, _, _ in self.workers:
+            filename = f"cube_rank{rank}.usda"
+            # Actual size of generated cube USD is about 1300 bytes
+            files.append({
+                "name": filename,
+                "size": 1352,  # Measured actual size
+                "mime": "application/usd"
+            })
+        
+        # Frame file (above threshold)
+        files.append({
+            "name": "frame_1.usda",
+            "size": 2048,
+            "mime": "application/usd"
+        })
+        
+        # Small files (below 100 bytes)
+        small_files = [
+            ("empty.txt", 0, "text/plain"),
+            ("tiny.json", 50, "application/json"),
+            ("small.usda", 80, "application/usd"),
+        ]
+        for name, size, mime in small_files:
+            files.append({
+                "name": name,
+                "size": size,
+                "mime": mime
+            })
+        
+        # Medium files (above 100 bytes but small)
+        medium_files = [
+            ("medium.bin", 150, "application/octet-stream"),
+            ("config.json", 200, "application/json"),
+        ]
+        for name, size, mime in medium_files:
+            files.append({
+                "name": name,
+                "size": size,
+                "mime": mime
+            })
+        
+        return files
+    
+    def generate_file_data(self, filename):
+        """Generate appropriate data for a given filename"""
+        if filename.startswith("cube_rank") and filename.endswith(".usda"):
+            try:
+                rank_str = filename.replace("cube_rank", "").replace(".usda", "")
+                rank = int(rank_str)
+                if 1 <= rank <= self.worker_count:
+                    color_idx = (rank - 1) % len(self.cube_colors)
+                    position = ((rank - 1) * 3.0, 0, 0)
+                    return self.generate_cube_usda(rank, self.cube_colors[color_idx], position)
+            except ValueError:
+                pass
+            # Fallback
+            return self.generate_cube_usda(1, self.cube_colors[0])
+        
+        elif filename.startswith("frame_") and filename.endswith(".usda"):
+            try:
+                frame_num = int(filename.replace("frame_", "").replace(".usda", ""))
+                return self.generate_frame_usda(frame_num)
+            except ValueError:
+                return self.generate_frame_usda(1)
+        
+        elif filename == "empty.txt":
+            return b""
+        
+        elif filename == "tiny.json":
+            return b'{"status": "ok", "message": "tiny file"}'
+        
+        elif filename == "small.usda":
+            return b'#usda 1.0\n(\n    defaultPrim = "Small"\n)\n'
+        
+        elif filename == "medium.bin":
+            return bytes([i % 256 for i in range(150)])
+        
+        elif filename == "config.json":
+            return b'{"version": 1, "settings": {"threshold": 100}}'
+        
+        else:
+            # Default fallback: empty file
+            return b""
     
     def run(self):
         """Main broker loop"""

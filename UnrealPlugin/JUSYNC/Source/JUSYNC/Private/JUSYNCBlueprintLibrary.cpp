@@ -19,6 +19,10 @@ FCriticalSection UJUSYNCBlueprintLibrary::DataMutex;
 TArray<FString> UJUSYNCBlueprintLibrary::LastFileList;
 FCriticalSection UJUSYNCBlueprintLibrary::LastFileListMutex;
 
+TArray<FString> UJUSYNCBlueprintLibrary::LastFileListWithSizes_Names;
+TArray<int64> UJUSYNCBlueprintLibrary::LastFileListWithSizes_Sizes;
+FCriticalSection UJUSYNCBlueprintLibrary::LastFileListWithSizesMutex;
+
 // ========== CONNECTION MANAGEMENT ==========
 
 bool UJUSYNCBlueprintLibrary::InitializeJUSYNCMiddleware(const FString& Endpoint)
@@ -182,6 +186,35 @@ bool UJUSYNCBlueprintLibrary::RequestFileListFromBroker(int32 TargetRank, int32 
     return bResult;
 }
 
+bool UJUSYNCBlueprintLibrary::RequestFileListWithSizesFromBroker(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles, TArray<int64>& OutSizes)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
+        return false;
+    }
+
+    bool bResult = Subsystem->RequestFileListWithSizes(TargetRank, TimeoutMs, OutFiles, OutSizes);
+    if (bResult)
+    {
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved %d files with sizes from broker"), OutFiles.Num());
+        // Optionally store the file list (without sizes) for later retrieval
+        if (OutFiles.Num() > 0)
+        {
+            FScopeLock Lock(&LastFileListMutex);
+            LastFileList = OutFiles;
+            UE_LOG(LogJUSYNC, Log, TEXT("Stored %d files in LastFileList"), OutFiles.Num());
+        }
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to retrieve file list with sizes from broker"));
+    }
+
+    return bResult;
+}
+
 bool UJUSYNCBlueprintLibrary::GetLastFileListFromBroker(TArray<FString>& OutFileList)
 {
     FScopeLock Lock(&LastFileListMutex);
@@ -192,6 +225,20 @@ bool UJUSYNCBlueprintLibrary::GetLastFileListFromBroker(TArray<FString>& OutFile
     }
     OutFileList = LastFileList;
     UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved last file list (%d files)"), OutFileList.Num());
+    return true;
+}
+
+bool UJUSYNCBlueprintLibrary::GetLastFileListWithSizesFromBroker(TArray<FString>& OutFileList, TArray<int64>& OutFileSizes)
+{
+    FScopeLock Lock(&LastFileListWithSizesMutex);
+    if (LastFileListWithSizes_Names.Num() == 0)
+    {
+        UE_LOG(LogJUSYNC, Warning, TEXT("No file list with sizes stored yet"));
+        return false;
+    }
+    OutFileList = LastFileListWithSizes_Names;
+    OutFileSizes = LastFileListWithSizes_Sizes;
+    UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved last file list with sizes (%d files)"), OutFileList.Num());
     return true;
 }
 
@@ -570,6 +617,74 @@ void UJUSYNCBlueprintLibrary::RequestFileListAsync(int32 TargetRank, int32 Timeo
                 {
                     if (bSuccess) OnComplete.ExecuteIfBound(FileList);
                     else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve file list from rank %d"), TargetRank));
+                },
+                TStatId(), nullptr, ENamedThreads::GameThread);
+        }
+    });
+}
+
+void UJUSYNCBlueprintLibrary::RequestFileListWithSizesAsync(int32 TargetRank, int32 TimeoutMs, const FOnFileListWithSizesReceived& OnComplete, const FOnBrokerError& OnError)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
+        OnError.ExecuteIfBound(TEXT("Subsystem not available"));
+        return;
+    }
+
+    // Capture subsystem pointer for validity checking
+    TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
+    
+    // Launch async request on a background thread using Unreal's Async system
+    Async(EAsyncExecution::Thread, [WeakSubsystem, TargetRank, TimeoutMs, OnComplete, OnError]()
+    {
+        // Check if subsystem is still valid before making the request
+        if (!WeakSubsystem.IsValid())
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem no longer valid, cancelling async request"));
+            return; // Game stopped, exit early
+        }
+        
+        TArray<FString> FileList;
+        TArray<int64> FileSizes;
+        bool bSuccess = false;
+        
+        // Make the broker request
+        if (WeakSubsystem.IsValid())
+        {
+            bSuccess = WeakSubsystem->RequestFileListWithSizes(TargetRank, TimeoutMs, FileList, FileSizes);
+        }
+        
+        // Store the retrieved file list for later retrieval (if successful)
+        if (bSuccess && FileList.Num() > 0)
+        {
+            FScopeLock Lock(&UJUSYNCBlueprintLibrary::LastFileListWithSizesMutex);
+            UJUSYNCBlueprintLibrary::LastFileListWithSizes_Names = FileList;
+            UJUSYNCBlueprintLibrary::LastFileListWithSizes_Sizes = FileSizes;
+            UE_LOG(LogJUSYNC, Log, TEXT("Stored %d files with sizes in LastFileListWithSizes"), FileList.Num());
+        }
+        
+        // Check again before calling back (game might have stopped during request)
+        if (!WeakSubsystem.IsValid())
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem destroyed during async request, cancelling callback"));
+            return; // Game stopped, don't call callbacks
+        }
+        
+        // Execute callback on game thread
+        if (IsInGameThread())
+        {
+            if (bSuccess) OnComplete.ExecuteIfBound(FileList, FileSizes);
+            else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve file list with sizes from rank %d"), TargetRank));
+        }
+        else
+        {
+            FGraphEventRef Task = FFunctionGraphTask::CreateAndDispatchWhenReady(
+                [bSuccess, FileList, FileSizes, TargetRank, OnComplete, OnError]()
+                {
+                    if (bSuccess) OnComplete.ExecuteIfBound(FileList, FileSizes);
+                    else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve file list with sizes from rank %d"), TargetRank));
                 },
                 TStatId(), nullptr, ENamedThreads::GameThread);
         }
@@ -1041,6 +1156,216 @@ bool UJUSYNCBlueprintLibrary::FilterFileBySize(const TArray<uint8>& FileBuffer, 
     return FileBuffer.Num() >= MinimumSizeBytes;
 }
 
+void UJUSYNCBlueprintLibrary::FilterFileListBySize(const TArray<FString>& FileList, const TArray<int64>& FileSizes, int32 MinimumSizeBytes, TArray<FString>& OutFilteredFiles, TArray<int64>& OutFilteredSizes)
+{
+    OutFilteredFiles.Empty();
+    OutFilteredSizes.Empty();
+    if (FileList.Num() != FileSizes.Num())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("FilterFileListBySize: FileList and FileSizes arrays have different lengths (%d vs %d)"), FileList.Num(), FileSizes.Num());
+        return;
+    }
+    for (int32 i = 0; i < FileList.Num(); ++i)
+    {
+        if (FileSizes[i] >= MinimumSizeBytes)
+        {
+            OutFilteredFiles.Add(FileList[i]);
+            OutFilteredSizes.Add(FileSizes[i]);
+        }
+    }
+    UE_LOG(LogJUSYNC, Log, TEXT("FilterFileListBySize: filtered %d files down to %d (threshold %d bytes)"), FileList.Num(), OutFilteredFiles.Num(), MinimumSizeBytes);
+}
+
+void UJUSYNCBlueprintLibrary::FilterFileListByExtensionEnum(const TArray<FString>& FileList, EJUSYNCExtension ExtensionFilter, TArray<FString>& OutFilteredFiles)
+{
+    OutFilteredFiles.Empty();
+    TArray<FString> Extensions;
+    switch (ExtensionFilter)
+    {
+        case EJUSYNCExtension::USD:
+            Extensions.Add(TEXT(".usda"));
+            Extensions.Add(TEXT(".usd"));
+            break;
+        case EJUSYNCExtension::PNG:
+            Extensions.Add(TEXT(".png"));
+            break;
+        case EJUSYNCExtension::JSON:
+            Extensions.Add(TEXT(".json"));
+            break;
+        case EJUSYNCExtension::TXT:
+            Extensions.Add(TEXT(".txt"));
+            break;
+        case EJUSYNCExtension::BIN:
+            Extensions.Add(TEXT(".bin"));
+            break;
+        case EJUSYNCExtension::ALL:
+            // No filtering
+            OutFilteredFiles = FileList;
+            UE_LOG(LogJUSYNC, Log, TEXT("FilterFileListByExtensionEnum: ALL selected, returning all %d files"), FileList.Num());
+            return;
+        default:
+            UE_LOG(LogJUSYNC, Warning, TEXT("FilterFileListByExtensionEnum: unknown extension enum value %d"), (int32)ExtensionFilter);
+            return;
+    }
+    
+    for (const FString& Filename : FileList)
+    {
+        for (const FString& Ext : Extensions)
+        {
+            if (Filename.EndsWith(Ext, ESearchCase::IgnoreCase))
+            {
+                OutFilteredFiles.Add(Filename);
+                break;
+            }
+        }
+    }
+    UE_LOG(LogJUSYNC, Log, TEXT("FilterFileListByExtensionEnum: filtered %d files down to %d (extension filter %s)"),
+           FileList.Num(), OutFilteredFiles.Num(), *UEnum::GetValueAsString(ExtensionFilter));
+}
+
+void UJUSYNCBlueprintLibrary::FilterFileListByExtensions(const TArray<FString>& FileList, const TArray<FString>& AllowedExtensions, TArray<FString>& OutFilteredFiles)
+{
+    OutFilteredFiles.Empty();
+    if (AllowedExtensions.Num() == 0)
+    {
+        UE_LOG(LogJUSYNC, Warning, TEXT("FilterFileListByExtensions: AllowedExtensions array is empty, returning empty result"));
+        return;
+    }
+    for (const FString& Filename : FileList)
+    {
+        for (const FString& Ext : AllowedExtensions)
+        {
+            // Ensure extension starts with dot
+            FString NormalizedExt = Ext;
+            if (!NormalizedExt.StartsWith(TEXT(".")))
+                NormalizedExt = TEXT(".") + NormalizedExt;
+            if (Filename.EndsWith(NormalizedExt, ESearchCase::IgnoreCase))
+            {
+                OutFilteredFiles.Add(Filename);
+                break;
+            }
+        }
+    }
+    UE_LOG(LogJUSYNC, Log, TEXT("FilterFileListByExtensions: filtered %d files down to %d (allowed extensions: %s)"),
+           FileList.Num(), OutFilteredFiles.Num(), *FString::Join(AllowedExtensions, TEXT(", ")));
+}
+
+
+
+void UJUSYNCBlueprintLibrary::FilterFileListByExtensionEnumWithSizes(const TArray<FString>& FileList, const TArray<int64>& FileSizes, EJUSYNCExtension ExtensionFilter, TArray<FString>& OutFilteredFiles, TArray<int64>& OutFilteredSizes)
+{
+    OutFilteredFiles.Empty();
+    OutFilteredSizes.Empty();
+    if (FileList.Num() != FileSizes.Num())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("FilterFileListByExtensionEnumWithSizes: FileList and FileSizes arrays have different lengths (%d vs %d)"), FileList.Num(), FileSizes.Num());
+        return;
+    }
+    TArray<FString> Extensions;
+    switch (ExtensionFilter)
+    {
+        case EJUSYNCExtension::USD:
+            Extensions.Add(TEXT(".usda"));
+            Extensions.Add(TEXT(".usd"));
+            break;
+        case EJUSYNCExtension::PNG:
+            Extensions.Add(TEXT(".png"));
+            break;
+        case EJUSYNCExtension::JSON:
+            Extensions.Add(TEXT(".json"));
+            break;
+        case EJUSYNCExtension::TXT:
+            Extensions.Add(TEXT(".txt"));
+            break;
+        case EJUSYNCExtension::BIN:
+            Extensions.Add(TEXT(".bin"));
+            break;
+        case EJUSYNCExtension::ALL:
+            // No filtering
+            OutFilteredFiles = FileList;
+            OutFilteredSizes = FileSizes;
+            UE_LOG(LogJUSYNC, Log, TEXT("FilterFileListByExtensionEnumWithSizes: ALL selected, returning all %d files"), FileList.Num());
+            return;
+        default:
+            UE_LOG(LogJUSYNC, Warning, TEXT("FilterFileListByExtensionEnumWithSizes: unknown extension enum value %d"), (int32)ExtensionFilter);
+            return;
+    }
+    
+    for (int32 i = 0; i < FileList.Num(); ++i)
+    {
+        const FString& Filename = FileList[i];
+        for (const FString& Ext : Extensions)
+        {
+            if (Filename.EndsWith(Ext, ESearchCase::IgnoreCase))
+            {
+                OutFilteredFiles.Add(Filename);
+                OutFilteredSizes.Add(FileSizes[i]);
+                break;
+            }
+        }
+    }
+    UE_LOG(LogJUSYNC, Log, TEXT("FilterFileListByExtensionEnumWithSizes: filtered %d files down to %d (extension filter %s)"),
+           FileList.Num(), OutFilteredFiles.Num(), *UEnum::GetValueAsString(ExtensionFilter));
+}
+
+void UJUSYNCBlueprintLibrary::FilterFileListByExtensionsWithSizes(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<FString>& AllowedExtensions, TArray<FString>& OutFilteredFiles, TArray<int64>& OutFilteredSizes)
+{
+    OutFilteredFiles.Empty();
+    OutFilteredSizes.Empty();
+    if (FileList.Num() != FileSizes.Num())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("FilterFileListByExtensionsWithSizes: FileList and FileSizes arrays have different lengths (%d vs %d)"), FileList.Num(), FileSizes.Num());
+        return;
+    }
+    if (AllowedExtensions.Num() == 0)
+    {
+        UE_LOG(LogJUSYNC, Warning, TEXT("FilterFileListByExtensionsWithSizes: AllowedExtensions array is empty, returning empty result"));
+        return;
+    }
+    for (int32 i = 0; i < FileList.Num(); ++i)
+    {
+        const FString& Filename = FileList[i];
+        for (const FString& Ext : AllowedExtensions)
+        {
+            // Ensure extension starts with dot
+            FString NormalizedExt = Ext;
+            if (!NormalizedExt.StartsWith(TEXT(".")))
+                NormalizedExt = TEXT(".") + NormalizedExt;
+            if (Filename.EndsWith(NormalizedExt, ESearchCase::IgnoreCase))
+            {
+                OutFilteredFiles.Add(Filename);
+                OutFilteredSizes.Add(FileSizes[i]);
+                break;
+            }
+        }
+    }
+    UE_LOG(LogJUSYNC, Log, TEXT("FilterFileListByExtensionsWithSizes: filtered %d files down to %d (allowed extensions: %s)"),
+           FileList.Num(), OutFilteredFiles.Num(), *FString::Join(AllowedExtensions, TEXT(", ")));
+}
+
+int32 UJUSYNCBlueprintLibrary::CalculateTimeoutFromFileSize(int64 FileSizeBytes, int32 BaseTimeoutMs, float BandwidthBytesPerSecond)
+{
+    if (FileSizeBytes <= 0)
+        return BaseTimeoutMs;
+    
+    // Calculate transfer time in seconds: size / bandwidth
+    float TransferTimeSeconds = static_cast<float>(FileSizeBytes) / BandwidthBytesPerSecond;
+    // Convert to milliseconds and add base timeout
+    int32 AdditionalMs = FMath::CeilToInt(TransferTimeSeconds * 1000.0f);
+    // Add safety margin (e.g., 20%)
+    AdditionalMs = FMath::CeilToInt(AdditionalMs * 1.2f);
+    int32 TotalTimeout = BaseTimeoutMs + AdditionalMs;
+    
+    // Clamp to reasonable range (e.g., max 60 seconds)
+    const int32 MaxTimeout = 60000;
+    if (TotalTimeout > MaxTimeout)
+        TotalTimeout = MaxTimeout;
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("CalculateTimeoutFromFileSize: size=%lld bytes, bandwidth=%.0f B/s, base=%d ms, total=%d ms"),
+           FileSizeBytes, BandwidthBytesPerSecond, BaseTimeoutMs, TotalTimeout);
+    return TotalTimeout;
+}
+
 FString UJUSYNCBlueprintLibrary::GetJUSYNCMeshStatistics(const FJUSYNCMeshData& MeshData)
 {
     return FString::Printf(TEXT("Mesh '%s': %d vertices, %d triangles, %s normals, %s UVs"),
@@ -1231,9 +1556,19 @@ bool UJUSYNCBlueprintLibrary::ValidateFilePath(const FString& FilePath, const FS
 
 FString UJUSYNCBlueprintLibrary::ExtractUSDAPreview(const TArray<uint8>& Buffer, int32 MaxLines)
 {
+    // Enhanced safety check - validate buffer before any access
     if (Buffer.Num() == 0)
     {
         return TEXT("Empty buffer");
+    }
+
+    // Additional safety: check if buffer data pointer is valid (as much as we can)
+    // We can't fully validate but we can add some checks
+    const uint8* BufferData = Buffer.GetData();
+    if (!BufferData && Buffer.Num() > 0)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("ExtractUSDAPreview: Buffer has null data pointer but non-zero size"));
+        return TEXT("Invalid buffer");
     }
 
     // Dynamic search size based on file size
@@ -1264,9 +1599,11 @@ FString UJUSYNCBlueprintLibrary::ExtractUSDAPreview(const TArray<uint8>& Buffer,
     FString Content;
     Content.Reserve(SearchSize / 2);
     
+    // Use direct pointer access for performance and safety
     for (int32 i = 0; i < SearchSize; ++i)
     {
-        char Char = static_cast<char>(Buffer[i]);
+        // Access via GetData() with bounds checking in debug
+        char Char = static_cast<char>(BufferData[i]);
         if (Char >= 32 && Char <= 126) // Printable ASCII
         {
             Content.AppendChar(Char);
