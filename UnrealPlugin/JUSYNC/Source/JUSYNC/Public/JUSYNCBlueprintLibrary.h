@@ -31,6 +31,9 @@ public:
     // File list async result
     DECLARE_DYNAMIC_DELEGATE_OneParam(FOnFileListReceived, const TArray<FString>&, FileList);
     
+    // File async result
+    DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnFileReceived, const FString&, Filename, const TArray<uint8>&, FileData);
+    
     // Generic error event
     DECLARE_DYNAMIC_DELEGATE_OneParam(FOnBrokerError, FString, ErrorMessage);
 
@@ -66,6 +69,9 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker", DisplayName = "Request File List From Broker")
     static bool RequestFileListFromBroker(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles);
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker", DisplayName = "Get Last File List From Broker")
+    static bool GetLastFileListFromBroker(TArray<FString>& OutFileList);
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker")
     static bool RequestFileFromBroker(const FString& Filename, int32 TargetRank, int32 TimeoutMs, TArray<uint8>& OutData);
@@ -105,6 +111,10 @@ public:
     // Async file list - fires event when complete, doesn't block
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request File List Async")
     static void RequestFileListAsync(int32 TargetRank, int32 TimeoutMs, const FOnFileListReceived& OnComplete, const FOnBrokerError& OnError);
+
+    // Async file request - fires event when complete, doesn't block
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request File Async")
+    static void RequestFileAsync(const FString& Filename, int32 TargetRank, int32 TimeoutMs, const FOnFileReceived& OnComplete, const FOnBrokerError& OnError);
 
     // ========== USD PROCESSING WITH PREVIEW ==========
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|USD", CallInEditor)
@@ -194,6 +204,12 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Validation")
     static bool ValidateJUSYNCTextureData(const FJUSYNCTextureData& TextureData, FString& ValidationMessage);
 
+    UFUNCTION(BlueprintPure, Category = "JUSYNC|Validation")
+    static int32 GetFileSize(const TArray<uint8>& FileBuffer);
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Validation")
+    static bool FilterFileBySize(const TArray<uint8>& FileBuffer, int32 MinimumSizeBytes);
+
     UFUNCTION(BlueprintPure, Category = "JUSYNC|Utilities")
     static FString GetJUSYNCMeshStatistics(const FJUSYNCMeshData& MeshData);
 
@@ -260,6 +276,10 @@ UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning", CallInEd
     static TArray<FJUSYNCFileData> ReceivedFiles;
     static TArray<FString> ReceivedMessages;
     static FCriticalSection DataMutex;
+
+    // Last file list retrieved from broker (for async node output)
+    static TArray<FString> LastFileList;
+    static FCriticalSection LastFileListMutex;
 
     static void ApplyEnhancedDefaultMaterial(URealtimeMeshComponent* MeshComp);
     static FString DetectUSDContentType(const TArray<uint8>& Buffer);

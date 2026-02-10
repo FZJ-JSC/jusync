@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
+cmake_policy(SET CMP0122 NEW)
 project(anari_usd_middleware VERSION 1.0.0 LANGUAGES CXX)
 
 # Set C++ standard
@@ -19,7 +20,7 @@ if(UNIX AND NOT APPLE)
 endif()
 
 # ------------------------------
-# ZeroMQ Configuration (STATIC BUILD FROM SOURCE)
+# ZeroMQ Configuration
 # ------------------------------
 
 # Build ZMQ as static library from bundled source
@@ -45,24 +46,6 @@ set(ZMQ_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/zmq/include")
 message(STATUS "ZeroMQ will be statically linked from: ${ZMQ_STATIC_TARGET}")
 message(STATUS "ZeroMQ Include: ${ZMQ_INCLUDE_DIR}")
 
-# Fallback for Windows if needed (keep original logic for compatibility)
-if(WIN32)
-    # Try environment variable first, then user-supplied path, then fallback
-    if(NOT DEFINED ZMQ_ROOT AND DEFINED ENV{ZMQ_ROOT})
-        set(ZMQ_ROOT $ENV{ZMQ_ROOT})
-        message(STATUS "Windows fallback - Using ZMQ_ROOT: ${ZMQ_ROOT}")
-
-        set(ZMQ_INCLUDE_DIR "${ZMQ_ROOT}/include")
-        set(ZMQ_LIBRARY "${ZMQ_ROOT}/lib/libzmq-v143-mt-4_3_6.lib")
-
-        # Override static target for Windows if external ZMQ is provided
-        if(EXISTS "${ZMQ_LIBRARY}")
-            set(ZMQ_STATIC_TARGET ${ZMQ_LIBRARY})
-            message(STATUS "Using external Windows ZMQ library: ${ZMQ_LIBRARY}")
-        endif()
-    endif()
-endif()
-
 # ------------------------------
 # OpenSSL Configuration (Portable)
 # ------------------------------
@@ -72,7 +55,7 @@ if(NOT DEFINED OPENSSL_ROOT_DIR AND DEFINED ENV{OPENSSL_ROOT_DIR})
 endif()
 
 if(WIN32 AND NOT OPENSSL_ROOT_DIR)
-    set(OPENSSL_ROOT_DIR "C:/Program Files/FireDaemon OpenSSL 3" CACHE PATH "OpenSSL root directory (fallback)")
+    set(OPENSSL_ROOT_DIR "C:/Program Files/OpenSSL-Win64" CACHE PATH "OpenSSL root directory (fallback)")
     message(STATUS "Using fallback OPENSSL_ROOT_DIR: ${OPENSSL_ROOT_DIR}")
 elseif(OPENSSL_ROOT_DIR)
     message(STATUS "Using OPENSSL_ROOT_DIR: ${OPENSSL_ROOT_DIR}")

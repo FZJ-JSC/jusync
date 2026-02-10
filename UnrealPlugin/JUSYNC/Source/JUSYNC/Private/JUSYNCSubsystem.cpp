@@ -1403,6 +1403,12 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
 {
     FScopeLock Lock(&MiddlewareMutex);
     
+    if (Filename.IsEmpty())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request file - filename is empty"));
+        return false;
+    }
+    
     UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING FILE FROM BROKER ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Filename: %s"), *Filename);
     UE_LOG(LogJUSYNC, Log, TEXT("Target Rank: %d"), TargetRank);

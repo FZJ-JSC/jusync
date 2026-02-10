@@ -16,6 +16,9 @@ TArray<FJUSYNCFileData> UJUSYNCBlueprintLibrary::ReceivedFiles;
 TArray<FString> UJUSYNCBlueprintLibrary::ReceivedMessages;
 FCriticalSection UJUSYNCBlueprintLibrary::DataMutex;
 
+TArray<FString> UJUSYNCBlueprintLibrary::LastFileList;
+FCriticalSection UJUSYNCBlueprintLibrary::LastFileListMutex;
+
 // ========== CONNECTION MANAGEMENT ==========
 
 bool UJUSYNCBlueprintLibrary::InitializeJUSYNCMiddleware(const FString& Endpoint)
@@ -161,6 +164,14 @@ bool UJUSYNCBlueprintLibrary::RequestFileListFromBroker(int32 TargetRank, int32 
     {
         UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved %d files from broker"), OutFiles.Num());
         //DisplayDebugMessage(FString::Printf(TEXT("Retrieved %d files from broker"), OutFiles.Num()), 3.0f, FLinearColor::Green);
+        
+        // Store the retrieved file list for later retrieval
+        if (OutFiles.Num() > 0)
+        {
+            FScopeLock Lock(&LastFileListMutex);
+            LastFileList = OutFiles;
+            UE_LOG(LogJUSYNC, Log, TEXT("Stored %d files in LastFileList"), OutFiles.Num());
+        }
     }
     else
     {
@@ -169,6 +180,19 @@ bool UJUSYNCBlueprintLibrary::RequestFileListFromBroker(int32 TargetRank, int32 
     }
 
     return bResult;
+}
+
+bool UJUSYNCBlueprintLibrary::GetLastFileListFromBroker(TArray<FString>& OutFileList)
+{
+    FScopeLock Lock(&LastFileListMutex);
+    if (LastFileList.Num() == 0)
+    {
+        UE_LOG(LogJUSYNC, Warning, TEXT("No file list stored yet"));
+        return false;
+    }
+    OutFileList = LastFileList;
+    UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved last file list (%d files)"), OutFileList.Num());
+    return true;
 }
 
 bool UJUSYNCBlueprintLibrary::RequestFileFromBroker(const FString& Filename, int32 TargetRank, int32 TimeoutMs, TArray<uint8>& OutData)
@@ -518,6 +542,14 @@ void UJUSYNCBlueprintLibrary::RequestFileListAsync(int32 TargetRank, int32 Timeo
             bSuccess = WeakSubsystem->RequestFileList(TargetRank, TimeoutMs, FileList);
         }
         
+        // Store the retrieved file list for later retrieval (if successful)
+        if (bSuccess && FileList.Num() > 0)
+        {
+            FScopeLock Lock(&UJUSYNCBlueprintLibrary::LastFileListMutex);
+            UJUSYNCBlueprintLibrary::LastFileList = FileList;
+            UE_LOG(LogJUSYNC, Log, TEXT("Stored %d files in LastFileList"), FileList.Num());
+        }
+        
         // Check again before calling back (game might have stopped during request)
         if (!WeakSubsystem.IsValid())
         {
@@ -538,6 +570,64 @@ void UJUSYNCBlueprintLibrary::RequestFileListAsync(int32 TargetRank, int32 Timeo
                 {
                     if (bSuccess) OnComplete.ExecuteIfBound(FileList);
                     else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve file list from rank %d"), TargetRank));
+                },
+                TStatId(), nullptr, ENamedThreads::GameThread);
+        }
+    });
+}
+
+void UJUSYNCBlueprintLibrary::RequestFileAsync(const FString& Filename, int32 TargetRank, int32 TimeoutMs, const FOnFileReceived& OnComplete, const FOnBrokerError& OnError)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
+        OnError.ExecuteIfBound(TEXT("Subsystem not available"));
+        return;
+    }
+
+    // Capture subsystem pointer for validity checking
+    TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
+    
+    // Launch async request on a background thread using Unreal's Async system
+    Async(EAsyncExecution::Thread, [WeakSubsystem, Filename, TargetRank, TimeoutMs, OnComplete, OnError]()
+    {
+        // Check if subsystem is still valid before making the request
+        if (!WeakSubsystem.IsValid())
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem no longer valid, cancelling async request"));
+            return; // Game stopped, exit early
+        }
+        
+        TArray<uint8> FileData;
+        bool bSuccess = false;
+        
+        // Make the broker request
+        if (WeakSubsystem.IsValid())
+        {
+            bSuccess = WeakSubsystem->RequestFile(Filename, TargetRank, TimeoutMs, FileData);
+        }
+        
+        // Check again before calling back (game might have stopped during request)
+        if (!WeakSubsystem.IsValid())
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem destroyed during async request, cancelling callback"));
+            return; // Game stopped, don't call callbacks
+        }
+        
+        // Execute callback on game thread
+        if (IsInGameThread())
+        {
+            if (bSuccess) OnComplete.ExecuteIfBound(Filename, FileData);
+            else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve file '%s' from rank %d"), *Filename, TargetRank));
+        }
+        else
+        {
+            FGraphEventRef Task = FFunctionGraphTask::CreateAndDispatchWhenReady(
+                [bSuccess, Filename, FileData, TargetRank, OnComplete, OnError]()
+                {
+                    if (bSuccess) OnComplete.ExecuteIfBound(Filename, FileData);
+                    else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve file '%s' from rank %d"), *Filename, TargetRank));
                 },
                 TStatId(), nullptr, ENamedThreads::GameThread);
         }
@@ -939,6 +1029,16 @@ bool UJUSYNCBlueprintLibrary::ValidateJUSYNCTextureData(const FJUSYNCTextureData
 
     ValidationMessage = TEXT("Texture data is valid");
     return true;
+}
+
+int32 UJUSYNCBlueprintLibrary::GetFileSize(const TArray<uint8>& FileBuffer)
+{
+    return FileBuffer.Num();
+}
+
+bool UJUSYNCBlueprintLibrary::FilterFileBySize(const TArray<uint8>& FileBuffer, int32 MinimumSizeBytes)
+{
+    return FileBuffer.Num() >= MinimumSizeBytes;
 }
 
 FString UJUSYNCBlueprintLibrary::GetJUSYNCMeshStatistics(const FJUSYNCMeshData& MeshData)
