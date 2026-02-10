@@ -368,14 +368,14 @@ int RequestFile_C(const char* filename, int32_t target_rank,
                 return 0;
             }
             
-            *out_data = new (std::nothrow) unsigned char[*out_size];
+            *out_data = static_cast<unsigned char*>(malloc(*out_size));
             if (!*out_data) {
                 MIDDLEWARE_LOG_ERROR("Memory allocation failed for %zu bytes", *out_size);
                 *out_size = 0;
                 return 0;
             }
             std::memcpy(*out_data, fileData.data(), *out_size);
-            MIDDLEWARE_LOG_DEBUG("Allocated %zu bytes at %p", *out_size, (void*)*out_data);
+            MIDDLEWARE_LOG_DEBUG("Allocated %zu bytes at %p using malloc", *out_size, (void*)*out_data);
         } else {
             *out_data = nullptr;
             MIDDLEWARE_LOG_WARNING("File size is 0 bytes");

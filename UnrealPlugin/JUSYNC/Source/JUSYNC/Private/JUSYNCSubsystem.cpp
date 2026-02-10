@@ -1508,7 +1508,7 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
         UE_LOG(LogJUSYNC, Error, TEXT("❌ Exception caught in RequestFile_C"));
         if (FileData)
         {
-            delete[] FileData;
+            free(FileData);
             FileData = nullptr;
         }
         return false;
@@ -1523,7 +1523,7 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
         if (FileSize > MAX_REASONABLE_FILE_SIZE)
         {
             UE_LOG(LogJUSYNC, Error, TEXT("❌ File size suspiciously large: %llu bytes (max: %llu)"), FileSize, MAX_REASONABLE_FILE_SIZE);
-            delete[] FileData;
+            free(FileData);
             return false;
         }
         
@@ -1549,8 +1549,8 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
         
         FMemory::Memcpy(DestPtr, FileData, FileSize);
         
-        // Free C memory
-        delete[] FileData;
+        // Free C memory (allocated with malloc in middleware)
+        free(FileData);
         FileData = nullptr; // Prevent accidental reuse
         
         UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved file '%s' (%d bytes) from broker"), *Filename, OutData.Num());
@@ -1561,7 +1561,7 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
         UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to request file (Result: %d)"), Result);
         if (FileData)
         {
-            delete[] FileData;
+            free(FileData);
             FileData = nullptr;
         }
     }
