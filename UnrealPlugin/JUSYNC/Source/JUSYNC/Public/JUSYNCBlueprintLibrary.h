@@ -70,37 +70,35 @@ public:
     UFUNCTION(BlueprintPure, Category = "JUSYNC|Broker", DisplayName = "Is ANARI USD Broker Connected")
     static bool IsANARIUSDBrokerConnected();
 
-    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker", DisplayName = "Request File List From Broker")
-    static bool RequestFileListFromBroker(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles);
-
-    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker", DisplayName = "Request File List With Sizes From Broker")
-    static bool RequestFileListWithSizesFromBroker(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles, TArray<int64>& OutSizes);
-
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker", DisplayName = "Get Last File List From Broker")
     static bool GetLastFileListFromBroker(TArray<FString>& OutFileList);
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker", DisplayName = "Get Last File List With Sizes From Broker")
     static bool GetLastFileListWithSizesFromBroker(TArray<FString>& OutFileList, TArray<int64>& OutFileSizes);
 
-    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker")
+    // ========== LEGACY SYNC BROKER FUNCTIONS (Use async versions instead) ==========
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Legacy", DisplayName = "Request File List From Broker (Sync)")
+    static bool RequestFileListFromBroker(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles);
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Legacy", DisplayName = "Request File List With Sizes From Broker (Sync)")
+    static bool RequestFileListWithSizesFromBroker(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles, TArray<int64>& OutSizes);
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Legacy", DisplayName = "Request File From Broker (Sync)")
     static bool RequestFileFromBroker(const FString& Filename, int32 TargetRank, int32 TimeoutMs, TArray<uint8>& OutData);
 
-    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker")
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Legacy", DisplayName = "Request Frame From Broker (Sync)")
     static bool RequestFrameFromBroker(int32 FrameNumber, int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCFileData>& OutFiles);
 
-    // ========== WORKER STATUS QUERIES ==========
-    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker")
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Legacy", DisplayName = "Request Worker Status From Broker (Sync)")
     static bool RequestWorkerStatusFromBroker(int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCWorkerStatus>& OutWorkerStatus);
     
-    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker")
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Legacy", DisplayName = "Request Worker Count From Broker (Sync)")
     static bool RequestWorkerCountFromBroker(int32 TimeoutMs, int32& OutWorkerCount);
 
-    // Total worker count INCLUDING rank 0 (uses legacy string protocol)
-    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker")
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Legacy", DisplayName = "Request Total Worker Count From Broker (Sync)")
     static bool RequestTotalWorkerCountFromBroker(int32 TimeoutMs, int32& OutTotalCount);
 
-    // Worker count EXCLUDING rank 0 (computational workers only)
-    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker")
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Legacy", DisplayName = "Request Worker Count Excluding Rank0 (Sync)")
     static bool RequestWorkerCountExcludingRank0(int32 TimeoutMs, int32& OutWorkerCount);
 
     // ========== ASYNC WORKER QUERIES (NON-BLOCKING) ==========
@@ -274,7 +272,7 @@ public:
 
 	// ========== Async ===============
 	// Add this declaration in the public section
-	UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning")
+	UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning|Legacy", DisplayName = "Batch Spawn Realtime Meshes At Locations (Sync)")
 	static TArray<AActor*> BatchSpawnRealtimeMeshesAtLocationsSync(
 		const TArray<FJUSYNCMeshData>& MeshDataArray,
 		const TArray<FVector>& SpawnLocations,

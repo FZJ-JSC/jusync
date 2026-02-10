@@ -64,11 +64,11 @@ public:
     UPROPERTY(BlueprintAssignable, Category = "JUSYNC Events")
     FJUSYNCError OnError;
 
-    // USD Processing
-    UFUNCTION(BlueprintCallable, Category = "JUSYNC USD")
+    // USD Processing (Legacy - use JUSYNCBlueprintLibrary versions for preview support)
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC USD|Legacy", DisplayName = "Load USD From Buffer (Legacy)")
     bool LoadUSDFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCMeshData>& OutMeshData);
 
-    UFUNCTION(BlueprintCallable, Category = "JUSYNC USD")
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC USD|Legacy", DisplayName = "Load USD From Disk (Legacy)")
     bool LoadUSDFromDisk(const FString& FilePath, TArray<FJUSYNCMeshData>& OutMeshData);
 
     // Texture Processing
@@ -82,14 +82,14 @@ public:
     bool GetGradientLineAsPNGBuffer(const TArray<uint8>& Buffer, TArray<uint8>& OutPNGBuffer);
 
     // RealtimeMesh Integration
-    UFUNCTION(BlueprintCallable, Category = "JUSYNC Mesh")
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Mesh|Legacy", DisplayName = "Create Realtime Mesh From JUSYNC (Legacy)")
     bool CreateRealtimeMeshFromJUSYNC(
         const FJUSYNCMeshData& MeshData, 
         URealtimeMeshComponent* RealtimeMeshComponent
     );
     
     
-    UFUNCTION(BlueprintCallable, Category = "JUSYNC Mesh")
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Mesh|Legacy", DisplayName = "Batch Create Realtime Meshes From JUSYNC (Legacy)")
     bool BatchCreateRealtimeMeshesFromJUSYNC(const TArray<FJUSYNCMeshData>& MeshDataArray, const TArray<URealtimeMeshComponent*>& MeshComponents);
 
     // Conversion utilities for RealtimeMesh
@@ -117,32 +117,31 @@ public:
     UFUNCTION(BlueprintPure, Category = "JUSYNC Broker")
     bool IsBrokerConnected() const;
 
-    UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker")
+    // Sync broker functions (used internally by async wrappers)
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker", DisplayName = "Request File List (Sync)")
     bool RequestFileList(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles);
 
-    UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker")
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker", DisplayName = "Request File List With Sizes (Sync)")
     bool RequestFileListWithSizes(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles, TArray<int64>& OutSizes);
 
-    UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker")
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker", DisplayName = "Request File (Sync)")
     bool RequestFile(const FString& Filename, int32 TargetRank, int32 TimeoutMs, TArray<uint8>& OutData);
-UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker")
-bool RequestFrame(int32 FrameNumber, int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCFileData>& OutFiles);
 
-// Worker status queries
-UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker")
-bool RequestWorkerStatus(int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCWorkerStatus>& OutWorkerStatus);
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker", DisplayName = "Request Frame (Sync)")
+    bool RequestFrame(int32 FrameNumber, int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCFileData>& OutFiles);
 
-UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker")
-bool RequestWorkerCount(int32 TimeoutMs, int32& OutWorkerCount);
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker", DisplayName = "Request Worker Status (Sync)")
+    bool RequestWorkerStatus(int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCWorkerStatus>& OutWorkerStatus);
 
-// Total worker count INCLUDING rank 0 (uses legacy string protocol)
-UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker")
-bool RequestTotalWorkerCount(int32 TimeoutMs, int32& OutTotalCount);
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker", DisplayName = "Request Worker Count (Sync)")
+    bool RequestWorkerCount(int32 TimeoutMs, int32& OutWorkerCount);
 
-// Worker count EXCLUDING rank 0 (computational workers only)
-UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker")
-bool RequestWorkerCountExcludingRank0(int32 TimeoutMs, int32& OutWorkerCount);
-     
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker", DisplayName = "Request Total Worker Count (Sync)")
+    bool RequestTotalWorkerCount(int32 TimeoutMs, int32& OutTotalCount);
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker", DisplayName = "Request Worker Count Excluding Rank0 (Sync)")
+    bool RequestWorkerCountExcludingRank0(int32 TimeoutMs, int32& OutWorkerCount);
+      
 
 private:
 #ifdef WITH_ANARI_USD_MIDDLEWARE
