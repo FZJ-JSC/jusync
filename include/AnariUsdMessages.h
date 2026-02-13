@@ -29,6 +29,7 @@ enum class ZmqMessageType : uint32_t {
     REQ_LIST_FILES = 100,      // Request list of files from a rank
     REQ_GET_FILE = 101,        // Request specific file from a rank
     REQ_GET_FRAME = 102,       // Request all files for a frame number
+    REQ_GET_PROPERTY = 400,    // Request property value (e.g., total_workers)
     
     // Responses
     RESP_FILE_LIST = 200,      // Response with list of files
@@ -36,6 +37,7 @@ enum class ZmqMessageType : uint32_t {
     RESP_FILE_COMPLETE = 202,  // File transmission complete
     RESP_NO_FILE = 203,        // File not found
     RESP_ERROR = 204,          // Error occurred
+    RESP_PROPERTY = 401,       // Response with property value
     
     // Push notifications (Worker → Broker → Laptop)
     NOTIFY_FILE_UPDATE = 300,  // Notification that a file has been updated
@@ -306,6 +308,37 @@ struct ZmqErrorResponse {
 #pragma pack(pop)
 
 /**
+ * Property Response Message Structure
+ * Sent from broker to laptop with property value
+ */
+#pragma pack(push, 1)
+struct ZmqPropertyResponse {
+    uint32_t magic;            // 0x55534446 ("USDF")
+    uint32_t message_type;     // RESP_PROPERTY (401)
+    uint32_t request_id;       // Match with request
+    int32_t property_type;     // 0=int32, 1=string, -1=error
+    int32_t int_value;         // For integer properties
+    char string_value[256];    // For string properties
+    
+    ZmqPropertyResponse() {
+        memset(this, 0, sizeof(ZmqPropertyResponse));
+        magic = ANARI_USD_MAGIC;
+        message_type = static_cast<uint32_t>(ZmqMessageType::RESP_PROPERTY);
+    }
+    
+    void setStringValue(const std::string& str) {
+        memset(string_value, 0, sizeof(string_value));
+        size_t copyLen = std::min(str.size(), sizeof(string_value) - 1);
+        memcpy(string_value, str.c_str(), copyLen);
+    }
+    
+    std::string getStringValue() const {
+        return std::string(string_value, strnlen(string_value, sizeof(string_value)));
+    }
+};
+#pragma pack(pop)
+
+/**
  * Worker Registration Message Structure
  * Sent from worker to broker during registration
  */
@@ -388,11 +421,13 @@ namespace MessageUtils {
             case ZmqMessageType::REQ_LIST_FILES: return "REQ_LIST_FILES";
             case ZmqMessageType::REQ_GET_FILE: return "REQ_GET_FILE";
             case ZmqMessageType::REQ_GET_FRAME: return "REQ_GET_FRAME";
+            case ZmqMessageType::REQ_GET_PROPERTY: return "REQ_GET_PROPERTY";
             case ZmqMessageType::RESP_FILE_LIST: return "RESP_FILE_LIST";
             case ZmqMessageType::RESP_FILE_CHUNK: return "RESP_FILE_CHUNK";
             case ZmqMessageType::RESP_FILE_COMPLETE: return "RESP_FILE_COMPLETE";
             case ZmqMessageType::RESP_NO_FILE: return "RESP_NO_FILE";
             case ZmqMessageType::RESP_ERROR: return "RESP_ERROR";
+            case ZmqMessageType::RESP_PROPERTY: return "RESP_PROPERTY";
             case ZmqMessageType::NOTIFY_FILE_UPDATE: return "NOTIFY_FILE_UPDATE";
             case ZmqMessageType::NOTIFY_COMMIT_COMPLETE: return "NOTIFY_COMMIT_COMPLETE";
             default: return "UNKNOWN";
@@ -401,14 +436,16 @@ namespace MessageUtils {
 }
 
 /**
- * File information (name + size)
+ * File information (name + size + source rank)
  */
 struct FileInfo {
     std::string name;
     uint64_t size;
+    int32_t source_rank;
 
-    FileInfo() : size(0) {}
-    FileInfo(const std::string& n, uint64_t s) : name(n), size(s) {}
+    FileInfo() : size(0), source_rank(-1) {}
+    FileInfo(const std::string& n, uint64_t s) : name(n), size(s), source_rank(-1) {}
+    FileInfo(const std::string& n, uint64_t s, int32_t r) : name(n), size(s), source_rank(r) {}
 };
 
 } // namespace anari_usd_middleware

@@ -81,6 +81,16 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Texture")
     bool GetGradientLineAsPNGBuffer(const TArray<uint8>& Buffer, TArray<uint8>& OutPNGBuffer);
 
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Texture")
+    bool GetPNGDimensions(const TArray<uint8>& Buffer, int32& OutWidth, int32& OutHeight, int32& OutChannels);
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Texture")
+    bool GetImageRowAsPNGBuffer(const TArray<uint8>& Buffer, int32 RowIndex, TArray<uint8>& OutPNGBuffer);
+
+    // Broadcast duplicate handling
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broadcast")
+    void ClearProcessedFiles();
+
     // RealtimeMesh Integration
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Mesh|Legacy", DisplayName = "Create Realtime Mesh From JUSYNC (Legacy)")
     bool CreateRealtimeMeshFromJUSYNC(
@@ -123,6 +133,9 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker", DisplayName = "Request File List With Sizes (Sync)")
     bool RequestFileListWithSizes(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles, TArray<int64>& OutSizes);
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker", DisplayName = "Request File List With Sizes And Ranks (Sync)")
+    bool RequestFileListWithSizesAndRanks(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles, TArray<int64>& OutSizes, TArray<int32>& OutRanks);
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker", DisplayName = "Request File (Sync)")
     bool RequestFile(const FString& Filename, int32 TargetRank, int32 TimeoutMs, TArray<uint8>& OutData);

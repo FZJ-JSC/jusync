@@ -25,11 +25,15 @@ struct JUSYNC_API FJUSYNCFileData
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
     FString FileType;
 
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+    int32 SourceRank;
+
     FJUSYNCFileData()
     {
         Filename = TEXT("");
         Hash = TEXT("");
         FileType = TEXT("");
+        SourceRank = -1;
     }
 
     bool IsValid() const

@@ -179,8 +179,9 @@ bool AnariUsdClient::configureWindowsSocket() {
         zmqSocket->set(zmq::sockopt::tcp_keepalive_idle, 300);
         zmqSocket->set(zmq::sockopt::tcp_keepalive_cnt, 3);
         zmqSocket->set(zmq::sockopt::tcp_keepalive_intvl, 30);
-        zmqSocket->set(zmq::sockopt::sndbuf, 65536);
-        zmqSocket->set(zmq::sockopt::rcvbuf, 65536);
+        // Increase buffer sizes for broadcast reliability (16 ranks × 8 files × ~10KB each = ~1.3MB)
+        zmqSocket->set(zmq::sockopt::sndbuf, 2097152);  // 2MB send buffer
+        zmqSocket->set(zmq::sockopt::rcvbuf, 4194304);  // 4MB receive buffer for burst responses
 
         MIDDLEWARE_LOG_INFO("Windows ZMQ socket configuration applied successfully");
         return true;
@@ -436,145 +437,381 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
             return false;
         }
 
-        // Wait for response
+        // Wait for initial response
         if (!waitForResponse(request.request_id, timeoutMs)) {
             MIDDLEWARE_LOG_ERROR("Timeout waiting for file list response");
             return false;
         }
 
-        // Receive empty delimiter frame (zero-length)
-        zmq::message_t emptyDelimiter;
-        auto delimResult = zmqSocket->recv(emptyDelimiter, zmq::recv_flags::none);
-        if (!delimResult) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive empty delimiter");
-            return false;
-        }
-        if (delimResult.value() != 0) {
-            MIDDLEWARE_LOG_WARNING("Empty delimiter frame has non-zero size: %zu", delimResult.value());
-        }
-
-        // Receive the combined header+data ZeroMQ message
-        zmq::message_t msg;
-        auto result = zmqSocket->recv(msg, zmq::recv_flags::none);
+        std::vector<FileInfo> allFileInfos;
+        auto startTime = std::chrono::steady_clock::now();
+        auto timeoutDuration = std::chrono::milliseconds(timeoutMs);
         
-        if (!result) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive file list response");
-            return false;
-        }
+        // For broadcast requests (targetRank == -1), we need to receive multiple responses
+        // For single rank requests, we just process one response
+        bool isBroadcast = (targetRank == -1);
+        bool receivedAtLeastOneResponse = false;
         
-        size_t totalSize = result.value();
-        MIDDLEWARE_LOG_INFO("Received file list response: %zu bytes total", totalSize);
-        
-        size_t headerSize = sizeof(ZmqFileChunk);
-        // Check minimum size (header)
-        if (totalSize < headerSize) {
-            MIDDLEWARE_LOG_ERROR("File list response too small: %zu bytes (expected at least %zu)", 
-                                totalSize, headerSize);
-            return false;
-        }
-        
-        // Parse header from first part of message
-        const uint8_t* msgData = static_cast<const uint8_t*>(msg.data());
-        const ZmqFileChunk* chunk = reinterpret_cast<const ZmqFileChunk*>(msgData);
-        
-        // Validate response
-        if (!MessageUtils::isValidMagic(chunk->magic)) {
-            MIDDLEWARE_LOG_ERROR("Invalid magic number in file list response");
-            return false;
-        }
-
-        if (chunk->message_type != static_cast<uint32_t>(ZmqMessageType::RESP_FILE_CHUNK)) {
-            MIDDLEWARE_LOG_ERROR("Unexpected message type in file list response: %u (expected RESP_FILE_CHUNK=201)", 
-                                chunk->message_type);
-            return false;
-        }
-
-        // Check if this is a file list response (filename should be "filelist.json")
-        std::string filename = chunk->getFilename();
-        if (filename != "filelist.json") {
-            MIDDLEWARE_LOG_WARNING("File list response has unexpected filename: %s", filename.c_str());
-        }
-
-        MIDDLEWARE_LOG_INFO("Received file list chunk header: %llu bytes from rank %d, chunk size: %u", 
-                            chunk->file_size, chunk->source_rank, chunk->chunk_size);
-        
-        // Extract JSON data from remaining part of message
-        std::vector<uint8_t> jsonData;
-        if (chunk->chunk_size > 0) {
-            // Check if we have enough data
-            size_t expectedTotalSize = headerSize + chunk->chunk_size;
-            if (totalSize < expectedTotalSize) {
-                MIDDLEWARE_LOG_ERROR("Incomplete file list response: got %zu bytes, expected %zu", 
-                                    totalSize, expectedTotalSize);
-                return false;
+        do {
+            // Check if we've exceeded timeout
+            auto currentTime = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(currentTime - startTime);
+            if (elapsed >= timeoutDuration) {
+                MIDDLEWARE_LOG_INFO("Timeout reached after %lld ms", elapsed.count());
+                break;
             }
             
-            // Copy JSON data from message
-            jsonData.assign(msgData + headerSize, msgData + headerSize + chunk->chunk_size);
-            MIDDLEWARE_LOG_INFO("Extracted JSON data: %zu bytes", jsonData.size());
-        } else {
-            MIDDLEWARE_LOG_WARNING("File list response has zero chunk size");
-        }
-
-        // Parse JSON into FileInfo vector
-        std::vector<FileInfo> fileInfos;
-        try {
-            std::string jsonStr(reinterpret_cast<const char*>(jsonData.data()), jsonData.size());
-            auto json = json::parse(jsonStr);
+            // Check if there's more data available with remaining timeout
+            int remainingTimeout = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(timeoutDuration - elapsed).count());
+            if (remainingTimeout <= 0) {
+                break;
+            }
             
-            // Check JSON structure: {"rank": X, "files": [{"name": "...", "size": N, "mime": "..."}, ...]}
-            if (json.contains("files") && json["files"].is_array()) {
-                for (const auto& fileObj : json["files"]) {
-                    if (fileObj.contains("name") && fileObj["name"].is_string()) {
-                        std::string fname = fileObj["name"].get<std::string>();
-                        if (!fname.empty()) {
-                            uint64_t fsize = 0;
-                            if (fileObj.contains("size") && fileObj["size"].is_number()) {
-                                fsize = fileObj["size"].get<uint64_t>();
+            // Set socket to non-blocking for poll
+            zmqSocket->set(zmq::sockopt::rcvtimeo, remainingTimeout);
+            
+            // Receive empty delimiter frame (zero-length)
+            zmq::message_t emptyDelimiter;
+            auto delimResult = zmqSocket->recv(emptyDelimiter, zmq::recv_flags::none);
+            if (!delimResult) {
+                // No more data available
+                break;
+            }
+            if (delimResult.value() != 0) {
+                MIDDLEWARE_LOG_WARNING("Empty delimiter frame has non-zero size: %zu", delimResult.value());
+            }
+
+            // Receive the combined header+data ZeroMQ message
+            zmq::message_t msg;
+            auto result = zmqSocket->recv(msg, zmq::recv_flags::none);
+            
+            if (!result) {
+                // No more data
+                break;
+            }
+            
+            size_t totalSize = result.value();
+            MIDDLEWARE_LOG_INFO("Received file list response: %zu bytes total", totalSize);
+            
+            size_t headerSize = sizeof(ZmqFileChunk);
+            // Check minimum size (header)
+            if (totalSize < headerSize) {
+                MIDDLEWARE_LOG_ERROR("File list response too small: %zu bytes (expected at least %zu)", 
+                                    totalSize, headerSize);
+                continue; // Skip this malformed response
+            }
+            
+            // Parse header from first part of message
+            const uint8_t* msgData = static_cast<const uint8_t*>(msg.data());
+            const ZmqFileChunk* chunk = reinterpret_cast<const ZmqFileChunk*>(msgData);
+            
+            // Validate response
+            if (!MessageUtils::isValidMagic(chunk->magic)) {
+                MIDDLEWARE_LOG_ERROR("Invalid magic number in file list response");
+                continue;
+            }
+
+            if (chunk->message_type != static_cast<uint32_t>(ZmqMessageType::RESP_FILE_CHUNK)) {
+                MIDDLEWARE_LOG_ERROR("Unexpected message type in file list response: %u (expected RESP_FILE_CHUNK=201)", 
+                                    chunk->message_type);
+                continue;
+            }
+
+            // Check if this is a file list response (filename should be "filelist.json")
+            std::string filename = chunk->getFilename();
+            if (filename != "filelist.json") {
+                MIDDLEWARE_LOG_WARNING("File list response has unexpected filename: %s", filename.c_str());
+            }
+
+            MIDDLEWARE_LOG_INFO("Received file list chunk header: %llu bytes from rank %d, chunk size: %u", 
+                                chunk->file_size, chunk->source_rank, chunk->chunk_size);
+            
+            // Extract JSON data from remaining part of message
+            std::vector<uint8_t> jsonData;
+            if (chunk->chunk_size > 0) {
+                // Check if we have enough data
+                size_t expectedTotalSize = headerSize + chunk->chunk_size;
+                if (totalSize < expectedTotalSize) {
+                    MIDDLEWARE_LOG_ERROR("Incomplete file list response: got %zu bytes, expected %zu", 
+                                        totalSize, expectedTotalSize);
+                    continue;
+                }
+                
+                // Copy JSON data from message
+                jsonData.assign(msgData + headerSize, msgData + headerSize + chunk->chunk_size);
+                MIDDLEWARE_LOG_INFO("Extracted JSON data: %zu bytes", jsonData.size());
+            } else {
+                MIDDLEWARE_LOG_WARNING("File list response has zero chunk size");
+            }
+
+            // Parse JSON into FileInfo vector with source rank
+            try {
+                std::string jsonStr(reinterpret_cast<const char*>(jsonData.data()), jsonData.size());
+                auto json = json::parse(jsonStr);
+                
+                // Check JSON structure: {"rank": X, "files": [{"name": "...", "size": N, "mime": "..."}, ...]}
+                // Note: JSON may contain "rank" field, but we use chunk->source_rank which is more reliable
+                int32_t jsonRank = chunk->source_rank;
+                if (json.contains("rank") && json["rank"].is_number()) {
+                    // Use JSON rank if available, but chunk->source_rank should be authoritative
+                    int32_t jsonRankValue = json["rank"].get<int32_t>();
+                    if (jsonRankValue != chunk->source_rank) {
+                        MIDDLEWARE_LOG_WARNING("JSON rank (%d) doesn't match chunk source_rank (%d), using chunk value", 
+                                              jsonRankValue, chunk->source_rank);
+                    }
+                }
+                
+                if (json.contains("files") && json["files"].is_array()) {
+                    for (const auto& fileObj : json["files"]) {
+                        if (fileObj.contains("name") && fileObj["name"].is_string()) {
+                            std::string fname = fileObj["name"].get<std::string>();
+                            if (!fname.empty()) {
+                                uint64_t fsize = 0;
+                                if (fileObj.contains("size") && fileObj["size"].is_number()) {
+                                    fsize = fileObj["size"].get<uint64_t>();
+                                }
+                                // Store file with source rank
+                                allFileInfos.push_back({fname, fsize, jsonRank});
                             }
-                            fileInfos.push_back({fname, fsize});
                         }
                     }
                 }
+                
+                MIDDLEWARE_LOG_INFO("Parsed %zu files with sizes from rank %d", allFileInfos.size() - (allFileInfos.size() - jsonData.size()), jsonRank);
+            } catch (const std::exception& e) {
+                MIDDLEWARE_LOG_ERROR("Failed to parse file list JSON: %s", e.what());
+                continue;
+            }
+
+            // Receive empty delimiter for complete message
+            zmq::message_t emptyDelimiter2;
+            auto delimResult2 = zmqSocket->recv(emptyDelimiter2, zmq::recv_flags::none);
+            if (!delimResult2) {
+                MIDDLEWARE_LOG_ERROR("Failed to receive empty delimiter for complete message");
+                continue;
+            }
+            if (delimResult2.value() != 0) {
+                MIDDLEWARE_LOG_WARNING("Empty delimiter frame has non-zero size: %zu", delimResult2.value());
+            }
+
+            // Receive ZmqFileComplete header
+            zmq::message_t completeMsg;
+            auto completeResult = zmqSocket->recv(completeMsg, zmq::recv_flags::none);
+            if (!completeResult || completeResult.value() != sizeof(ZmqFileComplete)) {
+                MIDDLEWARE_LOG_ERROR("Failed to receive file complete message");
+                continue;
+            }
+            const ZmqFileComplete* complete = reinterpret_cast<const ZmqFileComplete*>(completeMsg.data());
+
+            if (complete->message_type != static_cast<uint32_t>(ZmqMessageType::RESP_FILE_COMPLETE)) {
+                MIDDLEWARE_LOG_WARNING("Expected RESP_FILE_COMPLETE after file list, got: %u",
+                                      complete->message_type);
             }
             
-            MIDDLEWARE_LOG_INFO("Parsed %zu files with sizes from JSON file list", fileInfos.size());
-        } catch (const std::exception& e) {
-            MIDDLEWARE_LOG_ERROR("Failed to parse file list JSON: %s", e.what());
+            receivedAtLeastOneResponse = true;
+            connectionStats.totalResponsesReceived.fetch_add(1);
+            
+            // If not broadcast, we're done after first response
+            if (!isBroadcast) {
+                break;
+            }
+            
+            // For broadcast, continue receiving until timeout
+            // Reset socket timeout for next poll
+            zmqSocket->set(zmq::sockopt::rcvtimeo, -1);
+            
+        } while (isBroadcast);
+        
+        // Reset socket to default blocking mode
+        zmqSocket->set(zmq::sockopt::rcvtimeo, -1);
+        
+        if (!receivedAtLeastOneResponse) {
+            MIDDLEWARE_LOG_ERROR("No valid file list responses received");
             return false;
         }
-
-        // Receive empty delimiter for complete message
-        zmq::message_t emptyDelimiter2;
-        auto delimResult2 = zmqSocket->recv(emptyDelimiter2, zmq::recv_flags::none);
-        if (!delimResult2) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive empty delimiter for complete message");
-            return false;
+        
+        MIDDLEWARE_LOG_INFO("Accumulated %zu total files from %s", 
+                           allFileInfos.size(), 
+                           isBroadcast ? "multiple ranks (broadcast)" : "single rank");
+        
+        // For broadcast: implement retry logic for missing ranks
+        if (isBroadcast && allFileInfos.size() > 0) {
+            // Track which ranks responded
+            bool responded[16] = {false};
+            int32_t maxRank = -1;
+            int32_t minRank = 16;
+            
+            for (const auto& fileInfo : allFileInfos) {
+                if (fileInfo.source_rank >= 0 && fileInfo.source_rank < 16) {
+                    responded[fileInfo.source_rank] = true;
+                    if (fileInfo.source_rank > maxRank) maxRank = fileInfo.source_rank;
+                    if (fileInfo.source_rank < minRank) minRank = fileInfo.source_rank;
+                }
+            }
+            
+            // Count responded ranks
+            int32_t respondedCount = 0;
+            for (int32_t rank = 0; rank < 16; ++rank) {
+                if (responded[rank]) respondedCount++;
+            }
+            
+            MIDDLEWARE_LOG_INFO("Broadcast response summary: %d/%d ranks responded (ranks %d-%d)", 
+                               respondedCount, 16, minRank, maxRank);
+            
+            // Log missing ranks for debugging
+            if (respondedCount < 16) {
+                MIDDLEWARE_LOG_INFO("Missing ranks:");
+                for (int32_t rank = 0; rank < 16; ++rank) {
+                    if (!responded[rank]) {
+                        MIDDLEWARE_LOG_INFO("  - Rank %d", rank);
+                    }
+                }
+                
+                // Implement retry logic for missing ranks
+                MIDDLEWARE_LOG_INFO("Retrying %d missing ranks with individual requests...", 16 - respondedCount);
+                
+                // Retry each missing rank
+                int32_t retryTimeout = timeoutMs / 3; // Shorter timeout for retries
+                if (retryTimeout < 5000) retryTimeout = 5000; // Minimum 5 seconds
+                
+                // Create a temporary vector for retry results
+                std::vector<FileInfo> retryResults = allFileInfos;
+                
+                for (int32_t rank = 0; rank < 16; ++rank) {
+                    if (!responded[rank]) {
+                        MIDDLEWARE_LOG_INFO("Retrying rank %d with %d ms timeout", rank, retryTimeout);
+                        
+                        // Inline retry logic (simplified version of requestFileListForSingleRank)
+                        std::vector<FileInfo> rankFiles;
+                        
+                        // Check connection
+                        if (connectionStatus.load() != ConnectionStatus::Connected || !zmqSocket) {
+                            MIDDLEWARE_LOG_ERROR("Not connected for retry request");
+                            continue;
+                        }
+                        
+                        try {
+                            // Create file list request
+                            ZmqFileRequest request;
+                            request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_LIST_FILES);
+                            request.request_id = generateRequestId();
+                            request.target_rank = rank;
+                            request.chunk_size = 0;
+                            request.setFilename("");
+                            
+                            MIDDLEWARE_LOG_INFO("Retry: requesting file list from rank %d (request_id: %u)",
+                                               rank, request.request_id);
+                            
+                            // Send request
+                            if (!sendRequest(&request, sizeof(request), request.request_id)) {
+                                MIDDLEWARE_LOG_ERROR("Retry failed to send request to rank %d", rank);
+                                continue;
+                            }
+                            
+                            // Wait for response
+                            if (!waitForResponse(request.request_id, retryTimeout)) {
+                                MIDDLEWARE_LOG_WARNING("Retry timeout for rank %d after %d ms", rank, retryTimeout);
+                                continue;
+                            }
+                            
+                            // Receive the response
+                            zmq::message_t emptyDelimiter;
+                            auto delimResult = zmqSocket->recv(emptyDelimiter, zmq::recv_flags::none);
+                            if (!delimResult) {
+                                MIDDLEWARE_LOG_ERROR("Retry failed to receive delimiter for rank %d", rank);
+                                continue;
+                            }
+                            
+                            zmq::message_t msg;
+                            auto recvResult = zmqSocket->recv(msg, zmq::recv_flags::none);
+                            if (!recvResult) {
+                                MIDDLEWARE_LOG_ERROR("Retry failed to receive message for rank %d", rank);
+                                continue;
+                            }
+                            
+                            size_t totalSize = recvResult.value();
+                            if (totalSize < sizeof(ZmqFileChunk)) {
+                                MIDDLEWARE_LOG_ERROR("Retry response too small from rank %d: %zu bytes", rank, totalSize);
+                                continue;
+                            }
+                            
+                            // Parse the response
+                            const uint8_t* msgData = static_cast<const uint8_t*>(msg.data());
+                            const ZmqFileChunk* chunk = reinterpret_cast<const ZmqFileChunk*>(msgData);
+                            
+                            if (!MessageUtils::isValidMagic(chunk->magic)) {
+                                MIDDLEWARE_LOG_ERROR("Retry invalid magic from rank %d", rank);
+                                continue;
+                            }
+                            
+                            if (chunk->message_type != static_cast<uint32_t>(ZmqMessageType::RESP_FILE_CHUNK)) {
+                                MIDDLEWARE_LOG_ERROR("Retry wrong message type from rank %d: %u", rank, chunk->message_type);
+                                continue;
+                            }
+                            
+                            // Extract JSON data
+                            size_t headerSize = sizeof(ZmqFileChunk);
+                            if (chunk->chunk_size > 0 && totalSize >= headerSize + chunk->chunk_size) {
+                                std::vector<uint8_t> jsonData(msgData + headerSize, msgData + headerSize + chunk->chunk_size);
+                                
+                                try {
+                                    std::string jsonStr(reinterpret_cast<const char*>(jsonData.data()), jsonData.size());
+                                    auto json = json::parse(jsonStr);
+                                    
+                                    if (json.contains("files") && json["files"].is_array()) {
+                                        for (const auto& fileObj : json["files"]) {
+                                            if (fileObj.contains("name") && fileObj["name"].is_string()) {
+                                                std::string fname = fileObj["name"].get<std::string>();
+                                                if (!fname.empty()) {
+                                                    uint64_t fsize = 0;
+                                                    if (fileObj.contains("size") && fileObj["size"].is_number()) {
+                                                        fsize = fileObj["size"].get<uint64_t>();
+                                                    }
+                                                    rankFiles.push_back({fname, fsize, rank});
+                                                }
+                                            }
+                                        }
+                                    }
+                                } catch (const std::exception& e) {
+                                    MIDDLEWARE_LOG_ERROR("Retry JSON parse error from rank %d: %s", rank, e.what());
+                                }
+                            }
+                            
+                            // Clean up remaining message parts
+                            zmq::message_t emptyDelimiter2;
+                            zmqSocket->recv(emptyDelimiter2, zmq::recv_flags::none);
+                            zmq::message_t completeMsg;
+                            zmqSocket->recv(completeMsg, zmq::recv_flags::none);
+                            
+                            MIDDLEWARE_LOG_INFO("Retry successful for rank %d: got %zu files", rank, rankFiles.size());
+                            
+                        } catch (const std::exception& e) {
+                            MIDDLEWARE_LOG_ERROR("Exception in retry for rank %d: %s", rank, e.what());
+                        }
+                        
+                        // Add retried files to results
+                        for (const auto& fileInfo : rankFiles) {
+                            retryResults.push_back(fileInfo);
+                        }
+                        
+                        if (rankFiles.empty()) {
+                            MIDDLEWARE_LOG_WARNING("Retry failed for rank %d", rank);
+                        }
+                    }
+                }
+                
+                // Update allFileInfos with retry results
+                allFileInfos = retryResults;
+                MIDDLEWARE_LOG_INFO("After retries: %zu total files from %d ranks", 
+                                   allFileInfos.size(), respondedCount + (16 - respondedCount));
+            }
         }
-        if (delimResult2.value() != 0) {
-            MIDDLEWARE_LOG_WARNING("Empty delimiter frame has non-zero size: %zu", delimResult2.value());
-        }
-
-        // Receive ZmqFileComplete header
-        zmq::message_t completeMsg;
-        auto completeResult = zmqSocket->recv(completeMsg, zmq::recv_flags::none);
-        if (!completeResult || completeResult.value() != sizeof(ZmqFileComplete)) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive file complete message");
-            return false;
-        }
-        const ZmqFileComplete* complete = reinterpret_cast<const ZmqFileComplete*>(completeMsg.data());
-
-        if (complete->message_type != static_cast<uint32_t>(ZmqMessageType::RESP_FILE_COMPLETE)) {
-            MIDDLEWARE_LOG_WARNING("Expected RESP_FILE_COMPLETE after file list, got: %u",
-                                  complete->message_type);
-        }
-
+        
         // Trigger callback
         if (callback) {
-            callback(fileInfos);
+            callback(allFileInfos);
         }
 
-        connectionStats.totalResponsesReceived.fetch_add(1);
         connectionStats.lastActivityTime = std::chrono::steady_clock::now();
 
         return true;
@@ -587,6 +824,7 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
         return false;
     }
 }
+
 
 bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank,
                                   FileChunkCallback chunkCallback,
@@ -985,12 +1223,25 @@ bool AnariUsdClient::sendRequest(const void* data, size_t size, uint32_t request
     try {
         std::lock_guard<std::recursive_mutex> lock(requestMutex);
         
+        // Send empty delimiter frame with SNDMORE flag (first frame of 2-frame message)
+        // DEALER sends: [empty delimiter] + [data] (2 frames)
+        // ROUTER receives: [identity] + [empty delimiter] + [data] (3 frames)
+        // ZeroMQ automatically adds identity frame for DEALER→ROUTER communication
+        zmq::message_t emptyFrame(0);
+        auto result1 = zmqSocket->send(emptyFrame, zmq::send_flags::sndmore);
+        if (!result1) {
+            MIDDLEWARE_LOG_ERROR("Failed to send empty delimiter frame (request_id: %u)", requestId);
+            connectionStats.failedRequests.fetch_add(1);
+            return false;
+        }
+        
+        // Send binary struct (second/last frame, no SNDMORE flag)
         zmq::message_t msg(size);
         memcpy(msg.data(), data, size);
-        auto result = zmqSocket->send(msg, zmq::send_flags::none);
+        auto result2 = zmqSocket->send(msg, zmq::send_flags::none);
         
-        if (!result || result.value() != size) {
-            MIDDLEWARE_LOG_ERROR("Failed to send request (request_id: %u)", requestId);
+        if (!result2 || result2.value() != size) {
+            MIDDLEWARE_LOG_ERROR("Failed to send request data (request_id: %u)", requestId);
             connectionStats.failedRequests.fetch_add(1);
             return false;
         }
@@ -1146,7 +1397,16 @@ bool AnariUsdClient::requestWorkerListString(std::vector<std::tuple<int32_t, std
             return false;
         }
 
-        // Receive response
+        // Receive response (2 frames: empty delimiter + data)
+        // First frame: empty delimiter (should be 0 bytes)
+        zmq::message_t delimiterMsg;
+        auto delimResult = zmqSocket->recv(delimiterMsg, zmq::recv_flags::none);
+        if (!delimResult) {
+            MIDDLEWARE_LOG_ERROR("Failed to receive delimiter frame");
+            return false;
+        }
+        
+        // Second frame: string response
         zmq::message_t responseMsg;
         auto recvResult = zmqSocket->recv(responseMsg, zmq::recv_flags::none);
         if (!recvResult) {
@@ -1223,84 +1483,98 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
     }
 
     try {
-        MIDDLEWARE_LOG_INFO("Requesting worker count using string protocol 'GET_WORKERS'");
+        MIDDLEWARE_LOG_INFO("Requesting worker count using ANARI-USD binary protocol");
         
-        // Send GET_WORKERS string using HPC broker protocol
-        // DEALER sends: [empty delimiter] + "GET_WORKERS" (2 frames)
-        // ROUTER receives: [identity] + [empty delimiter] + "GET_WORKERS" (3 frames)
-        // ZeroMQ automatically adds identity frame for DEALER→ROUTER communication
+        // Create binary property request using ZmqFileRequest struct
+        ZmqFileRequest request;
+        request.magic = ANARI_USD_MAGIC;           // 0x55534446 ("USDF")
+        request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_GET_PROPERTY);  // 400
+        request.request_id = generateRequestId();
+        request.target_rank = -1;                  // Request from all ranks
+        request.setFilename("workerCount");        // Property name in filename field (NOT "total_workers")
+        request.chunk_size = 0;                    // Not applicable for property requests
+        
+        MIDDLEWARE_LOG_INFO("Sending binary property request: magic=0x%08x, type=%u, request_id=%u, property='%s'",
+                           request.magic, request.message_type, request.request_id, request.getFilename().c_str());
+        
         std::lock_guard<std::recursive_mutex> lock(requestMutex);
         
-        // Send empty delimiter frame with SNDMORE flag
-        zmq::message_t emptyFrame(0);
-        auto result = zmqSocket->send(emptyFrame, zmq::send_flags::sndmore);
-        if (!result) {
-            MIDDLEWARE_LOG_ERROR("Failed to send empty delimiter frame");
-            connectionStats.failedRequests.fetch_add(1);
-            return false;
-        }
-        
-        // Send "GET_WORKERS" string (broker accepts any string)
-        zmq::message_t requestMsg(strlen("GET_WORKERS"));
-        memcpy(requestMsg.data(), "GET_WORKERS", strlen("GET_WORKERS"));
-        result = zmqSocket->send(requestMsg, zmq::send_flags::none);
-        
-        if (!result || result.value() != strlen("GET_WORKERS")) {
-            MIDDLEWARE_LOG_ERROR("Failed to send GET_WORKERS request");
-            connectionStats.failedRequests.fetch_add(1);
+        // Send binary struct (276 bytes) using existing sendRequest method
+        if (!sendRequest(&request, sizeof(request), request.request_id)) {
+            MIDDLEWARE_LOG_ERROR("Failed to send binary property request");
             return false;
         }
 
         connectionStats.totalRequestsSent.fetch_add(1);
 
         // Wait for response with cancellation support
-        if (!waitForResponse(0, timeoutMs)) {
-            MIDDLEWARE_LOG_ERROR("Timeout waiting for worker list response");
+        // Use the actual request_id, not 0
+        if (!waitForResponse(request.request_id, timeoutMs)) {
+            MIDDLEWARE_LOG_ERROR("Timeout waiting for property response");
             return false;
         }
 
-        // Receive response
+        // Receive binary property response (2 frames: empty delimiter + data)
+        // First frame: empty delimiter (should be 0 bytes)
+        zmq::message_t delimiterMsg;
+        auto delimResult = zmqSocket->recv(delimiterMsg, zmq::recv_flags::none);
+        if (!delimResult) {
+            MIDDLEWARE_LOG_ERROR("Failed to receive delimiter frame");
+            return false;
+        }
+        
+        // Second frame: binary property response
         zmq::message_t responseMsg;
         auto recvResult = zmqSocket->recv(responseMsg, zmq::recv_flags::none);
         if (!recvResult) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive worker list response");
+            MIDDLEWARE_LOG_ERROR("Failed to receive property response");
             return false;
         }
 
-        // Parse response: "WORKER_LIST|rank1:hostname1:ip1;rank2:hostname2:ip2;..."
-        std::string responseStr(static_cast<const char*>(responseMsg.data()), responseMsg.size());
-        MIDDLEWARE_LOG_INFO("Received worker list response: %s", responseStr.c_str());
-
-        // Check if response starts with "WORKER_LIST|"
-        if (responseStr.find("WORKER_LIST|") != 0) {
-            MIDDLEWARE_LOG_ERROR("Invalid worker list response format: %s", responseStr.c_str());
+        // Validate response size
+        size_t responseSize = recvResult.value();
+        if (responseSize < sizeof(ZmqPropertyResponse)) {
+            MIDDLEWARE_LOG_ERROR("Property response too small: %zu bytes (expected at least %zu)",
+                                responseSize, sizeof(ZmqPropertyResponse));
             return false;
         }
 
-        // Extract worker data
-        std::string workerData = responseStr.substr(12); // Skip "WORKER_LIST|"
+        // Parse binary property response
+        const ZmqPropertyResponse* response = reinterpret_cast<const ZmqPropertyResponse*>(responseMsg.data());
         
-        // Count workers by counting semicolons
-        uint32_t workerCount = 0;
-        if (!workerData.empty()) {
-            // Count semicolons + 1 (for last entry)
-            workerCount = 1; // Start with 1 for the first worker
-            for (char c : workerData) {
-                if (c == ';') {
-                    workerCount++;
-                }
-            }
-            // If string ends with semicolon, adjust
-            if (workerData.back() == ';') {
-                workerCount--;
-            }
+        // Validate response
+        if (!MessageUtils::isValidMagic(response->magic)) {
+            MIDDLEWARE_LOG_ERROR("Invalid magic number in property response: 0x%08x", response->magic);
+            return false;
         }
+
+        if (response->message_type != static_cast<uint32_t>(ZmqMessageType::RESP_PROPERTY)) {
+            MIDDLEWARE_LOG_ERROR("Unexpected message type in property response: %u (expected RESP_PROPERTY=401)",
+                                response->message_type);
+            return false;
+        }
+
+        if (response->request_id != request.request_id) {
+            MIDDLEWARE_LOG_WARNING("Property response request_id mismatch: expected %u, got %u",
+                                  request.request_id, response->request_id);
+        }
+
+        // Check property type
+        if (response->property_type == -1) {
+            MIDDLEWARE_LOG_ERROR("Property request failed with error");
+            return false;
+        }
+
+        if (response->property_type != 0) {
+            MIDDLEWARE_LOG_ERROR("Unexpected property type: %d (expected 0=int32)", response->property_type);
+            return false;
+        }
+
+        // Get worker count from int_value field
+        uint32_t totalWorkers = static_cast<uint32_t>(response->int_value);
         
-        // Total workers = workers in list + broker (rank 0)
-        uint32_t totalWorkers = workerCount + 1;
-        
-        MIDDLEWARE_LOG_INFO("Parsed %u workers from response, total including rank 0: %u",
-                           workerCount, totalWorkers);
+        MIDDLEWARE_LOG_INFO("Received property response: worker_count=%u, property_type=%d",
+                           totalWorkers, response->property_type);
 
         // Trigger callback
         if (callback) {
@@ -1328,53 +1602,150 @@ bool AnariUsdClient::requestWorkerStatus(int32_t targetRank, WorkerStatusCallbac
     }
 
     try {
-        // Create worker status request
-        ZmqWorkerStatusRequest request;
-        request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_WORKER_STATUS);
+        MIDDLEWARE_LOG_WARNING("requestWorkerStatus: ANARI-USD broker doesn't support individual worker status queries");
+        MIDDLEWARE_LOG_WARNING("Using REQ_GET_PROPERTY (400) with 'workerList' property instead of unsupported REQ_WORKER_STATUS (20)");
+        
+        // ANARI-USD broker doesn't support individual worker status queries
+        // Only aggregate properties are supported: "workerCount", "mpiSize", "mpiRank", "workerList"
+        // We'll use "workerList" to get all workers and find the specific rank
+        ZmqFileRequest request;
+        request.magic = ANARI_USD_MAGIC;
+        request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_GET_PROPERTY);  // 400 instead of 20
         request.request_id = generateRequestId();
-        request.target_rank = targetRank;
+        request.target_rank = -1;  // Request from broker, not specific rank
+        
+        // Request worker list (supported property)
+        request.setFilename("workerList");
+        request.chunk_size = 0;
 
-        MIDDLEWARE_LOG_INFO("Requesting worker status for rank %d (request_id: %u)", 
+        MIDDLEWARE_LOG_INFO("Requesting worker status for rank %d using 'workerList' property (request_id: %u)", 
                             targetRank, request.request_id);
 
+        std::lock_guard<std::recursive_mutex> lock(requestMutex);
+        
         // Send request
         if (!sendRequest(&request, sizeof(request), request.request_id)) {
-            MIDDLEWARE_LOG_ERROR("Failed to send worker status request");
+            MIDDLEWARE_LOG_ERROR("Failed to send worker status property request");
             return false;
         }
+
+        connectionStats.totalRequestsSent.fetch_add(1);
 
         // Wait for response
         if (!waitForResponse(request.request_id, timeoutMs)) {
-            MIDDLEWARE_LOG_ERROR("Timeout waiting for worker status response");
+            MIDDLEWARE_LOG_ERROR("Timeout waiting for worker status property response");
             return false;
         }
 
-        // Receive response
-        ZmqWorkerStatusResponse response;
-        if (!receiveResponse(&response, sizeof(response), timeoutMs)) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive worker status response");
+        // Receive property response (2 frames: empty delimiter + data)
+        // First frame: empty delimiter (should be 0 bytes)
+        zmq::message_t delimiterMsg;
+        auto delimResult = zmqSocket->recv(delimiterMsg, zmq::recv_flags::none);
+        if (!delimResult) {
+            MIDDLEWARE_LOG_ERROR("Failed to receive delimiter frame");
+            return false;
+        }
+        
+        // Second frame: binary property response
+        zmq::message_t responseMsg;
+        auto recvResult = zmqSocket->recv(responseMsg, zmq::recv_flags::none);
+        if (!recvResult) {
+            MIDDLEWARE_LOG_ERROR("Failed to receive property response");
             return false;
         }
 
+        // Validate response size
+        size_t responseSize = recvResult.value();
+        if (responseSize < sizeof(ZmqPropertyResponse)) {
+            MIDDLEWARE_LOG_ERROR("Property response too small: %zu bytes (expected at least %zu)",
+                                responseSize, sizeof(ZmqPropertyResponse));
+            return false;
+        }
+
+        // Parse property response
+        const ZmqPropertyResponse* response = reinterpret_cast<const ZmqPropertyResponse*>(responseMsg.data());
+        
         // Validate response
-        if (!MessageUtils::isValidMagic(response.magic)) {
-            MIDDLEWARE_LOG_ERROR("Invalid magic number in worker status response");
+        if (!MessageUtils::isValidMagic(response->magic)) {
+            MIDDLEWARE_LOG_ERROR("Invalid magic number in property response: 0x%08x", response->magic);
             return false;
         }
 
-        if (response.message_type != static_cast<uint32_t>(ZmqMessageType::RESP_WORKER_STATUS)) {
-            MIDDLEWARE_LOG_ERROR("Unexpected message type in worker status response: %u", 
-                                response.message_type);
+        if (response->message_type != static_cast<uint32_t>(ZmqMessageType::RESP_PROPERTY)) {
+            MIDDLEWARE_LOG_ERROR("Unexpected message type in property response: %u (expected RESP_PROPERTY=401)",
+                                response->message_type);
             return false;
         }
 
-        MIDDLEWARE_LOG_INFO("Received worker status response for rank %d: status=%u, hostname=%s", 
-                            response.source_rank, response.worker_status, response.getHostname().c_str());
+        if (response->request_id != request.request_id) {
+            MIDDLEWARE_LOG_WARNING("Property response request_id mismatch: expected %u, got %u",
+                                  request.request_id, response->request_id);
+        }
 
-        // Trigger callback
+        // Check if property request failed
+        if (response->property_type == -1) {
+            MIDDLEWARE_LOG_ERROR("Worker status property request failed (property_type = -1)");
+            MIDDLEWARE_LOG_ERROR("ANARI-USD broker may not support individual worker status queries");
+            return false;
+        }
+
+        MIDDLEWARE_LOG_INFO("Received property response for worker list request (property_type=%d)",
+                           response->property_type);
+
+        // Check if we got a string response (property_type = 1 for "workerList")
+        if (response->property_type != 1) {
+            MIDDLEWARE_LOG_ERROR("Expected string property type (1) for workerList, got %d", response->property_type);
+            return false;
+        }
+
+        // Parse worker list string: "rank:hostname:ib_address;rank:hostname:ib_address;..."
+        std::string workerList = response->getStringValue();
+        MIDDLEWARE_LOG_INFO("Worker list: %s", workerList.c_str());
+
+        // Parse to find specific rank
+        std::string foundHostname = "unknown";
+        std::string foundIp = "unknown";
+        
+        size_t start = 0;
+        while (start < workerList.size()) {
+            size_t end = workerList.find(';', start);
+            if (end == std::string::npos) end = workerList.size();
+            
+            std::string workerEntry = workerList.substr(start, end - start);
+            if (!workerEntry.empty()) {
+                // Parse "rank:hostname:ib_address"
+                size_t colon1 = workerEntry.find(':');
+                size_t colon2 = workerEntry.find(':', colon1 + 1);
+                
+                if (colon1 != std::string::npos && colon2 != std::string::npos) {
+                    std::string rankStr = workerEntry.substr(0, colon1);
+                    std::string hostname = workerEntry.substr(colon1 + 1, colon2 - colon1 - 1);
+                    std::string ip = workerEntry.substr(colon2 + 1);
+                    
+                    try {
+                        int rank = std::stoi(rankStr);
+                        if (rank == targetRank) {
+                            foundHostname = hostname;
+                            foundIp = ip;
+                            break;
+                        }
+                    } catch (const std::exception& e) {
+                        MIDDLEWARE_LOG_WARNING("Failed to parse rank from worker entry: %s", workerEntry.c_str());
+                    }
+                }
+            }
+            
+            start = end + 1;
+        }
+
+        // Trigger callback with available information
+        // Note: ANARI-USD broker doesn't provide worker status, GPU info, or heartbeat
+        // We return placeholder values for those fields
         if (callback) {
-            callback(response.source_rank, response.worker_status, 
-                     response.getHostname(), response.getGpuInfo(), response.last_heartbeat);
+            callback(targetRank, 1,  // status=1 (idle) - placeholder
+                     foundHostname,   // actual hostname if found
+                     "unknown",       // gpu_info - not provided by broker  
+                     0);              // last_heartbeat - not provided by broker
         }
 
         connectionStats.totalResponsesReceived.fetch_add(1);
@@ -1435,14 +1806,28 @@ bool AnariUsdClient::getWorkerStatusSync(int32_t targetRank,
 }
 
 bool AnariUsdClient::getTotalWorkerCountSync(uint32_t& totalCount, int timeoutMs) {
-    std::vector<std::tuple<int32_t, std::string, std::string>> workers;
+    // Use binary protocol instead of legacy string protocol
+    std::promise<uint32_t> promise;
+    std::future<uint32_t> future = promise.get_future();
     
-    if (!requestWorkerListString(workers, timeoutMs)) {
+    bool success = requestWorkerCount([&promise](uint32_t count) {
+        promise.set_value(count);
+    }, timeoutMs);
+    
+    if (!success) {
+        MIDDLEWARE_LOG_ERROR("Failed to retrieve worker count using binary protocol");
         return false;
     }
     
-    totalCount = static_cast<uint32_t>(workers.size());
-    MIDDLEWARE_LOG_INFO("Total worker count (including rank 0): %u", totalCount);
+    // Wait for the result
+    auto status = future.wait_for(std::chrono::milliseconds(timeoutMs));
+    if (status != std::future_status::ready) {
+        MIDDLEWARE_LOG_ERROR("Timeout waiting for worker count response");
+        return false;
+    }
+    
+    totalCount = future.get();
+    MIDDLEWARE_LOG_INFO("Total worker count: %u", totalCount);
     return true;
 }
 

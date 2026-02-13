@@ -12,6 +12,8 @@
 #include "Engine/GameInstance.h"
 #include "Kismet/GameplayStatics.h"
 #include "RealtimeMeshSimple.h" 
+#include "UObject/UObjectGlobals.h"  // For MakeUniqueObjectName
+#include "Misc/DateTime.h"  // For FDateTime
 #include <atomic>  // For std::atomic
 
 // Include the C-wrapper header
@@ -28,6 +30,10 @@ static std::atomic<UJUSYNCSubsystem*> g_SubsystemInstance = nullptr;
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
 
+// Thread-safe set for tracking processed files to avoid duplicates
+static TSet<FString> ProcessedFiles;
+static FCriticalSection ProcessedFilesCriticalSection;
+
 // Enhanced callback functions with detailed debugging
 extern "C" void FileReceivedCallback_Static(const CFileData* file_data)
 {
@@ -39,8 +45,21 @@ extern "C" void FileReceivedCallback_Static(const CFileData* file_data)
         return;
     }
     
+    FString Filename = UTF8_TO_TCHAR(file_data->filename);
+    
+    // Check for duplicate files (broadcast sends same file from multiple ranks)
+    {
+        FScopeLock Lock(&ProcessedFilesCriticalSection);
+        if (ProcessedFiles.Contains(Filename))
+        {
+            UE_LOG(LogJUSYNC, Log, TEXT("Skipping duplicate file: %s (already processed)"), *Filename);
+            return;
+        }
+        ProcessedFiles.Add(Filename);
+    }
+    
     UE_LOG(LogJUSYNC, Log, TEXT("ZMQ File Received:"));
-    UE_LOG(LogJUSYNC, Log, TEXT("  - Filename: %s"), UTF8_TO_TCHAR(file_data->filename));
+    UE_LOG(LogJUSYNC, Log, TEXT("  - Filename: %s"), *Filename);
     UE_LOG(LogJUSYNC, Log, TEXT("  - File Type: %s"), UTF8_TO_TCHAR(file_data->file_type));
     UE_LOG(LogJUSYNC, Log, TEXT("  - Data Size: %d bytes"), file_data->data_size);
     UE_LOG(LogJUSYNC, Log, TEXT("  - Hash: %s"), UTF8_TO_TCHAR(file_data->hash));
@@ -789,6 +808,89 @@ bool UJUSYNCSubsystem::GetGradientLineAsPNGBuffer(const TArray<uint8>& Buffer, T
     return false;
 }
 
+bool UJUSYNCSubsystem::GetPNGDimensions(const TArray<uint8>& Buffer, int32& OutWidth, int32& OutHeight, int32& OutChannels)
+{
+    OutWidth = 0;
+    OutHeight = 0;
+    OutChannels = 0;
+
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (!bIsInitialized.load())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Middleware not initialized"));
+        return false;
+    }
+    
+    int width = 0, height = 0, channels = 0;
+    
+    // Call C interface
+    int Result = GetPNGDimensions_C(Buffer.GetData(), Buffer.Num(), &width, &height, &channels);
+    
+    if (Result == 1 && width > 0 && height > 0 && channels > 0)
+    {
+        OutWidth = width;
+        OutHeight = height;
+        OutChannels = channels;
+        
+        UE_LOG(LogJUSYNC, Log, TEXT("PNG dimensions: %dx%d (%d channels)"), OutWidth, OutHeight, OutChannels);
+        return true;
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("Failed to get PNG dimensions"));
+    }
+#endif
+    return false;
+}
+
+bool UJUSYNCSubsystem::GetImageRowAsPNGBuffer(const TArray<uint8>& Buffer, int32 RowIndex, TArray<uint8>& OutPNGBuffer)
+{
+    OutPNGBuffer.Empty();
+
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (!bIsInitialized.load())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Middleware not initialized"));
+        return false;
+    }
+    
+    unsigned char* out_buffer = nullptr;
+    size_t out_size = 0;
+    
+    // Call C interface
+    int Result = GetImageRowAsPNGBuffer_C(Buffer.GetData(), Buffer.Num(), RowIndex, &out_buffer, &out_size);
+    
+    if (Result == 1 && out_buffer && out_size > 0)
+    {
+        // Copy to output array
+        OutPNGBuffer.SetNum(out_size);
+        FMemory::Memcpy(OutPNGBuffer.GetData(), out_buffer, out_size);
+        
+        // Free the C-allocated buffer
+        delete[] out_buffer;
+        
+        UE_LOG(LogJUSYNC, Log, TEXT("Extracted row %d as PNG buffer: %d bytes"), RowIndex, out_size);
+        return true;
+    }
+    else
+    {
+        if (out_buffer)
+        {
+            delete[] out_buffer;
+        }
+        UE_LOG(LogJUSYNC, Error, TEXT("Failed to extract row %d as PNG buffer"), RowIndex);
+    }
+#endif
+    return false;
+}
+
+void UJUSYNCSubsystem::ClearProcessedFiles()
+{
+    FScopeLock Lock(&ProcessedFilesCriticalSection);
+    ProcessedFiles.Empty();
+    UE_LOG(LogJUSYNC, Log, TEXT("Cleared processed files cache"));
+}
+
 void RecalculateNormals(FJUSYNCMeshData& MeshData)
 {
     if (MeshData.Vertices.Num() == 0 || MeshData.Triangles.Num() == 0)
@@ -1114,12 +1216,49 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(const FJUSYNCMeshDa
     FActorSpawnParameters SpawnParams;
     SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
     
+    // Extract rank from filename for actor naming
+    FString BaseActorName = TEXT("JUSYNC_Mesh");
+    int32 Rank = UJUSYNCBlueprintLibrary::ExtractRankFromFilename(MeshData.ElementName);
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("Extracted rank %d from filename: %s"), Rank, *MeshData.ElementName);
+    
+    if (Rank >= 0)
+    {
+        // Simple rank-based naming for Outliner visibility
+        // Use first few characters of filename hash for uniqueness
+        uint32 FilenameHash = GetTypeHash(MeshData.ElementName);
+        int32 ShortHash = FilenameHash % 10000; // 4-digit hash
+        
+        // Add timestamp for additional uniqueness
+        static int32 Counter = 0;
+        Counter++;
+        FString Timestamp = FString::Printf(TEXT("%d"), FDateTime::Now().GetTicks() % 1000000);
+        
+        BaseActorName = FString::Printf(TEXT("Rank_%d_%04d_%s_%d"), Rank, ShortHash, *Timestamp, Counter);
+        UE_LOG(LogJUSYNC, Log, TEXT("Using rank-based actor name: %s"), *BaseActorName);
+    }
+    else
+    {
+        // Fallback to element name if rank not found
+        BaseActorName = MeshData.ElementName;
+        UE_LOG(LogJUSYNC, Warning, TEXT("Rank not found in filename, using element name: %s"), *BaseActorName);
+    }
+    
+    // Generate unique actor name to avoid conflicts
+    FName UniqueActorName = MakeUniqueObjectName(World, AActor::StaticClass(), FName(*BaseActorName));
+    
+    // Set the name in spawn parameters
+    SpawnParams.Name = UniqueActorName;
+    
     AActor* SpawnedActor = World->SpawnActor<AActor>(SpawnParams);
     if (!SpawnedActor)
     {
         UE_LOG(LogJUSYNC, Error, TEXT("Failed to spawn actor"));
         return nullptr;
     }
+    
+    // Actor already has the unique name from spawn parameters
+    UE_LOG(LogJUSYNC, Log, TEXT("Spawned actor with final name: %s (original base: %s)"), *SpawnedActor->GetName(), *BaseActorName);
 
     // ✅ CORRECTED: Create and set root component FIRST
     URealtimeMeshComponent* MeshComp = NewObject<URealtimeMeshComponent>(SpawnedActor);
@@ -1137,8 +1276,8 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(const FJUSYNCMeshDa
     {
         // ✅ CORRECTED: Verify the actual location after setting
         FVector ActualLocation = SpawnedActor->GetActorLocation();
-        FString Message = FString::Printf(TEXT("✅ RealtimeMesh spawned: %s at %s"), 
-                                        *MeshData.ElementName, *ActualLocation.ToString());
+        FString Message = FString::Printf(TEXT("✅ RealtimeMesh spawned: Rank %d - %s at %s"), 
+                                        Rank, *MeshData.ElementName, *ActualLocation.ToString());
         //DisplayDebugMessage(Message, 5.0f, FLinearColor::Green);
         UE_LOG(LogJUSYNC, Log, TEXT("%s"), *Message);
         return SpawnedActor;
@@ -1402,9 +1541,22 @@ bool UJUSYNCSubsystem::RequestFileListWithSizes(int32 TargetRank, int32 TimeoutM
 {
     FScopeLock Lock(&MiddlewareMutex);
     
+    // For broadcast requests (target_rank = -1), ensure minimum timeout
+    int32 AdjustedTimeoutMs = TimeoutMs;
+    if (TargetRank == -1) {
+        // Rank 0 has dual broker/worker role, needs more time
+        if (TimeoutMs < 15000) {
+            AdjustedTimeoutMs = 15000; // 15 seconds minimum for broadcast (16 workers including rank 0)
+            UE_LOG(LogJUSYNC, Warning, TEXT("Broadcast request detected: increasing timeout from %d ms to %d ms for 16 workers (including rank 0)"), 
+                   TimeoutMs, AdjustedTimeoutMs);
+        }
+        // Additional debug for rank 0 inclusion
+        UE_LOG(LogJUSYNC, Log, TEXT("Broadcast expecting responses from 16 workers (ranks 0-15), rank 0 has dual broker/worker role"));
+    }
+    
     UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING FILE LIST WITH SIZES FROM BROKER ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Target Rank: %d"), TargetRank);
-    UE_LOG(LogJUSYNC, Log, TEXT("Timeout: %d ms"), TimeoutMs);
+    UE_LOG(LogJUSYNC, Log, TEXT("Timeout: %d ms (adjusted from %d ms)"), AdjustedTimeoutMs, TimeoutMs);
     
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (!bIsInitialized.load())
@@ -1424,7 +1576,7 @@ bool UJUSYNCSubsystem::RequestFileListWithSizes(int32 TargetRank, int32 TimeoutM
     size_t FileCount = 0;
     
     UE_LOG(LogJUSYNC, Log, TEXT("Calling RequestFileListWithSizes_C..."));
-    int Result = RequestFileListWithSizes_C(TargetRank, &FileList, &FileSizes, &FileCount, TimeoutMs);
+    int Result = RequestFileListWithSizes_C(TargetRank, &FileList, &FileSizes, &FileCount, AdjustedTimeoutMs);
     
     UE_LOG(LogJUSYNC, Log, TEXT("RequestFileListWithSizes_C returned: %d, FileCount: %d"), Result, FileCount);
     
@@ -1456,6 +1608,87 @@ bool UJUSYNCSubsystem::RequestFileListWithSizes(int32 TargetRank, int32 TimeoutM
         if (FileList || FileSizes)
         {
             FreeFileListWithSizes_C(FileList, FileSizes, FileCount);
+        }
+    }
+#endif
+    return false;
+}
+
+bool UJUSYNCSubsystem::RequestFileListWithSizesAndRanks(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles, TArray<int64>& OutSizes, TArray<int32>& OutRanks)
+{
+    FScopeLock Lock(&MiddlewareMutex);
+    
+    // For broadcast requests (target_rank = -1), ensure minimum timeout
+    int32 AdjustedTimeoutMs = TimeoutMs;
+    if (TargetRank == -1) {
+        // Rank 0 has dual broker/worker role, needs more time
+        if (TimeoutMs < 15000) {
+            AdjustedTimeoutMs = 15000; // 15 seconds minimum for broadcast (16 workers including rank 0)
+            UE_LOG(LogJUSYNC, Warning, TEXT("Broadcast request detected: increasing timeout from %d ms to %d ms for 16 workers (including rank 0)"), 
+                   TimeoutMs, AdjustedTimeoutMs);
+        }
+        // Additional debug for rank 0 inclusion
+        UE_LOG(LogJUSYNC, Log, TEXT("Broadcast expecting responses from 16 workers (ranks 0-15), rank 0 has dual broker/worker role"));
+    }
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING FILE LIST WITH SIZES AND RANKS FROM BROKER ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Target Rank: %d"), TargetRank);
+    UE_LOG(LogJUSYNC, Log, TEXT("Timeout: %d ms (adjusted from %d ms)"), AdjustedTimeoutMs, TimeoutMs);
+    
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (!bIsInitialized.load())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request file list - middleware not initialized"));
+        return false;
+    }
+    
+    if (!IsBrokerConnected())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request file list - not connected to broker"));
+        return false;
+    }
+    
+    char** FileList = nullptr;
+    uint64_t* FileSizes = nullptr;
+    int32_t* FileRanks = nullptr;
+    size_t FileCount = 0;
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("Calling RequestFileListWithSizesAndRanks_C..."));
+    int Result = RequestFileListWithSizesAndRanks_C(TargetRank, &FileList, &FileSizes, &FileRanks, &FileCount, AdjustedTimeoutMs);
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("RequestFileListWithSizesAndRanks_C returned: %d, FileCount: %d"), Result, FileCount);
+    
+    if (Result == 1 && FileList && FileSizes && FileRanks && FileCount > 0)
+    {
+        OutFiles.Empty();
+        OutSizes.Empty();
+        OutRanks.Empty();
+        OutFiles.Reserve(FileCount);
+        OutSizes.Reserve(FileCount);
+        OutRanks.Reserve(FileCount);
+        
+        for (size_t i = 0; i < FileCount; ++i)
+        {
+            if (FileList[i])
+            {
+                OutFiles.Add(FString(UTF8_TO_TCHAR(FileList[i])));
+                OutSizes.Add(static_cast<int64>(FileSizes[i]));
+                OutRanks.Add(static_cast<int32>(FileRanks[i]));
+            }
+        }
+        
+        // Free C memory
+        FreeFileListWithSizesAndRanks_C(FileList, FileSizes, FileRanks, FileCount);
+        
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved %d files with sizes and ranks from broker"), OutFiles.Num());
+        return true;
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to request file list with sizes and ranks (Result: %d)"), Result);
+        if (FileList || FileSizes || FileRanks)
+        {
+            FreeFileListWithSizesAndRanks_C(FileList, FileSizes, FileRanks, FileCount);
         }
     }
 #endif

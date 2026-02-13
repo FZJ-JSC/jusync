@@ -118,8 +118,8 @@ public:
     // File request methods
     bool requestFileList(int32_t targetRank, FileListCallback callback, int timeoutMs = 10000);
     bool requestFileListWithSizes(int32_t targetRank, FileListWithSizesCallback callback, int timeoutMs = 10000);
-    bool requestFile(const std::string& filename, int32_t targetRank, 
-                     FileChunkCallback chunkCallback, 
+    bool requestFile(const std::string& filename, int32_t targetRank,
+                     FileChunkCallback chunkCallback,
                      FileCompleteCallback completeCallback,
                      ErrorCallback errorCallback = nullptr,
                      int timeoutMs = 30000);
@@ -172,7 +172,7 @@ private:
     bool receiveResponse(void* buffer, size_t size, int timeoutMs);
 
     // Response handling
-    bool handleFileChunkResponse(const ZmqFileChunk& chunk, 
+    bool handleFileChunkResponse(const ZmqFileChunk& chunk,
                                   const std::vector<uint8_t>& chunkData,
                                   FileChunkCallback chunkCallback);
     bool handleFileCompleteResponse(const ZmqFileComplete& complete,
@@ -181,8 +181,8 @@ private:
                                  const std::vector<uint8_t>& data,
                                  FileListCallback callback);
     bool handleFileListWithSizesResponse(const ZmqFileListResponse& list,
-                                          const std::vector<uint8_t>& data,
-                                          FileListWithSizesCallback callback);
+                                           const std::vector<uint8_t>& data,
+                                           FileListWithSizesCallback callback);
     bool handleErrorResponse(const ZmqErrorResponse& error,
                              ErrorCallback errorCallback);
 
