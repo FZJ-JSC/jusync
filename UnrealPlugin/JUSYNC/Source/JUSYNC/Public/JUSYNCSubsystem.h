@@ -10,10 +10,16 @@
 #include "MaterialDomain.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
+#include "Containers/Map.h"
+#include "UObject/SoftObjectPtr.h"
+#include <functional>
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
 #include "AnariUsdMiddleware.h"
 #endif
+
+// Forward declaration to avoid circular dependency
+class UJUSYNCBlueprintLibrary;
 
 #include "JUSYNCSubsystem.generated.h"
 
@@ -110,6 +116,31 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Texture")
     UTexture2D* CreateUETextureFromJUSYNC(const FJUSYNCTextureData& TextureData);
 
+    // Material Caching
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Materials")
+    void PreloadCommonMaterials();
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Materials")
+    UMaterialInterface* GetCachedMaterial(const FString& MaterialPath);
+
+    // Dynamic Material Creation
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Materials|Async")
+    void CreateMaterialFromTexture_Async(UTexture2D* Texture, URealtimeMeshComponent* TargetComponent);
+
+    // Async Material Creation with Return (for batch spawning)
+    // Internal implementation - uses standard delegate
+    void CreateMaterialFromTexture_Async_Return_Internal(
+        UTexture2D* Texture,
+        UMaterialInterface* BaseMaterial,
+        FName TextureParameterName,
+        std::function<void(UMaterialInstanceDynamic*)> OnMaterialCreated);
+
+    // Async Mesh Processing
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Mesh|Async")
+    void CreateRealtimeMeshFromJUSYNC_Async(
+        const FJUSYNCMeshData& MeshData,
+        URealtimeMeshComponent* RealtimeMeshComponent);
+
     // Callback handlers for Blueprint Library
     UFUNCTION()
     void HandleFileReceivedForLibrary(const FJUSYNCFileData& FileData);
@@ -157,6 +188,22 @@ public:
       
 
 private:
+    // Helper functions for async processing
+    struct FProcessedMeshData
+    {
+        FString ElementName;
+        TArray<FVector3f> Positions;
+        TArray<FVector3f> Normals;
+        TArray<FVector2DHalf> UVs;
+        TArray<FColor> Colors;
+        TArray<int32> Triangles;
+        int32 FinalVertexCount;
+        int32 FinalTriCount;
+    };
+
+    FProcessedMeshData ProcessMeshDataCPU(const FJUSYNCMeshData& MeshData);
+    void ApplyProcessedMeshToComponent(const FProcessedMeshData& ProcessedData, URealtimeMeshComponent* RealtimeMeshComponent);
+
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     TUniquePtr<anari_usd_middleware::AnariUsdMiddleware> Middleware;
 
@@ -172,4 +219,8 @@ private:
 
     mutable FCriticalSection MiddlewareMutex;
     std::atomic<bool> bIsInitialized{false};
+
+    // Material caching
+    TMap<FString, TSoftObjectPtr<UMaterialInterface>> MaterialCache;
+    mutable FCriticalSection MaterialCacheMutex;
 };

@@ -180,6 +180,43 @@ public:
     static bool CreateRealtimeMeshFromJUSYNC(const FJUSYNCMeshData& MeshData, 
                                              URealtimeMeshComponent* RealtimeMeshComponent);
 
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh|Async", CallInEditor, 
+                meta = (AdvancedDisplay = "1", ToolTip = "Creates mesh using background threads for better performance"))
+    static void CreateRealtimeMeshFromJUSYNC_Async(const FJUSYNCMeshData& MeshData, 
+                                                   URealtimeMeshComponent* RealtimeMeshComponent);
+
+    // ========== ASYNC MATERIAL CREATION ==========
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Materials|Async", CallInEditor,
+                meta = (ToolTip = "Creates dynamic material from texture and applies it to mesh component using background threads"))
+    static void CreateMaterialFromTexture_Async(UTexture2D* Texture,
+                                                URealtimeMeshComponent* TargetComponent);
+
+    // Async material creation that returns the material (for batch spawning)
+    DECLARE_DYNAMIC_DELEGATE_OneParam(FOnMaterialCreated, UMaterialInstanceDynamic*, CreatedMaterial);
+    
+    // Original function for backward compatibility
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh|Async", CallInEditor,
+                meta = (ToolTip = "Creates dynamic material from texture and returns it via delegate for batch spawning", AutoCreateRefTerm = "OnMaterialCreated"))
+    static void CreateMaterialFromTexture_Async_Return(
+        UTexture2D* Texture,
+        const FOnMaterialCreated& OnMaterialCreated);
+
+    // Extended version with configurable parameters
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh|Async", CallInEditor,
+                meta = (ToolTip = "Creates dynamic material from texture using specified base material and texture parameter, returns via delegate", AutoCreateRefTerm = "OnMaterialCreated", DisplayName = "Create Material From Texture Async Return (Extended)"))
+    static void CreateMaterialFromTexture_Async_Return_Extended(
+        UTexture2D* Texture,
+        UMaterialInterface* BaseMaterial,
+        FName TextureParameterName,
+        const FOnMaterialCreated& OnMaterialCreated);
+
+    // ========== ASYNC BATCH SPAWNING ==========
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh|Async", CallInEditor,
+                meta = (ToolTip = "Batch creates meshes with async processing and frame budget management"))
+    static void BatchCreateRealtimeMeshesFromJUSYNC_Async(const TArray<FJUSYNCMeshData>& MeshDataArray,
+                                                          const TArray<URealtimeMeshComponent*>& MeshComponents,
+                                                          int32 MaxMeshesPerFrame = 10);
+
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh", CallInEditor)
     static bool BatchCreateRealtimeMeshesFromJUSYNC(const TArray<FJUSYNCMeshData>& MeshDataArray, 
                                                     const TArray<URealtimeMeshComponent*>& MeshComponents);
@@ -370,4 +407,65 @@ private:
 			int32 BatchSize,
 			float BatchDelay
 		);
+
+	// ========== BENCHMARKING FUNCTIONS ==========
+	
+	/**
+	 * Start benchmarking for a specific test
+	 */
+	UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
+	static void StartBenchmark(const FString& TestName, const FJUSYNCBenchmarkConfig& Config);
+
+	/**
+	 * End benchmarking and save results
+	 */
+	UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
+	static void EndBenchmark();
+
+	/**
+	 * Save all benchmark results to CSV
+	 */
+	UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
+	static void SaveAllBenchmarkResultsToCSV(const FString& OutputDirectory);
+
+	/**
+	 * Clear all benchmark results
+	 */
+	UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
+	static void ClearBenchmarkResults();
+
+	/**
+	 * Get current benchmark results
+	 */
+	UFUNCTION(BlueprintPure, Category = "JUSYNC|Benchmarking")
+	static TArray<FJUSYNCBenchmarkResult> GetBenchmarkResults();
+
+	/**
+	 * Batch spawn with benchmarking (wraps BatchSpawnRealtimeMeshesWithMaterial)
+	 */
+	UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning|Benchmarked", CallInEditor)
+	static TArray<AActor*> BatchSpawnRealtimeMeshesWithMaterial_Benchmarked(
+		const TArray<FJUSYNCMeshData>& MeshDataArray,
+		const TArray<FVector>& SpawnLocations,
+		const TArray<FRotator>& SpawnRotations,
+		UMaterialInterface* Material,
+		const FJUSYNCBenchmarkConfig& Config,
+		bool bUseUniformScaling = false,
+		FVector OuterBoundingBoxSize = FVector::ZeroVector,
+		bool bPreserveAspectRatio = true,
+		bool bUseAsyncSpawning = false,
+		int32 BatchSize = 5,
+		float BatchDelay = 0.016f
+	);
+
+private:
+	// Benchmark data storage
+	static TArray<FJUSYNCBenchmarkResult> BenchmarkResults;
+	static FString CurrentBenchmarkTest;
+	static FJUSYNCBenchmarkConfig CurrentBenchmarkConfig;
+	static bool bIsBenchmarking;
+
+	// Benchmark helper functions
+	static void RecordBenchmarkResult(const FJUSYNCBenchmarkResult& Result);
+	static FJUSYNCBenchmarkResult CreateBenchmarkResult(const FString& TestName, float TotalTimeMs, int32 TriangleCount, int32 VertexCount, int64 RAMBefore, int64 RAMAfter, int32 ActorCount, int32 ErrorCount);
 };

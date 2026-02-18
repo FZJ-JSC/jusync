@@ -9,7 +9,9 @@
 #include "RealtimeMeshComponent.h"
 #include "Engine/GameInstance.h"
 #include "Misc/FileHelper.h"
-#include "Misc/Paths.h"  
+#include "Misc/Paths.h"
+#include "HAL/PlatformTime.h"
+#include "HAL/PlatformProcess.h"
 
 // Static member initialization
 TArray<FJUSYNCFileData> UJUSYNCBlueprintLibrary::ReceivedFiles;
@@ -22,6 +24,12 @@ FCriticalSection UJUSYNCBlueprintLibrary::LastFileListMutex;
 TArray<FString> UJUSYNCBlueprintLibrary::LastFileListWithSizes_Names;
 TArray<int64> UJUSYNCBlueprintLibrary::LastFileListWithSizes_Sizes;
 FCriticalSection UJUSYNCBlueprintLibrary::LastFileListWithSizesMutex;
+
+// Benchmarking static member initialization
+TArray<FJUSYNCBenchmarkResult> UJUSYNCBlueprintLibrary::BenchmarkResults;
+FString UJUSYNCBlueprintLibrary::CurrentBenchmarkTest = TEXT("");
+FJUSYNCBenchmarkConfig UJUSYNCBlueprintLibrary::CurrentBenchmarkConfig;
+bool UJUSYNCBlueprintLibrary::bIsBenchmarking = false;
 
 // ========== CONNECTION MANAGEMENT ==========
 
@@ -1242,6 +1250,31 @@ bool UJUSYNCBlueprintLibrary::CreateRealtimeMeshFromJUSYNC(const FJUSYNCMeshData
     return bResult;
 }
 
+void UJUSYNCBlueprintLibrary::CreateRealtimeMeshFromJUSYNC_Async(const FJUSYNCMeshData& MeshData, URealtimeMeshComponent* RealtimeMeshComponent)
+{
+    if (!MeshData.IsValid())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("Invalid mesh data provided for async creation"));
+        return;
+    }
+
+    if (!RealtimeMeshComponent)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("RealtimeMeshComponent is null for async creation"));
+        return;
+    }
+
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available for async creation"));
+        return;
+    }
+
+    UE_LOG(LogJUSYNC, Log, TEXT("Starting async mesh creation for: %s"), *MeshData.ElementName);
+    Subsystem->CreateRealtimeMeshFromJUSYNC_Async(MeshData, RealtimeMeshComponent);
+}
+
 bool UJUSYNCBlueprintLibrary::BatchCreateRealtimeMeshesFromJUSYNC(const TArray<FJUSYNCMeshData>& MeshDataArray, const TArray<URealtimeMeshComponent*>& MeshComponents)
 {
     if (MeshDataArray.Num() != MeshComponents.Num())
@@ -1271,8 +1304,31 @@ bool UJUSYNCBlueprintLibrary::BatchCreateRealtimeMeshesFromJUSYNC(const TArray<F
     FLinearColor Color = bAllSuccessful ? FLinearColor(0.0f, 1.0f, 1.0f, 1.0f) : FLinearColor::Yellow;
     //DisplayDebugMessage(Message, 5.0f, Color);
 
-    return bAllSuccessful;
-}
+      return bAllSuccessful;
+  }
+
+  void UJUSYNCBlueprintLibrary::BatchCreateRealtimeMeshesFromJUSYNC_Async(const TArray<FJUSYNCMeshData>& MeshDataArray, 
+                                                                          const TArray<URealtimeMeshComponent*>& MeshComponents,
+                                                                          int32 MaxMeshesPerFrame)
+  {
+      if (MeshDataArray.Num() != MeshComponents.Num())
+      {
+          UE_LOG(LogJUSYNC, Error, TEXT("Mesh data array and component array size mismatch"));
+          return;
+      }
+
+      UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+      if (!Subsystem)
+      {
+          UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available for async batch creation"));
+          return;
+      }
+
+      // Call the subsystem's batch function (it already has frame budget management built-in)
+      Subsystem->BatchCreateRealtimeMeshesFromJUSYNC(MeshDataArray, MeshComponents);
+      
+      UE_LOG(LogJUSYNC, Log, TEXT("Batch async mesh creation started for %d meshes"), MeshDataArray.Num());
+  }
 
 FJUSYNCRealtimeMeshData UJUSYNCBlueprintLibrary::ConvertToRealtimeMeshFormat(const FJUSYNCMeshData& StandardMesh)
 {
@@ -2304,67 +2360,87 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
         return TArray<AActor*>();
     }
 
-    // **ENHANCED SCALING LOGIC**
+    // **ENHANCED SCALING LOGIC WITH PER-MESH SCALING**
     TArray<FVector> FinalLocations = SpawnLocations;
-    FVector ScaleFactor = FVector::OneVector;
+    TArray<FVector> PerMeshScaleFactors;
+    PerMeshScaleFactors.Init(FVector::OneVector, MeshDataArray.Num());
     
     if (bUseUniformScaling && OuterBoundingBoxSize != FVector::ZeroVector)
     {
         UE_LOG(LogJUSYNC, Log, TEXT("🎯 Applying uniform scaling with bounding box: %s"),
                *OuterBoundingBoxSize.ToString());
-               
-        // **FIX: Handle single point scaling properly**
+                
+        // **FIX: Calculate scale factor PER MESH, not just from first mesh**
         if (SpawnLocations.Num() == 1)
         {
-            UE_LOG(LogJUSYNC, Log, TEXT("🔧 Single spawn point - calculating scale based on mesh bounds"));
+            UE_LOG(LogJUSYNC, Log, TEXT("🔧 Single spawn point - calculating scale per mesh based on individual bounds"));
             
-            // Calculate mesh extent from first mesh data
-            FVector MeshSize(40.0f, 40.0f, 40.0f); // Default fallback
-            if (MeshDataArray.Num() > 0 && MeshDataArray[0].Vertices.Num() > 0)
+            // Calculate scale factor for EACH mesh individually
+            for (int32 MeshIdx = 0; MeshIdx < MeshDataArray.Num(); ++MeshIdx)
             {
-                FBox MeshBounds(EForceInit::ForceInit);
-                for (const FVector& Vertex : MeshDataArray[0].Vertices)
+                FVector MeshSize(40.0f, 40.0f, 40.0f); // Default fallback
+                if (MeshDataArray[MeshIdx].Vertices.Num() > 0)
                 {
-                    MeshBounds += Vertex;
+                    FBox MeshBounds(EForceInit::ForceInit);
+                    for (const FVector& Vertex : MeshDataArray[MeshIdx].Vertices)
+                    {
+                        MeshBounds += Vertex;
+                    }
+                    MeshSize = MeshBounds.GetSize();
+                    UE_LOG(LogJUSYNC, Log, TEXT("📐 Mesh %d size from vertices: %s"), MeshIdx, *MeshSize.ToString());
                 }
-                MeshSize = MeshBounds.GetSize();
-                UE_LOG(LogJUSYNC, Log, TEXT("📐 Calculated mesh size from vertices: %s"), *MeshSize.ToString());
-            }
+                else
+                {
+                    UE_LOG(LogJUSYNC, Warning, TEXT("⚠️ Mesh %d has no vertices, using default size"), MeshIdx);
+                }
 
-            // Calculate scale factor for single point
-            if (bPreserveAspectRatio)
-            {
-                float MinScale = FMath::Min3(
-                    MeshSize.X > 0 ? OuterBoundingBoxSize.X / MeshSize.X : 1.0f,
-                    MeshSize.Y > 0 ? OuterBoundingBoxSize.Y / MeshSize.Y : 1.0f,
-                    MeshSize.Z > 0 ? OuterBoundingBoxSize.Z / MeshSize.Z : 1.0f
-                );
-                ScaleFactor = FVector(MinScale, MinScale, MinScale);
-            }
-            else
-            {
-                ScaleFactor = FVector(
-                    MeshSize.X > 0 ? OuterBoundingBoxSize.X / MeshSize.X : 1.0f,
-                    MeshSize.Y > 0 ? OuterBoundingBoxSize.Y / MeshSize.Y : 1.0f,
-                    MeshSize.Z > 0 ? OuterBoundingBoxSize.Z / MeshSize.Z : 1.0f
-                );
-            }
+                // Calculate scale factor for this mesh
+                if (bPreserveAspectRatio)
+                {
+                    float MinScale = FMath::Min3(
+                        MeshSize.X > 0 ? OuterBoundingBoxSize.X / MeshSize.X : 1.0f,
+                        MeshSize.Y > 0 ? OuterBoundingBoxSize.Y / MeshSize.Y : 1.0f,
+                        MeshSize.Z > 0 ? OuterBoundingBoxSize.Z / MeshSize.Z : 1.0f
+                    );
+                    PerMeshScaleFactors[MeshIdx] = FVector(MinScale, MinScale, MinScale);
+                }
+                else
+                {
+                    PerMeshScaleFactors[MeshIdx] = FVector(
+                        MeshSize.X > 0 ? OuterBoundingBoxSize.X / MeshSize.X : 1.0f,
+                        MeshSize.Y > 0 ? OuterBoundingBoxSize.Y / MeshSize.Y : 1.0f,
+                        MeshSize.Z > 0 ? OuterBoundingBoxSize.Z / MeshSize.Z : 1.0f
+                    );
+                }
 
-            UE_LOG(LogJUSYNC, Log, TEXT("🎯 Single point scale factor: %s (MeshSize: %s, TargetSize: %s)"),
-                   *ScaleFactor.ToString(), *MeshSize.ToString(), *OuterBoundingBoxSize.ToString());
+                UE_LOG(LogJUSYNC, Log, TEXT("🎯 Mesh %d scale factor: %s (MeshSize: %s, TargetSize: %s)"),
+                       MeshIdx, *PerMeshScaleFactors[MeshIdx].ToString(), *MeshSize.ToString(), *OuterBoundingBoxSize.ToString());
+            }
         }
         else
         {
             // Multi-point scaling using existing logic
+            FVector GlobalScaleFactor = FVector::OneVector;
             FinalLocations = CalculateScaledPositions(
                 SpawnLocations,
                 OuterBoundingBoxSize,
                 bPreserveAspectRatio,
-                ScaleFactor
+                GlobalScaleFactor
             );
+            
+            // Use same scale factor for all meshes in multi-point case
+            for (int32 MeshIdx = 0; MeshIdx < MeshDataArray.Num(); ++MeshIdx)
+            {
+                PerMeshScaleFactors[MeshIdx] = GlobalScaleFactor;
+            }
+            
+            UE_LOG(LogJUSYNC, Log, TEXT("📏 Global scale factor for multi-point: %s"), *GlobalScaleFactor.ToString());
         }
-
-        UE_LOG(LogJUSYNC, Log, TEXT("📏 Final scale factor: %s"), *ScaleFactor.ToString());
+    }
+    else
+    {
+        // No scaling - all scale factors remain (1,1,1)
+        UE_LOG(LogJUSYNC, Log, TEXT("📏 No uniform scaling applied"));
     }
 
     // Get subsystem and world
@@ -2382,15 +2458,32 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
         return TArray<AActor*>();
     }
 
-    // **ENHANCED SPAWNING LOGIC**
+    // **ENHANCED SPAWNING LOGIC WITH FRAME BUDGET MANAGEMENT**
     TArray<AActor*> SpawnedActors;
     SpawnedActors.Reserve(MeshDataArray.Num());
     int32 SuccessCount = 0;
 
     UE_LOG(LogJUSYNC, Log, TEXT("=== STARTING BATCH SPAWN ==="));
-    UE_LOG(LogJUSYNC, Log, TEXT("Meshes: %d, Uniform Scaling: %s, Scale Factor: %s"),
-           MeshDataArray.Num(), bUseUniformScaling ? TEXT("YES") : TEXT("NO"), *ScaleFactor.ToString());
+    UE_LOG(LogJUSYNC, Log, TEXT("Meshes: %d, Uniform Scaling: %s, Async: %s, Batch Size: %d, Batch Delay: %.3fs"),
+           MeshDataArray.Num(), bUseUniformScaling ? TEXT("YES") : TEXT("NO"),
+           bUseAsyncSpawning ? TEXT("YES") : TEXT("NO"), BatchSize, BatchDelay);
+    
+    // Log scaling info if enabled
+    if (bUseUniformScaling && OuterBoundingBoxSize != FVector::ZeroVector)
+    {
+        if (MeshDataArray.Num() > 0)
+        {
+            // Show first scale factor as example
+            UE_LOG(LogJUSYNC, Log, TEXT("📏 Scaling to bounding box: %s (First mesh scale: %s)"),
+                   *OuterBoundingBoxSize.ToString(),
+                   MeshDataArray.Num() > 0 ? *PerMeshScaleFactors[0].ToString() : TEXT("N/A"));
+        }
+    }
 
+    // Frame budget management for async spawning
+    int32 CurrentBatch = 0;
+    double StartTime = FPlatformTime::Seconds();
+    
     for (int32 i = 0; i < MeshDataArray.Num(); ++i)
     {
         // Process mesh data
@@ -2399,6 +2492,34 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
 
         UE_LOG(LogJUSYNC, Log, TEXT("🎯 Spawning mesh %d '%s' at location %s with rotation %s"),
                i, *ProcessedMeshData.ElementName, *FinalLocations[i].ToString(), *UERotation.ToString());
+        
+        // Frame budget management for async batch spawning
+        if (bUseAsyncSpawning && BatchSize > 0 && BatchDelay > 0)
+        {
+            CurrentBatch++;
+            
+            // Check if we've processed a full batch
+            if (CurrentBatch >= BatchSize)
+            {
+                double CurrentTime = FPlatformTime::Seconds();
+                double ElapsedTime = CurrentTime - StartTime;
+                
+                // If we're under the frame budget, yield to maintain frame rate
+                if (ElapsedTime < BatchDelay)
+                {
+                    float RemainingDelay = BatchDelay - ElapsedTime;
+                    UE_LOG(LogJUSYNC, Log, TEXT("⏱️ Batch %d complete, yielding for %.3fs to maintain frame rate"),
+                           i / BatchSize, RemainingDelay);
+                    
+                    // Small yield to maintain frame rate
+                    FPlatformProcess::Sleep(RemainingDelay);
+                }
+                
+                // Reset for next batch
+                CurrentBatch = 0;
+                StartTime = FPlatformTime::Seconds();
+            }
+        }
 
         // **FIXED ACTOR SPAWNING - Let engine auto-generate names**
         FActorSpawnParameters SpawnParams;
@@ -2422,8 +2543,9 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
         SpawnedActor->SetRootComponent(MeshComp);
         MeshComp->RegisterComponent();
 
-        // **ENHANCED TRANSFORM APPLICATION**
-        FTransform ActorTransform(UERotation, FinalLocations[i], ScaleFactor);
+        // **ENHANCED TRANSFORM APPLICATION WITH PER-MESH SCALING**
+        FVector MeshScaleFactor = PerMeshScaleFactors[i];
+        FTransform ActorTransform(UERotation, FinalLocations[i], MeshScaleFactor);
         SpawnedActor->SetActorTransform(ActorTransform);
 
         // **ENHANCED SCALING APPLICATION** - Multiple methods for reliability
@@ -2438,7 +2560,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
             {
                 UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot apply scaling: Actor %d has no root component"), i);
             }
-            else if (ScaleFactor == FVector::OneVector)
+            else if (MeshScaleFactor == FVector::OneVector)
             {
                 UE_LOG(LogJUSYNC, Warning, TEXT("⚠️ Scale factor is (1,1,1) for actor %d - no scaling applied"), i);
             }
@@ -2446,11 +2568,11 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
             {
                 // Always apply scaling when uniform scaling is enabled
                 // Method 1: Component-level scaling
-                MeshComp->SetWorldScale3D(ScaleFactor);
+                MeshComp->SetWorldScale3D(MeshScaleFactor);
                 // Method 2: Actor-level scaling (redundant but ensures it works)
-                SpawnedActor->SetActorScale3D(ScaleFactor);
+                SpawnedActor->SetActorScale3D(MeshScaleFactor);
                 // Method 3: Force transform update
-                SpawnedActor->SetActorTransform(FTransform(UERotation, FinalLocations[i], ScaleFactor));
+                SpawnedActor->SetActorTransform(FTransform(UERotation, FinalLocations[i], MeshScaleFactor));
                 // Method 4: Mark for render state update
                 MeshComp->MarkRenderStateDirty();
 
@@ -2458,16 +2580,16 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
                 FVector ActualActorScale = SpawnedActor->GetActorScale3D();
                 FVector ActualComponentScale = MeshComp->GetComponentScale();
                 
-                if (ActualActorScale.Equals(ScaleFactor, 0.01f) && ActualComponentScale.Equals(ScaleFactor, 0.01f))
+                if (ActualActorScale.Equals(MeshScaleFactor, 0.01f) && ActualComponentScale.Equals(MeshScaleFactor, 0.01f))
                 {
                     UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied scale %s to actor %d '%s' (Verified: Actor=%s, Component=%s)"),
-                           *ScaleFactor.ToString(), i, *ProcessedMeshData.ElementName,
+                           *MeshScaleFactor.ToString(), i, *ProcessedMeshData.ElementName,
                            *ActualActorScale.ToString(), *ActualComponentScale.ToString());
                 }
                 else
                 {
                     UE_LOG(LogJUSYNC, Error, TEXT("❌ Scaling mismatch for actor %d: Target=%s, Actor=%s, Component=%s"),
-                           i, *ScaleFactor.ToString(), 
+                           i, *MeshScaleFactor.ToString(),
                            *ActualActorScale.ToString(), *ActualComponentScale.ToString());
                 }
             }
@@ -2487,26 +2609,47 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
             UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied default material to mesh %d"), i);
         }
 
-        // **ENHANCED MESH CREATION**
-        bool bSuccess = Subsystem->CreateRealtimeMeshFromJUSYNC(ProcessedMeshData, MeshComp);
-        if (bSuccess)
+        // **ENHANCED MESH CREATION - WITH ASYNC SUPPORT**
+        bool bSuccess;
+        
+        if (bUseAsyncSpawning)
         {
+            // Use async mesh creation (doesn't block game thread)
+            Subsystem->CreateRealtimeMeshFromJUSYNC_Async(ProcessedMeshData, MeshComp);
+            bSuccess = true; // Async assumes success, errors handled internally
+            
+            UE_LOG(LogJUSYNC, Log, TEXT("🔄 Using ASYNC mesh creation for mesh %d"), i);
+            
             SuccessCount++;
             SpawnedActors.Add(SpawnedActor);
-
-            // **FINAL VERIFICATION**
-            FVector ActualLocation = SpawnedActor->GetActorLocation();
-            FVector ActualScale = SpawnedActor->GetActorScale3D();
-            FRotator ActualRotation = SpawnedActor->GetActorRotation();
-
-            UE_LOG(LogJUSYNC, Log, TEXT("✅ Successfully spawned mesh %d at %s (Scale: %s, Rotation: %s)"),
-                   i, *ActualLocation.ToString(), *ActualScale.ToString(), *ActualRotation.ToString());
+            
+            // For async, we can't verify immediately, but log the spawn
+            UE_LOG(LogJUSYNC, Log, TEXT("✅ Async mesh creation started for mesh %d at %s"),
+                   i, *FinalLocations[i].ToString());
         }
         else
         {
-            UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to create RealtimeMesh for actor %d, destroying"), i);
-            SpawnedActor->Destroy();
-            SpawnedActors.Add(nullptr);
+            // Use synchronous mesh creation (original behavior)
+            bSuccess = Subsystem->CreateRealtimeMeshFromJUSYNC(ProcessedMeshData, MeshComp);
+            if (bSuccess)
+            {
+                SuccessCount++;
+                SpawnedActors.Add(SpawnedActor);
+
+                // **FINAL VERIFICATION**
+                FVector ActualLocation = SpawnedActor->GetActorLocation();
+                FVector ActualScale = SpawnedActor->GetActorScale3D();
+                FRotator ActualRotation = SpawnedActor->GetActorRotation();
+
+                UE_LOG(LogJUSYNC, Log, TEXT("✅ Successfully spawned mesh %d at %s (Scale: %s, Rotation: %s)"),
+                       i, *ActualLocation.ToString(), *ActualScale.ToString(), *ActualRotation.ToString());
+            }
+            else
+            {
+                UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to create RealtimeMesh for actor %d, destroying"), i);
+                SpawnedActor->Destroy();
+                SpawnedActors.Add(nullptr);
+            }
         }
     }
 
@@ -2515,8 +2658,22 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
            SuccessCount, MeshDataArray.Num());
     if (bUseUniformScaling)
     {
-        UE_LOG(LogJUSYNC, Log, TEXT("🎯 Uniform scaling applied with factor: %s"),
-               *ScaleFactor.ToString());
+        // Log scaling summary
+        int32 ScaledCount = 0;
+        int32 NotScaledCount = 0;
+        for (const FVector& Scale : PerMeshScaleFactors)
+        {
+            if (Scale != FVector::OneVector)
+            {
+                ScaledCount++;
+            }
+            else
+            {
+                NotScaledCount++;
+            }
+        }
+        UE_LOG(LogJUSYNC, Log, TEXT("🎯 Uniform scaling applied: %d scaled, %d not scaled (scale factor 1,1,1)"),
+               ScaledCount, NotScaledCount);
     }
 
     // Display success message
@@ -2753,4 +2910,306 @@ static void ApplyEnhancedDefaultMaterial(URealtimeMeshComponent* MeshComp)
             MeshComp->SetMaterial(0, DynamicMaterial);
         }
     }
+}
+
+void UJUSYNCBlueprintLibrary::CreateMaterialFromTexture_Async(UTexture2D* Texture, URealtimeMeshComponent* TargetComponent)
+{
+    if (!Texture || !TargetComponent)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("CreateMaterialFromTexture_Async: Invalid texture or component"));
+        return;
+    }
+
+    // Get the subsystem
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("CreateMaterialFromTexture_Async: JUSYNC subsystem not available"));
+        return;
+    }
+
+    // Call the subsystem's async function
+    Subsystem->CreateMaterialFromTexture_Async(Texture, TargetComponent);
+}
+
+// Original implementation for backward compatibility
+void UJUSYNCBlueprintLibrary::CreateMaterialFromTexture_Async_Return(
+    UTexture2D* Texture,
+    const FOnMaterialCreated& OnMaterialCreated)
+{
+    // Call extended version with default parameters
+    CreateMaterialFromTexture_Async_Return_Extended(Texture, nullptr, NAME_None, OnMaterialCreated);
+}
+
+// Extended implementation with configurable parameters
+void UJUSYNCBlueprintLibrary::CreateMaterialFromTexture_Async_Return_Extended(
+    UTexture2D* Texture,
+    UMaterialInterface* BaseMaterial,
+    FName TextureParameterName,
+    const FOnMaterialCreated& OnMaterialCreated)
+{
+    if (!Texture)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("CreateMaterialFromTexture_Async_Return_Extended: Invalid texture"));
+        return;
+    }
+
+    // Get the subsystem
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("CreateMaterialFromTexture_Async_Return_Extended: JUSYNC subsystem not available"));
+        return;
+    }
+
+    UE_LOG(LogJUSYNC, Log, TEXT("Creating async material from texture (Base: %s, Param: %s)"),
+           BaseMaterial ? *BaseMaterial->GetName() : TEXT("Default"),
+           *TextureParameterName.ToString());
+
+    // Convert dynamic delegate to standard function and call internal implementation
+    Subsystem->CreateMaterialFromTexture_Async_Return_Internal(
+        Texture,
+        BaseMaterial,
+        TextureParameterName,
+        [OnMaterialCreated](UMaterialInstanceDynamic* CreatedMaterial)
+        {
+            if (OnMaterialCreated.IsBound())
+            {
+                OnMaterialCreated.Execute(CreatedMaterial);
+            }
+        });
+}
+
+// ========== BENCHMARKING FUNCTIONS ==========
+
+void UJUSYNCBlueprintLibrary::StartBenchmark(const FString& TestName, const FJUSYNCBenchmarkConfig& Config)
+{
+	if (bIsBenchmarking)
+	{
+		UE_LOG(LogJUSYNC, Warning, TEXT("Benchmark already in progress: %s"), *CurrentBenchmarkTest);
+		return;
+	}
+
+	CurrentBenchmarkTest = TestName;
+	CurrentBenchmarkConfig = Config;
+	bIsBenchmarking = true;
+
+	UE_LOG(LogJUSYNC, Log, TEXT("Started benchmark: %s"), *TestName);
+}
+
+void UJUSYNCBlueprintLibrary::EndBenchmark()
+{
+	if (!bIsBenchmarking)
+	{
+		UE_LOG(LogJUSYNC, Warning, TEXT("No benchmark in progress"));
+		return;
+	}
+
+	UE_LOG(LogJUSYNC, Log, TEXT("Ended benchmark: %s"), *CurrentBenchmarkTest);
+	
+	// Save results if output directory is specified
+	if (!CurrentBenchmarkConfig.OutputDirectory.IsEmpty())
+	{
+		SaveAllBenchmarkResultsToCSV(CurrentBenchmarkConfig.OutputDirectory);
+	}
+
+	CurrentBenchmarkTest = TEXT("");
+	CurrentBenchmarkConfig = FJUSYNCBenchmarkConfig();
+	bIsBenchmarking = false;
+}
+
+void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToCSV(const FString& OutputDirectory)
+{
+	if (BenchmarkResults.Num() == 0)
+	{
+		UE_LOG(LogJUSYNC, Warning, TEXT("No benchmark results to save"));
+		return;
+	}
+
+	// Create output directory
+	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+	FString OutputPath = OutputDirectory;
+	PlatformFile.CreateDirectoryTree(*OutputPath);
+
+	// Create filename
+	FString Filename = TEXT("benchmark_results");
+	if (CurrentBenchmarkConfig.bAppendTimestamp)
+	{
+		Filename += TEXT("_") + FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
+	}
+	Filename += TEXT(".csv");
+
+	FString CSVPath = OutputPath / Filename;
+
+	// Create CSV header
+	FString CSVData = TEXT("TestName,Timestamp,TotalTimeMs,TriangleCount,VertexCount,RAMBeforeBytes,RAMAfterBytes,FPS,FrameTimeMs,ActorCount,ErrorCount,SuccessRate\n");
+
+	// Add all results
+	for (const FJUSYNCBenchmarkResult& Result : BenchmarkResults)
+	{
+		CSVData += FString::Printf(TEXT("%s,%s,%.2f,%d,%d,%lld,%lld,%.1f,%.2f,%d,%d,%.1f\n"),
+			*Result.TestName,
+			*Result.Timestamp.ToString(TEXT("%Y-%m-%d %H:%M:%S")),
+			Result.TotalTimeMs,
+			Result.TriangleCount,
+			Result.VertexCount,
+			Result.RAMBeforeBytes,
+			Result.RAMAfterBytes,
+			Result.FPS,
+			Result.FrameTimeMs,
+			Result.ActorCount,
+			Result.ErrorCount,
+			Result.SuccessRate
+		);
+	}
+
+	// Save to file
+	if (FFileHelper::SaveStringToFile(CSVData, *CSVPath))
+	{
+		UE_LOG(LogJUSYNC, Log, TEXT("Benchmark results saved to: %s"), *CSVPath);
+	}
+	else
+	{
+		UE_LOG(LogJUSYNC, Error, TEXT("Failed to save benchmark results to: %s"), *CSVPath);
+	}
+}
+
+void UJUSYNCBlueprintLibrary::ClearBenchmarkResults()
+{
+	BenchmarkResults.Empty();
+	UE_LOG(LogJUSYNC, Log, TEXT("Cleared all benchmark results"));
+}
+
+TArray<FJUSYNCBenchmarkResult> UJUSYNCBlueprintLibrary::GetBenchmarkResults()
+{
+	return BenchmarkResults;
+}
+
+void UJUSYNCBlueprintLibrary::RecordBenchmarkResult(const FJUSYNCBenchmarkResult& Result)
+{
+	if (!bIsBenchmarking)
+	{
+		return;
+	}
+
+	BenchmarkResults.Add(Result);
+	UE_LOG(LogJUSYNC, Verbose, TEXT("Recorded benchmark result: %s - %.2f ms"), *Result.TestName, Result.TotalTimeMs);
+}
+
+FJUSYNCBenchmarkResult UJUSYNCBlueprintLibrary::CreateBenchmarkResult(
+	const FString& TestName, 
+	float TotalTimeMs, 
+	int32 TriangleCount, 
+	int32 VertexCount, 
+	int64 RAMBefore, 
+	int64 RAMAfter, 
+	int32 ActorCount, 
+	int32 ErrorCount)
+{
+	FJUSYNCBenchmarkResult Result;
+	Result.TestName = TestName;
+	Result.Timestamp = FDateTime::Now();
+	Result.TotalTimeMs = TotalTimeMs;
+	Result.TriangleCount = TriangleCount;
+	Result.VertexCount = VertexCount;
+	Result.RAMBeforeBytes = RAMBefore;
+	Result.RAMAfterBytes = RAMAfter;
+	Result.ActorCount = ActorCount;
+	Result.ErrorCount = ErrorCount;
+	Result.SuccessRate = (ErrorCount == 0) ? 100.0f : 0.0f;
+
+	// Get frame time/FPS
+	static uint64 LastFrameCycles = FPlatformTime::Cycles64();
+	uint64 CurrentFrameCycles = FPlatformTime::Cycles64();
+	Result.FrameTimeMs = FPlatformTime::ToMilliseconds(CurrentFrameCycles - LastFrameCycles);
+	LastFrameCycles = CurrentFrameCycles;
+	Result.FPS = (Result.FrameTimeMs > 0) ? 1000.0f / Result.FrameTimeMs : 0.0f;
+
+	return Result;
+}
+
+TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial_Benchmarked(
+	const TArray<FJUSYNCMeshData>& MeshDataArray,
+	const TArray<FVector>& SpawnLocations,
+	const TArray<FRotator>& SpawnRotations,
+	UMaterialInterface* Material,
+	const FJUSYNCBenchmarkConfig& Config,
+	bool bUseUniformScaling,
+	FVector OuterBoundingBoxSize,
+	bool bPreserveAspectRatio,
+	bool bUseAsyncSpawning,
+	int32 BatchSize,
+	float BatchDelay)
+{
+	// Start benchmark if enabled
+	bool bWasBenchmarking = bIsBenchmarking;
+	if (Config.bEnableBenchmarking && !bIsBenchmarking)
+	{
+		StartBenchmark(TEXT("BatchSpawnRealtimeMeshesWithMaterial"), Config);
+	}
+
+	// Measure RAM before
+	FPlatformMemoryStats StatsBefore = FPlatformMemory::GetStats();
+	int64 RAMBefore = StatsBefore.UsedPhysical;
+
+	// Measure time
+	double StartTime = FPlatformTime::Seconds();
+
+	// Call the original function
+	TArray<AActor*> SpawnedActors = BatchSpawnRealtimeMeshesWithMaterial(
+		MeshDataArray,
+		SpawnLocations,
+		SpawnRotations,
+		Material,
+		bUseUniformScaling,
+		OuterBoundingBoxSize,
+		bPreserveAspectRatio,
+		bUseAsyncSpawning,
+		BatchSize,
+		BatchDelay
+	);
+
+	double EndTime = FPlatformTime::Seconds();
+	float TotalTimeMs = (EndTime - StartTime) * 1000.0f;
+
+	// Measure RAM after
+	FPlatformMemoryStats StatsAfter = FPlatformMemory::GetStats();
+	int64 RAMAfter = StatsAfter.UsedPhysical;
+
+	// Calculate total triangle/vertex count
+	int32 TotalTriangleCount = 0;
+	int32 TotalVertexCount = 0;
+	for (const FJUSYNCMeshData& MeshData : MeshDataArray)
+	{
+		TotalTriangleCount += MeshData.GetTriangleCount();
+		TotalVertexCount += MeshData.GetVertexCount();
+	}
+
+	// Calculate error count
+	int32 ErrorCount = (SpawnedActors.Num() == MeshDataArray.Num()) ? 0 : 1;
+
+	// Record benchmark result
+	if (Config.bEnableBenchmarking)
+	{
+		FJUSYNCBenchmarkResult Result = CreateBenchmarkResult(
+			TEXT("BatchSpawnRealtimeMeshesWithMaterial"),
+			TotalTimeMs,
+			TotalTriangleCount,
+			TotalVertexCount,
+			RAMBefore,
+			RAMAfter,
+			SpawnedActors.Num(),
+			ErrorCount
+		);
+
+		RecordBenchmarkResult(Result);
+
+		// End benchmark if we started it
+		if (!bWasBenchmarking)
+		{
+			EndBenchmark();
+		}
+	}
+
+	return SpawnedActors;
 }

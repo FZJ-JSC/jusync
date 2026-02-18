@@ -14,6 +14,8 @@
 #include "RealtimeMeshSimple.h" 
 #include "UObject/UObjectGlobals.h"  // For MakeUniqueObjectName
 #include "Misc/DateTime.h"  // For FDateTime
+#include "HAL/PlatformTime.h"  // For FPlatformTime
+#include "HAL/PlatformProcess.h"  // For FPlatformProcess::Sleep
 #include <atomic>  // For std::atomic
 
 // Include the C-wrapper header
@@ -564,6 +566,8 @@ bool UJUSYNCSubsystem::StartReceiving()
     return false;
 }
 
+
+
 void UJUSYNCSubsystem::StopReceiving()
 {
     FScopeLock Lock(&MiddlewareMutex);
@@ -973,16 +977,17 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
     // Only apply vertex color material if no material is already set
     if (!RealtimeMeshComponent->GetMaterial(0))
     {
-        UMaterial* VertexColorMaterial = LoadObject<UMaterial>(nullptr, TEXT("/Game/Materials/M_VertexColor"));
+        // Use cached material instead of loading synchronously each time
+        UMaterialInterface* VertexColorMaterial = GetCachedMaterial(TEXT("/Game/Materials/M_VertexColor"));
         if (VertexColorMaterial)
         {
             RealtimeMeshComponent->SetMaterial(0, VertexColorMaterial);
-            UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied M_VertexColor material as fallback"));
+            UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied cached M_VertexColor material as fallback"));
         }
         else
         {
-            // Fallback to enhanced default material
-            UMaterial* DefaultMat = UMaterial::GetDefaultMaterial(MD_Surface);
+            // Fallback to enhanced default material (also cached)
+            UMaterialInterface* DefaultMat = GetCachedMaterial(TEXT("/Engine/EngineMaterials/DefaultMaterial"));
             if (DefaultMat)
             {
                 auto* DynMat = UMaterialInstanceDynamic::Create(DefaultMat, RealtimeMeshComponent);
@@ -1092,6 +1097,12 @@ bool UJUSYNCSubsystem::BatchCreateRealtimeMeshesFromJUSYNC(const TArray<FJUSYNCM
     bool bAllSuccessful = true;
     int32 SuccessCount = 0;
     
+    UE_LOG(LogJUSYNC, Log, TEXT("Starting batch mesh creation for %d meshes with frame budget management"), MeshDataArray.Num());
+    
+    // Frame budget management: process in chunks to avoid blocking the game thread
+    const int32 MeshesPerChunk = 5; // Process 5 meshes at a time
+    double StartTime = FPlatformTime::Seconds();
+    
     for (int32 i = 0; i < MeshDataArray.Num(); ++i)
     {
         if (CreateRealtimeMeshFromJUSYNC(MeshDataArray[i], MeshComponents[i]))
@@ -1103,9 +1114,27 @@ bool UJUSYNCSubsystem::BatchCreateRealtimeMeshesFromJUSYNC(const TArray<FJUSYNCM
             UE_LOG(LogJUSYNC, Warning, TEXT("Failed to create RealtimeMesh %d: %s"), i, *MeshDataArray[i].ElementName);
             bAllSuccessful = false;
         }
+        
+        // Yield to game thread every N meshes to maintain responsiveness
+        if ((i + 1) % MeshesPerChunk == 0 && i + 1 < MeshDataArray.Num())
+        {
+            double CurrentTime = FPlatformTime::Seconds();
+            double TimeSpent = CurrentTime - StartTime;
+            
+            UE_LOG(LogJUSYNC, Verbose, TEXT("Processed %d/%d meshes in %.3f seconds"), i + 1, MeshDataArray.Num(), TimeSpent);
+            
+            // Small yield to allow game thread to process other tasks
+            FPlatformProcess::Sleep(0.001f); // 1ms yield
+            
+            // Reset timer for next chunk
+            StartTime = FPlatformTime::Seconds();
+        }
     }
     
-    UE_LOG(LogJUSYNC, Log, TEXT("Batch RealtimeMesh Creation: %d/%d successful"), SuccessCount, MeshDataArray.Num());
+    double TotalTime = FPlatformTime::Seconds() - StartTime;
+    UE_LOG(LogJUSYNC, Log, TEXT("Batch RealtimeMesh Creation: %d/%d successful in %.3f seconds"), 
+           SuccessCount, MeshDataArray.Num(), TotalTime);
+    
     return bAllSuccessful;
 }
 
@@ -1186,6 +1215,365 @@ UTexture2D* UJUSYNCSubsystem::CreateUETextureFromJUSYNC(const FJUSYNCTextureData
     }
     
     return NewTexture;
+}
+
+// ========== MATERIAL CACHING IMPLEMENTATION ==========
+
+void UJUSYNCSubsystem::PreloadCommonMaterials()
+{
+    UE_LOG(LogJUSYNC, Log, TEXT("Preloading common materials for caching..."));
+    
+    TArray<FString> CommonMaterials = {
+        TEXT("/Game/Materials/M_VertexColor"),
+        TEXT("/Engine/BasicShapes/BasicShapeMaterial"),
+        TEXT("/Engine/EngineMaterials/DefaultMaterial")
+    };
+    
+    for (const FString& MaterialPath : CommonMaterials)
+    {
+        GetCachedMaterial(MaterialPath);
+    }
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("Preloaded %d common materials"), CommonMaterials.Num());
+}
+
+UMaterialInterface* UJUSYNCSubsystem::GetCachedMaterial(const FString& MaterialPath)
+{
+    FScopeLock Lock(&MaterialCacheMutex);
+    
+    // Check if already cached
+    if (TSoftObjectPtr<UMaterialInterface>* CachedMaterial = MaterialCache.Find(MaterialPath))
+    {
+        if (CachedMaterial->IsValid())
+        {
+            UE_LOG(LogJUSYNC, Verbose, TEXT("Using cached material: %s"), *MaterialPath);
+            return CachedMaterial->Get();
+        }
+    }
+    
+    // Load and cache the material
+    UE_LOG(LogJUSYNC, Log, TEXT("Loading and caching material: %s"), *MaterialPath);
+    UMaterialInterface* Material = LoadObject<UMaterialInterface>(nullptr, *MaterialPath);
+    
+    if (Material)
+    {
+        MaterialCache.Add(MaterialPath, Material);
+        UE_LOG(LogJUSYNC, Log, TEXT("Successfully cached material: %s"), *MaterialPath);
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Warning, TEXT("Failed to load material: %s"), *MaterialPath);
+    }
+    
+    return Material;
+}
+
+// ========== ASYNC MESH PROCESSING IMPLEMENTATION ==========
+
+UJUSYNCSubsystem::FProcessedMeshData UJUSYNCSubsystem::ProcessMeshDataCPU(const FJUSYNCMeshData& MeshData)
+{
+    UE_LOG(LogJUSYNC, Log, TEXT("Processing mesh data on background thread: %s"), *MeshData.ElementName);
+    
+    FProcessedMeshData ProcessedData;
+    ProcessedData.ElementName = MeshData.ElementName;
+    ProcessedData.FinalVertexCount = MeshData.Vertices.Num();
+    ProcessedData.FinalTriCount = MeshData.Triangles.Num() / 3;
+    
+    // Convert vertices to FVector3f (CPU-intensive but thread-safe)
+    ProcessedData.Positions.Reserve(ProcessedData.FinalVertexCount);
+    for (const FVector& Vertex : MeshData.Vertices)
+    {
+        ProcessedData.Positions.Add(FVector3f(Vertex));
+    }
+    
+    // Convert normals
+    ProcessedData.Normals.Reserve(ProcessedData.FinalVertexCount);
+    for (int32 i = 0; i < ProcessedData.FinalVertexCount; ++i)
+    {
+        FVector3f Normal = FVector3f(MeshData.Normals.IsValidIndex(i) ? MeshData.Normals[i] : FVector::UpVector);
+        ProcessedData.Normals.Add(Normal);
+    }
+    
+    // Convert UVs
+    ProcessedData.UVs.Reserve(ProcessedData.FinalVertexCount);
+    for (int32 i = 0; i < ProcessedData.FinalVertexCount; ++i)
+    {
+        if (MeshData.HasUVs() && MeshData.UVs.IsValidIndex(i))
+        {
+            ProcessedData.UVs.Add(FVector2DHalf(FVector2f(MeshData.UVs[i])));
+        }
+        else
+        {
+            ProcessedData.UVs.Add(FVector2DHalf(FVector2f::ZeroVector));
+        }
+    }
+    
+    // Convert colors
+    ProcessedData.Colors.Reserve(ProcessedData.FinalVertexCount);
+    for (int32 i = 0; i < ProcessedData.FinalVertexCount; ++i)
+    {
+        if (MeshData.HasVertexColors() && MeshData.VertexColors.IsValidIndex(i))
+        {
+            ProcessedData.Colors.Add(MeshData.VertexColors[i]);
+        }
+        else
+        {
+            ProcessedData.Colors.Add(FColor::White);
+        }
+    }
+    
+    // Copy triangles
+    ProcessedData.Triangles = MeshData.Triangles;
+    
+    UE_LOG(LogJUSYNC, Verbose, TEXT("Processed mesh data: %d vertices, %d triangles"), 
+           ProcessedData.FinalVertexCount, ProcessedData.FinalTriCount);
+    
+    return ProcessedData;
+}
+
+void UJUSYNCSubsystem::ApplyProcessedMeshToComponent(const FProcessedMeshData& ProcessedData, URealtimeMeshComponent* RealtimeMeshComponent)
+{
+    if (!RealtimeMeshComponent)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid component for applying processed mesh"));
+        return;
+    }
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("Applying processed mesh to component on game thread: %s"), *ProcessedData.ElementName);
+    
+    // **CRITICAL FIX: Store existing material BEFORE any mesh operations**
+    UMaterialInterface* ExistingMaterial = RealtimeMeshComponent->GetMaterial(0);
+    bool bHadExistingMaterial = (ExistingMaterial != nullptr);
+    
+    if (bHadExistingMaterial)
+    {
+        UE_LOG(LogJUSYNC, Log, TEXT("📦 Storing existing material for reapplication: %s"),
+               *ExistingMaterial->GetName());
+    }
+    
+    // Initialize RealtimeMesh (game-thread only)
+    URealtimeMeshSimple* RealtimeMesh = RealtimeMeshComponent->InitializeRealtimeMesh<URealtimeMeshSimple>();
+    if (!RealtimeMesh)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to initialize RealtimeMesh"));
+        return;
+    }
+    
+    RealtimeMesh->SetupMaterialSlot(0, TEXT("PrimaryMaterial"));
+    
+    // **ENHANCED MATERIAL HANDLING**
+    if (!bHadExistingMaterial)
+    {
+        // Only apply vertex color material if no material is already set
+        UMaterialInterface* VertexColorMaterial = GetCachedMaterial(TEXT("/Game/Materials/M_VertexColor"));
+        if (VertexColorMaterial)
+        {
+            RealtimeMeshComponent->SetMaterial(0, VertexColorMaterial);
+            UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied cached M_VertexColor material as fallback"));
+        }
+        else
+        {
+            // Fallback to enhanced default material (also cached)
+            UMaterialInterface* DefaultMat = GetCachedMaterial(TEXT("/Engine/EngineMaterials/DefaultMaterial"));
+            if (DefaultMat)
+            {
+                auto* DynMat = UMaterialInstanceDynamic::Create(DefaultMat, RealtimeMeshComponent);
+                DynMat->SetScalarParameterValue(TEXT("UseVertexColor"), 1.0f);
+                RealtimeMeshComponent->SetMaterial(0, DynMat);
+                UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied enhanced default material as fallback"));
+            }
+        }
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Using provided material (preserving texture material from Blueprint)"));
+    }
+    
+    // Create mesh streams from processed data
+    RealtimeMesh::FRealtimeMeshStreamSet Streams;
+    auto Builder = RealtimeMesh::TRealtimeMeshBuilderLocal<uint32>(Streams);
+    Builder.EnableTangents();
+    Builder.EnableTexCoords();
+    Builder.EnableColors();
+    Builder.EnablePolyGroups();
+    
+    // Add vertices from processed data (already converted to optimal formats)
+    for (int32 i = 0; i < ProcessedData.FinalVertexCount; ++i)
+    {
+        Builder.AddVertex(ProcessedData.Positions[i]);
+        Builder.SetNormal(i, ProcessedData.Normals[i]);
+        Builder.SetTexCoord(i, 0, ProcessedData.UVs[i]);
+        Builder.SetColor(i, ProcessedData.Colors[i]);
+    }
+    
+    // Add triangles from processed data
+    for (int32 Face = 0; Face < ProcessedData.FinalTriCount; ++Face)
+    {
+        int32 i0 = ProcessedData.Triangles[Face*3 + 0];
+        int32 i1 = ProcessedData.Triangles[Face*3 + 1];
+        int32 i2 = ProcessedData.Triangles[Face*3 + 2];
+        
+        if (i0 < ProcessedData.FinalVertexCount && i1 < ProcessedData.FinalVertexCount && i2 < ProcessedData.FinalVertexCount)
+        {
+            Builder.AddTriangle(i0, i1, i2);
+        }
+        else
+        {
+            UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid triangle %d: [%d,%d,%d] vs %d vertices"), 
+                   Face, i0, i1, i2, ProcessedData.FinalVertexCount);
+        }
+    }
+    
+    // Finalize the mesh section (game-thread only)
+    const FRealtimeMeshSectionGroupKey GroupKey = FRealtimeMeshSectionGroupKey::Create(0, TEXT("USDGroup"));
+    const FRealtimeMeshSectionKey SectionKey = FRealtimeMeshSectionKey::CreateForPolyGroup(GroupKey, 0);
+    RealtimeMesh->CreateSectionGroup(GroupKey, Streams);
+    FRealtimeMeshSectionConfig SectionConfig(0);
+    SectionConfig.bIsVisible = true;
+    SectionConfig.bCastsShadow = true;
+    RealtimeMesh->UpdateSectionConfig(SectionKey, SectionConfig, true);
+    
+    RealtimeMeshComponent->MarkRenderStateDirty();
+    
+    // **CRITICAL FIX: Reapply existing material after mesh operations**
+    if (bHadExistingMaterial && ExistingMaterial)
+    {
+        // Force reapplication of the material to ensure it's properly bound
+        RealtimeMeshComponent->SetMaterial(0, ExistingMaterial);
+        UE_LOG(LogJUSYNC, Log, TEXT("🔄 Reapplied existing material after mesh creation: %s"),
+               *ExistingMaterial->GetName());
+        
+        // Additional verification
+        UMaterialInterface* CurrentMaterial = RealtimeMeshComponent->GetMaterial(0);
+        if (CurrentMaterial == ExistingMaterial)
+        {
+            UE_LOG(LogJUSYNC, Log, TEXT("✅ Material verification passed: Material correctly applied"));
+        }
+        else
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("⚠️ Material verification failed: Expected %s, Got %s"),
+                   *ExistingMaterial->GetName(),
+                   CurrentMaterial ? *CurrentMaterial->GetName() : TEXT("NULL"));
+        }
+    }
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied processed mesh '%s' (%d verts, %d tris)"),
+           *ProcessedData.ElementName, ProcessedData.FinalVertexCount, ProcessedData.FinalTriCount);
+}
+
+void UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC_Async(
+    const FJUSYNCMeshData& MeshData,
+    URealtimeMeshComponent* RealtimeMeshComponent)
+{
+    if (!RealtimeMeshComponent || !MeshData.IsValid())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid input to CreateRealtimeMeshFromJUSYNC_Async"));
+        return;
+    }
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("🚀 Starting async mesh creation for: %s"), *MeshData.ElementName);
+    
+    // Make copies for the lambda captures
+    FJUSYNCMeshData MeshDataCopy = MeshData;
+    TWeakObjectPtr<URealtimeMeshComponent> ComponentPtr = RealtimeMeshComponent;
+    
+    // Step 1: Process CPU-intensive data on background thread
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this, MeshDataCopy, ComponentPtr]()
+    {
+        UE_LOG(LogJUSYNC, Verbose, TEXT("Processing mesh data on background thread: %s"), *MeshDataCopy.ElementName);
+        
+        // CPU-intensive processing (thread-safe)
+        FProcessedMeshData ProcessedData = ProcessMeshDataCPU(MeshDataCopy);
+        
+        // Step 2: Apply to component on game thread
+        AsyncTask(ENamedThreads::GameThread, [this, ProcessedData, ComponentPtr]()
+        {
+            if (ComponentPtr.IsValid())
+            {
+                ApplyProcessedMeshToComponent(ProcessedData, ComponentPtr.Get());
+                UE_LOG(LogJUSYNC, Log, TEXT("🎉 Async mesh creation complete: %s"), *ProcessedData.ElementName);
+            }
+            else
+            {
+                UE_LOG(LogJUSYNC, Warning, TEXT("Component no longer valid for async mesh creation"));
+            }
+        });
+    });
+}
+
+void UJUSYNCSubsystem::CreateMaterialFromTexture_Async_Return_Internal(
+    UTexture2D* Texture,
+    UMaterialInterface* BaseMaterial,
+    FName TextureParameterName,
+    std::function<void(UMaterialInstanceDynamic*)> OnMaterialCreated)
+{
+    if (!Texture)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("CreateMaterialFromTexture_Async_Return: Invalid texture"));
+        return;
+    }
+
+    // Use provided base material or fallback to cached material
+    UMaterialInterface* FinalBaseMaterial = BaseMaterial;
+    if (!FinalBaseMaterial)
+    {
+        FinalBaseMaterial = GetCachedMaterial(TEXT("/Game/Materials/M_BaseMaterial"));
+        if (!FinalBaseMaterial)
+        {
+            FinalBaseMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Engine/BasicShapes/BasicShapeMaterial"));
+        }
+    }
+
+    // Use provided texture parameter name or default to "BaseColor"
+    FName FinalTextureParameterName = TextureParameterName;
+    if (FinalTextureParameterName.IsNone())
+    {
+        FinalTextureParameterName = TEXT("BaseColor");
+    }
+
+    // Create weak pointers for thread safety
+    TWeakObjectPtr<UTexture2D> TexturePtr = Texture;
+    TWeakObjectPtr<UMaterialInterface> BaseMaterialPtr = FinalBaseMaterial;
+    
+    // Store the callback and parameter name for lambda capture
+    std::function<void(UMaterialInstanceDynamic*)> MaterialCreatedCallback = OnMaterialCreated;
+    FName CapturedTextureParameterName = FinalTextureParameterName;
+
+    // Process on background thread
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this, TexturePtr, BaseMaterialPtr, CapturedTextureParameterName, MaterialCreatedCallback]()
+    {
+        // On background thread: prepare material data (could do validation here)
+        // Switch back to game thread for actual material creation
+        AsyncTask(ENamedThreads::GameThread, [this, TexturePtr, BaseMaterialPtr, CapturedTextureParameterName, MaterialCreatedCallback]()
+        {
+            if (!TexturePtr.IsValid() || !BaseMaterialPtr.IsValid())
+            {
+                UE_LOG(LogJUSYNC, Error, TEXT("CreateMaterialFromTexture_Async_Return: Objects no longer valid"));
+                return;
+            }
+
+            // Create dynamic material instance
+            UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(BaseMaterialPtr.Get(), nullptr);
+            if (DynamicMaterial)
+            {
+                // Apply the texture to the material using the specified parameter name
+                DynamicMaterial->SetTextureParameterValue(CapturedTextureParameterName, TexturePtr.Get());
+                
+                UE_LOG(LogJUSYNC, Log, TEXT("✅ Created dynamic material from texture (Base: %s, Param: %s)"),
+                       *BaseMaterialPtr->GetName(), *CapturedTextureParameterName.ToString());
+                
+                // Call the callback with the created material
+                if (MaterialCreatedCallback)
+                {
+                    MaterialCreatedCallback(DynamicMaterial);
+                }
+            }
+            else
+            {
+                UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to create dynamic material instance"));
+            }
+        });
+    });
 }
 
 // ========== REALTIMEMESH SPAWNING IMPLEMENTATION ==========
@@ -2019,6 +2407,8 @@ bool UJUSYNCSubsystem::RequestTotalWorkerCount(int32 TimeoutMs, int32& OutTotalC
     return false;
 }
 
+
+
 bool UJUSYNCSubsystem::RequestWorkerCountExcludingRank0(int32 TimeoutMs, int32& OutWorkerCount)
 {
     FScopeLock Lock(&MiddlewareMutex);
@@ -2060,3 +2450,59 @@ bool UJUSYNCSubsystem::RequestWorkerCountExcludingRank0(int32 TimeoutMs, int32& 
 }
 
 
+
+
+  
+void UJUSYNCSubsystem::CreateMaterialFromTexture_Async(UTexture2D* Texture, URealtimeMeshComponent* TargetComponent)
+{
+    if (!Texture || !TargetComponent)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("CreateMaterialFromTexture_Async: Invalid texture or component"));
+        return;
+    }
+
+    // Create weak pointers for thread safety
+    TWeakObjectPtr<UTexture2D> TexturePtr = Texture;
+    TWeakObjectPtr<URealtimeMeshComponent> ComponentPtr = TargetComponent;
+
+    // Process on background thread
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this, TexturePtr, ComponentPtr]()
+    {
+        // On background thread: prepare material data
+        // Get base material from cache
+        UMaterialInterface* BaseMaterial = GetCachedMaterial(TEXT("/Game/Materials/M_BaseMaterial"));
+        if (!BaseMaterial)
+        {
+            BaseMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Engine/BasicShapes/BasicShapeMaterial"));
+        }
+
+        // Switch back to game thread for actual material creation
+        AsyncTask(ENamedThreads::GameThread, [this, TexturePtr, ComponentPtr, BaseMaterial]()
+        {
+            if (!TexturePtr.IsValid() || !ComponentPtr.IsValid() || !BaseMaterial)
+            {
+                UE_LOG(LogJUSYNC, Error, TEXT("CreateMaterialFromTexture_Async: Objects no longer valid"));
+                return;
+            }
+
+            // Create dynamic material instance
+            UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(BaseMaterial, nullptr);
+            if (DynamicMaterial)
+            {
+                // Apply the texture to the material
+                DynamicMaterial->SetTextureParameterValue(TEXT("BaseColor"), TexturePtr.Get());
+                
+                // Apply material to the component
+                if (URealtimeMeshComponent* Component = ComponentPtr.Get())
+                {
+                    Component->SetMaterial(0, DynamicMaterial);
+                    UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied dynamic material to mesh component"));
+                }
+            }
+            else
+            {
+                UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to create dynamic material instance"));
+            }
+        });
+    });
+}

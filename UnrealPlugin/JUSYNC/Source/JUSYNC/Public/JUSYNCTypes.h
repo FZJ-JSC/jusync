@@ -257,3 +257,100 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FJUSYNCProcessingProgress, float, P
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FJUSYNCError, const FString&, ErrorType, const FString&, ErrorMessage);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCWorkerStatusReceived, const TArray<FJUSYNCWorkerStatus>&, WorkerStatus);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCWorkerCountReceived, int32, WorkerCount);
+
+// ========== BENCHMARKING STRUCTURES ==========
+
+/**
+ * Benchmark result for a single operation
+ */
+USTRUCT(BlueprintType)
+struct JUSYNC_API FJUSYNCBenchmarkResult
+{
+	GENERATED_BODY()
+
+	// Test identification
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	FString TestName;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	FDateTime Timestamp;
+
+	// Timing metrics (ms)
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float TotalTimeMs;
+
+	// Complexity metrics
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int32 TriangleCount;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int32 VertexCount;
+
+	// Memory metrics (bytes)
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int64 RAMBeforeBytes;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int64 RAMAfterBytes;
+
+	// Performance metrics
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float FPS;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float FrameTimeMs;
+
+	// Additional metrics
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int32 ActorCount;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int32 ErrorCount;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float SuccessRate;
+
+	FJUSYNCBenchmarkResult()
+	{
+		TestName = TEXT("");
+		Timestamp = FDateTime::Now();
+		TotalTimeMs = 0.0f;
+		TriangleCount = 0;
+		VertexCount = 0;
+		RAMBeforeBytes = 0;
+		RAMAfterBytes = 0;
+		FPS = 0.0f;
+		FrameTimeMs = 0.0f;
+		ActorCount = 0;
+		ErrorCount = 0;
+		SuccessRate = 0.0f;
+	}
+};
+
+/**
+ * Benchmark configuration
+ */
+USTRUCT(BlueprintType)
+struct JUSYNC_API FJUSYNCBenchmarkConfig
+{
+	GENERATED_BODY()
+
+	// Enable/disable benchmarking
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Benchmark")
+	bool bEnableBenchmarking = false;
+
+	// Output directory for CSV files
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Benchmark")
+	FString OutputDirectory;
+
+	// Append timestamp to filename
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Benchmark")
+	bool bAppendTimestamp = true;
+
+	FJUSYNCBenchmarkConfig()
+	{
+		bEnableBenchmarking = false;
+		OutputDirectory = TEXT("");
+		bAppendTimestamp = true;
+	}
+};
