@@ -379,9 +379,45 @@ ANARI_USD_MIDDLEWARE_C_API int WriteGradientLineAsPNG_C(const unsigned char* buf
  * @return 1 on success, 0 on failure
  */
 ANARI_USD_MIDDLEWARE_C_API int GetGradientLineAsPNGBuffer_C(const unsigned char* buffer,
-                                                            size_t buffer_size,
-                                                            unsigned char** out_png_data,
-                                                            size_t* out_png_size);
+                                                         size_t buffer_size,
+                                                         unsigned char** out_png_data,
+                                                         size_t* out_png_size);
+
+/**
+ * Extract specific row from image and return PNG data in memory
+ * Flexible version of GetGradientLineAsPNGBuffer_C that lets you choose which row to extract
+ * Useful for 2-pixel-high gradient images where top row = gradient, bottom row = metadata
+ *
+ * @param buffer Raw image data containing gradient
+ * @param buffer_size Size of buffer in bytes
+ * @param row_index Which row to extract (0 = top row, 1 = bottom row for 2-pixel images)
+ * @param out_png_data Pointer to receive PNG data (caller must free with FreeBuffer_C)
+ * @param out_png_size Pointer to receive PNG data size
+ * @return 1 on success, 0 on failure
+ */
+ANARI_USD_MIDDLEWARE_C_API int GetImageRowAsPNGBuffer_C(const unsigned char* buffer,
+                                                     size_t buffer_size,
+                                                     int row_index,
+                                                     unsigned char** out_png_data,
+                                                     size_t* out_png_size);
+
+/**
+ * Get PNG image dimensions without loading full texture data
+ * Lightweight function that reads PNG header to extract width, height, and channels
+ * Much faster than CreateTextureFromBuffer_C for just dimension checking
+ *
+ * @param buffer Raw PNG image data
+ * @param buffer_size Size of buffer in bytes
+ * @param out_width Pointer to receive image width (pixels)
+ * @param out_height Pointer to receive image height (pixels)
+ * @param out_channels Pointer to receive number of color channels (3 for RGB, 4 for RGBA)
+ * @return 1 on success, 0 on failure (invalid PNG or buffer too small)
+ */
+ANARI_USD_MIDDLEWARE_C_API int GetPNGDimensions_C(const unsigned char* buffer,
+                                               size_t buffer_size,
+                                               int* out_width,
+                                               int* out_height,
+                                               int* out_channels);
 
 // ============================================================================
 // MEMORY MANAGEMENT FUNCTIONS
@@ -545,6 +581,43 @@ ANARI_USD_MIDDLEWARE_C_API int RequestFileList_C(
     int timeout_ms);
 
 /**
+ * Request file list with sizes from worker rank
+ *
+ * @param target_rank Target worker rank
+ * @param out_names Pointer to receive array of filenames (caller must free with FreeFileList_C)
+ * @param out_sizes Pointer to receive array of file sizes (caller must free with FreeBuffer_C)
+ * @param out_count Pointer to receive number of files
+ * @param timeout_ms Timeout in milliseconds
+ * @return 1 on success, 0 on failure
+ */
+ANARI_USD_MIDDLEWARE_C_API int RequestFileListWithSizes_C(
+    int32_t target_rank,
+    char*** out_names,
+    uint64_t** out_sizes,
+    size_t* out_count,
+    int timeout_ms);
+
+/**
+ * Request file list with sizes and source ranks from worker rank(s)
+ * When target_rank = -1 (broadcast), returns files from all ranks with their source ranks
+ *
+ * @param target_rank Target worker rank (-1 for broadcast to all ranks)
+ * @param out_names Pointer to receive array of filenames (caller must free with FreeFileList_C)
+ * @param out_sizes Pointer to receive array of file sizes (caller must free with FreeBuffer_C)
+ * @param out_ranks Pointer to receive array of source ranks (caller must free with FreeBuffer_C)
+ * @param out_count Pointer to receive number of files
+ * @param timeout_ms Timeout in milliseconds
+ * @return 1 on success, 0 on failure
+ */
+ANARI_USD_MIDDLEWARE_C_API int RequestFileListWithSizesAndRanks_C(
+    int32_t target_rank,
+    char*** out_names,
+    uint64_t** out_sizes,
+    int32_t** out_ranks,
+    size_t* out_count,
+    int timeout_ms);
+
+/**
  * Free file list allocated by RequestFileList_C
  *
  * @param files Array of filenames to free
@@ -552,6 +625,32 @@ ANARI_USD_MIDDLEWARE_C_API int RequestFileList_C(
  */
 ANARI_USD_MIDDLEWARE_C_API void FreeFileList_C(
     char** files,
+    size_t count);
+
+/**
+ * Free file list with sizes allocated by RequestFileListWithSizes_C
+ *
+ * @param names Array of filenames to free
+ * @param sizes Array of file sizes to free
+ * @param count Number of files in array
+ */
+ANARI_USD_MIDDLEWARE_C_API void FreeFileListWithSizes_C(
+    char** names,
+    uint64_t* sizes,
+    size_t count);
+
+/**
+ * Free file list with sizes and ranks allocated by RequestFileListWithSizesAndRanks_C
+ *
+ * @param names Array of filenames to free
+ * @param sizes Array of file sizes to free
+ * @param ranks Array of source ranks to free
+ * @param count Number of files in array
+ */
+ANARI_USD_MIDDLEWARE_C_API void FreeFileListWithSizesAndRanks_C(
+    char** names,
+    uint64_t* sizes,
+    int32_t* ranks,
     size_t count);
 
 /**
@@ -699,6 +798,55 @@ ANARI_USD_MIDDLEWARE_C_API void RequestFileListAsync_C(
     int32_t target_rank,
     FileListCallback_C callback,
     BrokerErrorCallback_C error_callback,
+    int timeout_ms);
+
+// ========== PARALLEL FILE DOWNLOAD SUPPORT ==========
+
+/**
+ * Callback for individual file received during parallel download
+ * Called immediately when each file completes download
+ *
+ * @param filename Name of the file that was downloaded
+ * @param data Binary file data
+ * @param data_size Size of data in bytes
+ */
+typedef void (*ParallelFileReceivedCallback_C)(const char* filename, const unsigned char* data, size_t data_size);
+
+/**
+ * Callback for parallel download completion
+ * Called when ALL files in a parallel download batch are complete
+ */
+typedef void (*ParallelDownloadCompleteCallback_C)(void);
+
+/**
+ * Callback for parallel download errors (per-file)
+ * Called when a specific file fails to download
+ *
+ * @param filename Name of the file that failed
+ * @param error_message Error description
+ */
+typedef void (*ParallelDownloadErrorCallback_C)(const char* filename, const char* error_message);
+
+/**
+ * Request multiple files in parallel (non-blocking)
+ * Downloads files simultaneously with RAM awareness and immediate spawning
+ * Uses single DEALER socket with client-side multiplexing
+ *
+ * @param filenames Array of filenames to download
+ * @param filename_count Number of filenames in array
+ * @param target_ranks Array of target ranks (must match filename_count)
+ * @param file_received_callback Called immediately for each file as it downloads
+ * @param completion_callback Called when ALL files are complete (can be NULL)
+ * @param error_callback Called for each file that fails (can be NULL)
+ * @param timeout_ms Timeout in milliseconds
+ */
+ANARI_USD_MIDDLEWARE_C_API void RequestFilesParallelAsync_C(
+    const char** filenames,
+    size_t filename_count,
+    const int32_t* target_ranks,
+    ParallelFileReceivedCallback_C file_received_callback,
+    ParallelDownloadCompleteCallback_C completion_callback,
+    ParallelDownloadErrorCallback_C error_callback,
     int timeout_ms);
 
 #ifdef __cplusplus

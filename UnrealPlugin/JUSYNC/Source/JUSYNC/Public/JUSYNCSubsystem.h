@@ -171,6 +171,14 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker", DisplayName = "Request File (Sync)")
     bool RequestFile(const FString& Filename, int32 TargetRank, int32 TimeoutMs, TArray<uint8>& OutData);
 
+    // Parallel download functions
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker", DisplayName = "Request Files Parallel (Sync)")
+    bool RequestFilesParallel(
+        const TArray<FString>& Filenames,
+        const TArray<int32>& TargetRanks,
+        int32 TimeoutMs,
+        TArray<FJUSYNCFileData>& OutFiles);
+
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker", DisplayName = "Request Frame (Sync)")
     bool RequestFrame(int32 FrameNumber, int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCFileData>& OutFiles);
 

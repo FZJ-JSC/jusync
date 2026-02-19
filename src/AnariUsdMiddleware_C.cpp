@@ -1,5 +1,11 @@
+// Define this before including headers to ensure proper export/import
+#ifndef ANARI_USD_MIDDLEWARE_EXPORTS
+#define ANARI_USD_MIDDLEWARE_EXPORTS
+#endif
+
 #include "AnariUsdMiddleware_C.h"
 #include "AnariUsdMiddleware.h"
+#include "AnariUsdClient.h"
 #include "CollisionProcessor.h"
 #include "UsdProcessor.h"
 #include "AnariUsdMessages.h"
@@ -10,6 +16,10 @@
 #include <filesystem>
 #include <thread>
 #include <mutex>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 // ============================================================================
 // GLOBAL STATE MANAGEMENT
@@ -1327,7 +1337,7 @@ int ValidateUSDFormat_C(const unsigned char* buffer, size_t buffer_size, const c
     try {
         // Basic format validation
         std::string content(reinterpret_cast<const char*>(buffer),
-                           std::min(buffer_size, static_cast<size_t>(1000)));
+                           (std::min)(buffer_size, static_cast<size_t>(1000)));
 
         // Check for USD-specific patterns
         return (content.find("#usda") != std::string::npos ||
@@ -1576,6 +1586,284 @@ void RequestFileListAsync_C(
             error_callback(success ? "Unknown error" : "Failed to retrieve file list");
         }
     }).detach();
+}
+
+/**
+ * Request files in parallel asynchronously (non-blocking)
+ * Downloads multiple files simultaneously from distributed workers
+ */
+void RequestFilesParallelAsync_C(
+    const char** filenames,
+    size_t filename_count,
+    const int32_t* target_ranks,
+    ParallelFileReceivedCallback_C file_received_callback,
+    ParallelDownloadCompleteCallback_C completion_callback,
+    ParallelDownloadErrorCallback_C error_callback,
+    int timeout_ms) {
+    
+    // NUCLEAR DEBUG: Force immediate logging that CANNOT be missed
+    // Use OutputDebugString for Windows - appears in DebugView
+    #ifdef _WIN32
+    OutputDebugStringA("=== JUSYNC DEBUG: RequestFilesParallelAsync_C ENTER ===\n");
+    
+    HMODULE hModule = GetModuleHandle(TEXT("anari_usd_middleware.dll"));
+    if (hModule) {
+        char path[MAX_PATH];
+        GetModuleFileNameA(hModule, path, MAX_PATH);
+        char debugMsg[512];
+        sprintf_s(debugMsg, "=== JUSYNC DEBUG: DLL LOADED FROM: %s ===\n", path);
+        OutputDebugStringA(debugMsg);
+        MIDDLEWARE_LOG_INFO("=== DLL LOADED FROM: %s ===", path);
+    } else {
+        OutputDebugStringA("=== JUSYNC DEBUG: DLL NOT LOADED ===\n");
+        MIDDLEWARE_LOG_ERROR("=== DLL NOT LOADED ===");
+    }
+    #endif
+    
+    // Force log to middleware log AND debug output
+    char countMsg[256];
+    sprintf_s(countMsg, "=== JUSYNC DEBUG: Filename count: %zu ===\n", filename_count);
+    #ifdef _WIN32
+    OutputDebugStringA(countMsg);
+    #endif
+    
+    MIDDLEWARE_LOG_INFO("=== RequestFilesParallelAsync_C ENTER ===");
+    MIDDLEWARE_LOG_INFO("Filename count: %zu", filename_count);
+    
+    if (!g_middleware) {
+        MIDDLEWARE_LOG_ERROR("g_middleware is NULL!");
+        if (error_callback) {
+            error_callback("", "Middleware not initialized");
+        }
+        return;
+    }
+    
+    if (!g_middleware->isBrokerConnected()) {
+        MIDDLEWARE_LOG_ERROR("Broker not connected");
+        if (error_callback) {
+            error_callback("", "Broker not connected");
+        }
+        return;
+    }
+    
+    if (filename_count == 0) {
+        if (error_callback) {
+            error_callback("", "Empty filename list");
+        }
+        return;
+    }
+    
+    // Convert C arrays to C++ vectors
+    std::vector<std::string> filename_vec;
+    std::vector<int32_t> target_ranks_vec;
+    
+    filename_vec.reserve(filename_count);
+    target_ranks_vec.reserve(filename_count);
+    
+    for (size_t i = 0; i < filename_count; i++) {
+        filename_vec.push_back(filenames[i] ? filenames[i] : "");
+        target_ranks_vec.push_back(target_ranks[i]);
+    }
+    
+    // Convert C callbacks to C++ callbacks
+    std::function<void(const std::string&, const std::vector<uint8_t>&)> cpp_file_callback = nullptr;
+    if (file_received_callback) {
+        cpp_file_callback = [file_received_callback](const std::string& filename, const std::vector<uint8_t>& data) {
+            file_received_callback(filename.c_str(), data.data(), data.size());
+        };
+    }
+    
+    std::function<void()> cpp_completion_callback = nullptr;
+    if (completion_callback) {
+        cpp_completion_callback = [completion_callback]() {
+            completion_callback();
+        };
+    }
+    
+    std::function<void(const std::string&, const std::string&)> cpp_error_callback = nullptr;
+    if (error_callback) {
+        cpp_error_callback = [error_callback](const std::string& filename, const std::string& error_msg) {
+            error_callback(filename.c_str(), error_msg.c_str());
+        };
+    }
+    
+    // Call the C++ async function with extreme crash protection
+    try {
+        if (!g_middleware) {
+            MIDDLEWARE_LOG_ERROR("RequestFilesParallelAsync_C: g_middleware is NULL!");
+            if (error_callback) {
+                error_callback("", "Middleware not initialized");
+            }
+            return;
+        }
+        
+        MIDDLEWARE_LOG_INFO("RequestFilesParallelAsync_C: Calling requestFilesParallelAsync with %zu files", filename_count);
+        
+        #ifdef _WIN32
+        OutputDebugStringA("[ANARI] RequestFilesParallelAsync_C: About to call C++ API\n");
+        #endif
+        
+        g_middleware->requestFilesParallelAsync(
+            filename_vec,
+            target_ranks_vec,
+            timeout_ms,
+            cpp_file_callback,
+            cpp_completion_callback,
+            cpp_error_callback);
+            
+        MIDDLEWARE_LOG_INFO("RequestFilesParallelAsync_C: Successfully called requestFilesParallelAsync");
+        
+        #ifdef _WIN32
+        OutputDebugStringA("[ANARI] RequestFilesParallelAsync_C: C++ API call completed\n");
+        #endif
+    } catch (const std::exception& e) {
+        MIDDLEWARE_LOG_ERROR("RequestFilesParallelAsync_C: Exception: %s", e.what());
+        if (error_callback) {
+            std::string error_msg = std::string("Exception: ") + e.what();
+            error_callback("", error_msg.c_str());
+        }
+    } catch (...) {
+        MIDDLEWARE_LOG_ERROR("RequestFilesParallelAsync_C: Unknown exception");
+        if (error_callback) {
+            error_callback("", "Unknown exception");
+        }
+    }
+}
+
+/**
+ * Version verification function - call this from Unreal to verify DLL is loaded correctly
+ * Returns: 1 if working, 0 if broken
+ */
+ANARI_USD_MIDDLEWARE_C_API int VerifyParallelDownloadDLL_C() {
+    #ifdef _WIN32
+    OutputDebugStringA("=== JUSYNC DEBUG: VerifyParallelDownloadDLL_C called ===\n");
+    #endif
+    
+    MIDDLEWARE_LOG_INFO("=== VerifyParallelDownloadDLL_C ===");
+    
+    // Check if middleware is initialized
+    if (!g_middleware) {
+        MIDDLEWARE_LOG_ERROR("g_middleware is NULL");
+        return 0;
+    }
+    
+    // Check if connected
+    if (!g_middleware->isBrokerConnected()) {
+        MIDDLEWARE_LOG_ERROR("Broker not connected");
+        return 0;
+    }
+    
+    MIDDLEWARE_LOG_INFO("DLL verification PASSED");
+    return 1;
+}
+
+ANARI_USD_MIDDLEWARE_C_API int RequestFilesParallelDirect_C(
+    const char** filenames,
+    size_t filename_count,
+    const int32_t* target_ranks,
+    ParallelFileReceivedCallback_C file_received_callback,
+    ParallelDownloadCompleteCallback_C completion_callback,
+    ParallelDownloadErrorCallback_C error_callback,
+    int timeout_ms) {
+    
+    #ifdef _WIN32
+    OutputDebugStringA("[ANARI] RequestFilesParallelDirect_C: Entering direct C API\n");
+    #endif
+    
+    if (!g_middleware) {
+        #ifdef _WIN32
+        OutputDebugStringA("[ANARI] RequestFilesParallelDirect_C: g_middleware is NULL!\n");
+        #endif
+        return 0;
+    }
+    
+    if (!filenames || filename_count == 0) {
+        #ifdef _WIN32
+        OutputDebugStringA("[ANARI] RequestFilesParallelDirect_C: Invalid parameters\n");
+        #endif
+        return 0;
+    }
+    
+    // Get the client from the middleware
+    auto client = g_middleware->getClient();
+    if (!client) {
+        #ifdef _WIN32
+        OutputDebugStringA("[ANARI] RequestFilesParallelDirect_C: Client is NULL!\n");
+        #endif
+        return 0;
+    }
+    
+    // Convert C arrays to C++ vectors
+    std::vector<std::string> filename_vec;
+    std::vector<int32_t> target_ranks_vec;
+    
+    filename_vec.reserve(filename_count);
+    target_ranks_vec.reserve(filename_count);
+    
+    for (size_t i = 0; i < filename_count; i++) {
+        filename_vec.push_back(filenames[i] ? filenames[i] : "");
+        target_ranks_vec.push_back(target_ranks ? target_ranks[i] : -1);
+    }
+    
+    // Convert C callbacks to C++ callbacks
+    std::function<void(const std::string&, const std::vector<uint8_t>&)> cpp_file_callback = nullptr;
+    if (file_received_callback) {
+        cpp_file_callback = [file_received_callback](const std::string& filename, const std::vector<uint8_t>& data) {
+            file_received_callback(filename.c_str(), data.data(), data.size());
+        };
+    }
+    
+    std::function<void()> cpp_completion_callback = nullptr;
+    if (completion_callback) {
+        cpp_completion_callback = [completion_callback]() {
+            completion_callback();
+        };
+    }
+    
+    std::function<void(const std::string&, const std::string&)> cpp_error_callback = nullptr;
+    if (error_callback) {
+        cpp_error_callback = [error_callback](const std::string& filename, const std::string& error_msg) {
+            error_callback(filename.c_str(), error_msg.c_str());
+        };
+    }
+    
+    #ifdef _WIN32
+    char debug_msg[256];
+    snprintf(debug_msg, sizeof(debug_msg), "[ANARI] RequestFilesParallelDirect_C: Calling client->requestFilesParallel with %zu files\n", 
+             filename_count);
+    OutputDebugStringA(debug_msg);
+    #endif
+    
+    // Call the client directly (synchronous within this thread)
+    try {
+        bool success = client->requestFilesParallel(
+            filename_vec,
+            target_ranks_vec,
+            cpp_file_callback,
+            cpp_completion_callback,
+            cpp_error_callback,
+            timeout_ms);
+        
+        #ifdef _WIN32
+        OutputDebugStringA(success ? 
+            "[ANARI] RequestFilesParallelDirect_C: Success!\n" : 
+            "[ANARI] RequestFilesParallelDirect_C: Failed!\n");
+        #endif
+        
+        return success ? 1 : 0;
+    } catch (const std::exception& e) {
+        #ifdef _WIN32
+        char error_msg[512];
+        snprintf(error_msg, sizeof(error_msg), "[ANARI] RequestFilesParallelDirect_C: Exception: %s\n", e.what());
+        OutputDebugStringA(error_msg);
+        #endif
+        return 0;
+    } catch (...) {
+        #ifdef _WIN32
+        OutputDebugStringA("[ANARI] RequestFilesParallelDirect_C: Unknown exception\n");
+        #endif
+        return 0;
+    }
 }
 
 } // extern "C"

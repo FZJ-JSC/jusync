@@ -12,6 +12,7 @@
 
 #include "MiddlewareLogging.h"
 #include "CollisionProcessor.h"     // NEW: collision types / data
+#include "AnariUsdMessages.h"       // FileInfo struct
 
 #ifndef ANARI_USD_MIDDLEWARE_API
 # ifdef _WIN32
@@ -125,6 +126,7 @@ public:
     
     /* NEW: File request methods */
     bool requestFileList(int32_t targetRank, std::vector<std::string>& outFiles, int timeoutMs = 10000);
+    bool requestFileListWithSizes(int32_t targetRank, std::vector<FileInfo>& outFiles, int timeoutMs = 10000);
     bool requestFile(const std::string& filename, int32_t targetRank,
                      std::vector<uint8_t>& outFileData, int timeoutMs = 30000);
     bool requestFrame(int32_t frameNumber, int32_t targetRank,
@@ -142,12 +144,23 @@ public:
     using WorkerCountCallback = std::function<void(uint32_t workerCount)>;
     using WorkerStatusCallback = std::function<void(const std::vector<std::tuple<int32_t, uint32_t, std::string, std::string, uint64_t>>& workerStatus)>;
     using FileListCallback = std::function<void(const std::vector<std::string>& files)>;
+    using FileListWithSizesCallback = std::function<void(const std::vector<FileInfo>& files)>;
     using BrokerErrorCallback = std::function<void(const std::string& error)>;
     
     void requestWorkerCountAsync(int timeoutMs, WorkerCountCallback callback, BrokerErrorCallback errorCallback = nullptr);
     void requestTotalWorkerCountAsync(int timeoutMs, WorkerCountCallback callback, BrokerErrorCallback errorCallback = nullptr);
     void requestWorkerStatusAsync(int32_t targetRank, int timeoutMs, WorkerStatusCallback callback, BrokerErrorCallback errorCallback = nullptr);
     void requestFileListAsync(int32_t targetRank, int timeoutMs, FileListCallback callback, BrokerErrorCallback errorCallback = nullptr);
+    void requestFileListWithSizesAsync(int32_t targetRank, int timeoutMs, FileListWithSizesCallback callback, BrokerErrorCallback errorCallback = nullptr);
+    
+    /* NEW: Parallel file downloads with RAM awareness and immediate spawning */
+    void requestFilesParallelAsync(
+        const std::vector<std::string>& filenames,
+        const std::vector<int32_t>& targetRanks,
+        int timeoutMs,
+        std::function<void(const std::string&, const std::vector<uint8_t>&)> fileReceivedCallback,
+        std::function<void()> completionCallback = nullptr,
+        std::function<void(const std::string&, const std::string&)> errorCallback = nullptr);
       
     /* NEW: String-based worker list (compatible with Python broker) */
     bool requestWorkerListString(std::vector<std::tuple<int32_t, std::string, std::string>>& outWorkers, int timeoutMs = 5000);

@@ -27,6 +27,9 @@
 
 namespace anari_usd_middleware {
 
+// Forward declaration
+class ParallelDownloadManager;
+
 /**
  * ANARI USD ZMQ DEALER Client
  * Connects to ANARI USD broker to request files from HPC workers
@@ -161,6 +164,19 @@ public:
     bool testConnection();
     void updateHealthStatus();
 
+    // Parallel download support
+    zmq::socket_t* getSocket() { return zmqSocket.get(); }
+    const zmq::socket_t* getSocket() const { return zmqSocket.get(); }
+    
+    // Parallel file requests
+    bool requestFilesParallel(
+        const std::vector<std::string>& filenames,
+        const std::vector<int32_t>& target_ranks,
+        std::function<void(const std::string&, const std::vector<uint8_t>&)> spawn_callback,
+        std::function<void()> completion_callback = nullptr,
+        std::function<void(const std::string&, const std::string&)> error_callback = nullptr,
+        int timeout_ms = 30000);
+
 private:
     // Connection management helpers
     bool configureSocket(int timeoutMs);
@@ -200,6 +216,7 @@ private:
     // Member variables
     std::unique_ptr<zmq::context_t> zmqContext;
     std::unique_ptr<zmq::socket_t> zmqSocket;
+    std::unique_ptr<ParallelDownloadManager> parallelDownloadManager;
 
     // Connection state
     std::atomic<ConnectionStatus> connectionStatus{ConnectionStatus::Disconnected};

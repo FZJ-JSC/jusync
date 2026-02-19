@@ -94,6 +94,8 @@ add_library(${PROJECT_NAME} SHARED
     src/UsdProcessor.cpp
     src/AnariUsdMiddleware_C.cpp
     src/CollisionProcessor.cpp
+    src/ParallelDownloadManager.cpp
+    src/MemoryMonitor.cpp
 )
 
 # Add include directories

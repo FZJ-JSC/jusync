@@ -40,6 +40,15 @@ public:
     // File async result
     DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnFileReceived, const FString&, Filename, const TArray<uint8>&, FileData);
     
+    // Parallel file download async result - one callback per file as it completes
+    DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnParallelFileReceived, const FString&, Filename, const TArray<uint8>&, FileData);
+    
+    // Parallel download completion callback - when ALL files are done
+    DECLARE_DYNAMIC_DELEGATE(FOnParallelDownloadComplete);
+    
+    // Parallel download error callback - per-file errors
+    DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnParallelDownloadError, const FString&, Filename, const FString&, ErrorMessage);
+    
     // Generic error event
     DECLARE_DYNAMIC_DELEGATE_OneParam(FOnBrokerError, FString, ErrorMessage);
 
@@ -136,6 +145,24 @@ public:
     // Async file request - fires event when complete, doesn't block
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request File Async")
     static void RequestFileAsync(const FString& Filename, int32 TargetRank, int32 TimeoutMs, const FOnFileReceived& OnComplete, const FOnBrokerError& OnError);
+
+    // Async parallel file requests - downloads multiple files simultaneously
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request Files Parallel Async")
+    static void RequestFilesParallelAsync(
+        const TArray<FString>& Filenames,
+        const TArray<int32>& TargetRanks,
+        int32 TimeoutMs,
+        const FOnParallelFileReceived& OnFileReceived,
+        const FOnParallelDownloadComplete& OnComplete,
+        const FOnParallelDownloadError& OnError);
+
+    // Legacy sync version for backward compatibility
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Legacy", DisplayName = "Request Files Parallel (Sync)")
+    static bool RequestFilesParallelSync(
+        const TArray<FString>& Filenames,
+        const TArray<int32>& TargetRanks,
+        int32 TimeoutMs,
+        TArray<FJUSYNCFileData>& OutFiles);
 
     // ========== USD PROCESSING WITH PREVIEW ==========
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|USD", CallInEditor)
@@ -357,6 +384,14 @@ UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning", CallInEd
             bool bUseUniformScaling = false, FVector OuterBoundingBoxSize = FVector::ZeroVector,
             bool bPreserveAspectRatio = true, bool bUseAsyncSpawning = false, int32 BatchSize = 5,
             float BatchDelay = 0.016f
+        );
+
+        UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning", CallInEditor)
+        static AActor* SpawnRealtimeMeshWithMaterial(
+            const FJUSYNCMeshData& MeshData, const FVector& SpawnLocation,
+            const FRotator& SpawnRotation, UMaterialInterface* Material,
+            bool bUseUniformScaling = false, FVector OuterBoundingBoxSize = FVector::ZeroVector,
+            bool bPreserveAspectRatio = true, bool bUseAsyncSpawning = false
         );
 
 

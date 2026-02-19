@@ -1,11 +1,11 @@
 #include "JUSYNCSubsystem.h"
+#include "JUSYNCBlueprintLibrary.h"
 #include "Engine/Engine.h"
 #include "Engine/Texture2D.h"
 #include "Engine/Texture.h"
 #include "TextureResource.h" 
 #include "RenderUtils.h"
 #include "RealtimeMeshComponent.h"
-#include "JUSYNCBlueprintLibrary.h"
 #include "JUSYNCModule.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
@@ -2188,6 +2188,217 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
     }
 #endif
     return false;
+}
+
+bool UJUSYNCSubsystem::RequestFilesParallel(const TArray<FString>& Filenames, const TArray<int32>& TargetRanks, int32 TimeoutMs, TArray<FJUSYNCFileData>& OutFiles)
+{
+    FScopeLock Lock(&MiddlewareMutex);
+    
+    if (Filenames.Num() == 0)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request files - filename list is empty"));
+        return false;
+    }
+    
+    if (Filenames.Num() != TargetRanks.Num())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request files - mismatch between filenames count (%d) and target ranks count (%d)"), Filenames.Num(), TargetRanks.Num());
+        return false;
+    }
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING %d FILES IN PARALLEL FROM BROKER ==="), Filenames.Num());
+    
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (!bIsInitialized.load())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request files - middleware not initialized"));
+        return false;
+    }
+    
+    if (!IsBrokerConnected())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request files - not connected to broker"));
+        return false;
+    }
+    
+    // Convert FString arrays to C++ std::string arrays
+    std::vector<std::string> FilenameStrs;
+    std::vector<int32_t> TargetRanksC;
+    
+    FilenameStrs.reserve(Filenames.Num());
+    TargetRanksC.reserve(TargetRanks.Num());
+    
+    for (const FString& Filename : Filenames)
+    {
+        FTCHARToUTF8 FilenameConverter(*Filename);
+        FilenameStrs.push_back(std::string(FilenameConverter.Get()));
+    }
+    
+    for (int32 Rank : TargetRanks)
+    {
+        TargetRanksC.push_back(Rank);
+    }
+    
+    // Call the parallel download function from middleware using C API (memory-safe)
+    // This is an async function that returns void
+    // We need to track completion via callbacks
+    std::atomic<bool> bDownloadComplete{false};
+    std::atomic<bool> bDownloadSuccess{false};
+    std::atomic<int> FilesReceived{0};
+    std::atomic<int> FilesExpected{static_cast<int>(Filenames.Num())};
+    
+    // Create C-style arrays for the C API
+    std::vector<const char*> FilenameCStrs;
+    std::vector<int32_t> TargetRanksArray;
+    
+    FilenameCStrs.reserve(Filenames.Num());
+    TargetRanksArray.reserve(TargetRanks.Num());
+    
+    // Store converted strings in a vector to keep them alive
+    std::vector<std::string> FilenameStorage;
+    FilenameStorage.reserve(Filenames.Num());
+    
+    for (const FString& Filename : Filenames)
+    {
+        FTCHARToUTF8 FilenameConverter(*Filename);
+        FilenameStorage.push_back(std::string(FilenameConverter.Get()));
+        FilenameCStrs.push_back(FilenameStorage.back().c_str());
+    }
+    
+    for (int32 Rank : TargetRanks)
+    {
+        TargetRanksArray.push_back(Rank);
+    }
+    
+    // Simple C callback functions that capture context via lambda captures
+    // We'll use a mutex to prevent concurrent calls (simplified implementation)
+    static FCriticalSection CallbackMutex;
+    static TArray<FJUSYNCFileData>* CurrentOutFiles = nullptr;
+    static std::atomic<bool>* CurrentDownloadComplete = nullptr;
+    static std::atomic<bool>* CurrentDownloadSuccess = nullptr;
+    static std::atomic<int>* CurrentFilesReceived = nullptr;
+    
+    {
+        FScopeLock CallbackLock(&CallbackMutex);
+        CurrentOutFiles = &OutFiles;
+        CurrentDownloadComplete = &bDownloadComplete;
+        CurrentDownloadSuccess = &bDownloadSuccess;
+        CurrentFilesReceived = &FilesReceived;
+    }
+    
+    // C callback for file received
+    auto FileReceivedCallback = [](const char* filename, const unsigned char* data, size_t data_size) {
+        FScopeLock CallbackLock(&CallbackMutex);
+        if (CurrentOutFiles && CurrentFilesReceived) {
+            FJUSYNCFileData FileData;
+            FileData.Filename = UTF8_TO_TCHAR(filename);
+            FileData.Data.Append(data, data_size);
+            FileData.FileType = TEXT("usda");
+            FileData.SourceRank = -1;
+            FileData.Hash = TEXT("");
+            CurrentOutFiles->Add(FileData);
+            (*CurrentFilesReceived)++;
+            UE_LOG(LogJUSYNC, Log, TEXT("✅ Parallel download received: %s (%d bytes)"), *FileData.Filename, FileData.Data.Num());
+        }
+    };
+    
+    // C callback for completion
+    auto CompletionCallback = []() {
+        FScopeLock CallbackLock(&CallbackMutex);
+        if (CurrentDownloadComplete && CurrentDownloadSuccess) {
+            *CurrentDownloadSuccess = true;
+            *CurrentDownloadComplete = true;
+            UE_LOG(LogJUSYNC, Log, TEXT("✅ All parallel downloads completed"));
+        }
+    };
+    
+    // C callback for errors
+    auto ErrorCallback = [](const char* filename, const char* error_message) {
+        FScopeLock CallbackLock(&CallbackMutex);
+        FString UE_Filename = UTF8_TO_TCHAR(filename);
+        FString UE_Error = UTF8_TO_TCHAR(error_message);
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Parallel download error for %s: %s"), *UE_Filename, *UE_Error);
+        if (CurrentDownloadComplete && CurrentDownloadSuccess) {
+            *CurrentDownloadSuccess = false;
+            *CurrentDownloadComplete = true;
+        }
+    };
+    
+    try
+    {
+        // Call the ASYNC C API function (non-blocking, true pipeline)
+        // This returns immediately, callbacks will be called as files arrive
+        RequestFilesParallelAsync_C(
+            FilenameCStrs.data(),
+            FilenameCStrs.size(),
+            TargetRanksArray.data(),
+            FileReceivedCallback,
+            CompletionCallback,
+            ErrorCallback,
+            TimeoutMs
+        );
+        
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ RequestFilesParallelAsync_C called - downloads running in background"));
+        
+        // For synchronous compatibility, we still need to wait
+        // But for true pipeline, we should return immediately
+        // Since this is called from RequestFilesParallelAsync (background thread),
+        // we can wait but that defeats pipeline
+        // Let's add a configurable wait: if TimeoutMs is 0, return immediately
+        
+        if (TimeoutMs == 0)
+        {
+            // Immediate return for pipeline mode
+            UE_LOG(LogJUSYNC, Log, TEXT("✅ Pipeline mode: returning immediately, callbacks will process files as they arrive"));
+            return true;
+        }
+    }
+    catch (const std::exception& e)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Exception in parallel download: %s"), UTF8_TO_TCHAR(e.what()));
+        return false;
+    }
+    catch (...)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Unknown exception in parallel download"));
+        return false;
+    }
+    
+    // Wait for completion (only if TimeoutMs > 0)
+    // This preserves backward compatibility for synchronous calls
+    if (TimeoutMs > 0)
+    {
+        const int MaxWaitMs = TimeoutMs + 1000; // Add some buffer
+        const auto StartTime = FPlatformTime::Seconds();
+        
+        while (!bDownloadComplete && (FPlatformTime::Seconds() - StartTime) * 1000.0 < MaxWaitMs)
+        {
+            FPlatformProcess::Sleep(0.01f); // Sleep 10ms
+        }
+        
+        if (bDownloadSuccess && FilesReceived >= FilesExpected)
+        {
+            UE_LOG(LogJUSYNC, Log, TEXT("✅ Successfully downloaded %d files in parallel"), OutFiles.Num());
+            return true;
+        }
+        else
+        {
+            UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to download files in parallel (received %d/%d files)"), 
+                   FilesReceived.load(), FilesExpected.load());
+            return false;
+        }
+    }
+    else
+    {
+        // Pipeline mode: return true immediately, downloads continue in background
+        // Callbacks will populate OutFiles as they arrive
+        return true;
+    }
+    
+#else
+    UE_LOG(LogJUSYNC, Error, TEXT("❌ Parallel downloads not available - middleware not compiled"));
+    return false;
+#endif
 }
 
 bool UJUSYNCSubsystem::RequestFrame(int32 FrameNumber, int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCFileData>& OutFiles)

@@ -6,6 +6,10 @@
 #include "UsdProcessor.h"
 #include "MiddlewareLogging.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include <memory>
 #include <cstring>
 #include <fstream>
@@ -1271,6 +1275,95 @@ void AnariUsdMiddleware::requestFileListWithSizesAsync(int32_t targetRank, int t
     }).detach();
 }
 
+void AnariUsdMiddleware::requestFilesParallelAsync(
+    const std::vector<std::string>& filenames,
+    const std::vector<int32_t>& targetRanks,
+    int timeoutMs,
+    std::function<void(const std::string&, const std::vector<uint8_t>&)> fileReceivedCallback,
+    std::function<void()> completionCallback,
+    std::function<void(const std::string&, const std::string&)> errorCallback) {
+    
+    // Debug logging to verify we entered the function
+    #ifdef _WIN32
+    OutputDebugStringA("[ANARI] requestFilesParallelAsync: Entering function\n");
+    #endif
+    
+    // Basic parameter validation (no __try/__except due to C++ object unwinding)
+    // We'll rely on the fact that if parameters are invalid, the function won't be called
+    // or will crash before reaching here (which is what we're trying to prevent)
+    
+    // Note: Cannot use __try/__except here because function has C++ objects with destructors
+    // The crash protection is now in the C API wrapper instead
+    
+    #ifdef _WIN32
+    char debug_msg[256];
+    snprintf(debug_msg, sizeof(debug_msg), "[ANARI] requestFilesParallelAsync: %zu files, timeout %d ms\n", 
+             filenames.size(), timeoutMs);
+    OutputDebugStringA(debug_msg);
+    #endif
+    
+    // Validate input
+    if (filenames.empty()) {
+        MIDDLEWARE_LOG_ERROR("Empty filename list for parallel download");
+        if (errorCallback) {
+            errorCallback("", "Empty filename list");
+        }
+        return;
+    }
+    
+    if (filenames.size() != targetRanks.size()) {
+        MIDDLEWARE_LOG_ERROR("Mismatch between filenames count (%zu) and target ranks count (%zu)",
+                            filenames.size(), targetRanks.size());
+        if (errorCallback) {
+            errorCallback("", "Mismatch between filenames and target ranks count");
+        }
+        return;
+    }
+    
+    if (!pImpl || !pImpl->anariUsdClient) {
+        MIDDLEWARE_LOG_ERROR("ANARI USD client not initialized");
+        if (errorCallback) {
+            errorCallback("", "ANARI USD client not initialized");
+        }
+        return;
+    }
+    
+    if (!pImpl->anariUsdClient->isConnected()) {
+        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
+        if (errorCallback) {
+            errorCallback("", "ANARI USD client not connected");
+        }
+        return;
+    }
+    
+    // Launch async request on background thread
+    std::thread([this, filenames, targetRanks, timeoutMs, fileReceivedCallback, completionCallback, errorCallback]() {
+        try {
+            bool success = pImpl->anariUsdClient->requestFilesParallel(
+                filenames,
+                targetRanks,
+                fileReceivedCallback,
+                completionCallback,
+                errorCallback,
+                timeoutMs);
+            
+            if (!success && errorCallback) {
+                errorCallback("", "Failed to request files in parallel");
+            }
+        } catch (const std::exception& e) {
+            MIDDLEWARE_LOG_ERROR("Exception in requestFilesParallelAsync thread: %s", e.what());
+            if (errorCallback) {
+                errorCallback("", std::string("Exception: ") + e.what());
+            }
+        } catch (...) {
+            MIDDLEWARE_LOG_ERROR("Unknown exception in requestFilesParallelAsync thread");
+            if (errorCallback) {
+                errorCallback("", "Unknown exception in parallel download");
+            }
+        }
+    }).detach();
+}
+
 bool AnariUsdMiddleware::requestWorkerListString(std::vector<std::tuple<int32_t, std::string, std::string>>& outWorkers, int timeoutMs) {
     if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
         MIDDLEWARE_LOG_ERROR("Cannot request worker list - broker not connected");
@@ -1291,6 +1384,13 @@ std::string AnariUsdMiddleware::getStatusInfo() const {
     } catch (const std::exception& e) {
         return "Error getting status: " + std::string(e.what());
     }
+}
+
+AnariUsdClient* AnariUsdMiddleware::getClient() const {
+    if (!pImpl) {
+        return nullptr;
+    }
+    return pImpl->anariUsdClient.get();
 }
 
 } // namespace anari_usd_middleware

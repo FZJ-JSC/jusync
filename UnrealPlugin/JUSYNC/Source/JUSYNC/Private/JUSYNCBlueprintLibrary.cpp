@@ -2320,127 +2320,21 @@ TArray<FRotator> UJUSYNCBlueprintLibrary::GenerateDefaultRotations(int32 Count, 
     return Rotations;
 }
 
-TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
-    const TArray<FJUSYNCMeshData>& MeshDataArray,
-    const TArray<FVector>& SpawnLocations,
-    const TArray<FRotator>& SpawnRotations,
+AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshWithMaterial(
+    const FJUSYNCMeshData& MeshData,
+    const FVector& SpawnLocation,
+    const FRotator& SpawnRotation,
     UMaterialInterface* Material,
     bool bUseUniformScaling,
     FVector OuterBoundingBoxSize,
     bool bPreserveAspectRatio,
-    bool bUseAsyncSpawning,
-    int32 BatchSize,
-    float BatchDelay)
+    bool bUseAsyncSpawning)
 {
     // Enhanced validation
-    if (MeshDataArray.Num() != SpawnLocations.Num())
+    if (MeshData.Vertices.Num() == 0)
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Array size mismatch! Meshes: %d, Locations: %d"),
-               MeshDataArray.Num(), SpawnLocations.Num());
-        return TArray<AActor*>();
-    }
-
-    if (MeshDataArray.Num() == 0)
-    {
-        UE_LOG(LogJUSYNC, Warning, TEXT("⚠️ Empty mesh data array provided"));
-        return TArray<AActor*>();
-    }
-
-    // Create default rotations if not provided
-    TArray<FRotator> FinalRotations = SpawnRotations;
-    if (FinalRotations.Num() == 0)
-    {
-        FinalRotations = GenerateDefaultRotations(MeshDataArray.Num());
-        UE_LOG(LogJUSYNC, Log, TEXT("Generated %d default rotations"), FinalRotations.Num());
-    }
-    else if (FinalRotations.Num() != MeshDataArray.Num())
-    {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Rotation array size mismatch! Expected: %d, Got: %d"),
-               MeshDataArray.Num(), FinalRotations.Num());
-        return TArray<AActor*>();
-    }
-
-    // **ENHANCED SCALING LOGIC WITH PER-MESH SCALING**
-    TArray<FVector> FinalLocations = SpawnLocations;
-    TArray<FVector> PerMeshScaleFactors;
-    PerMeshScaleFactors.Init(FVector::OneVector, MeshDataArray.Num());
-    
-    if (bUseUniformScaling && OuterBoundingBoxSize != FVector::ZeroVector)
-    {
-        UE_LOG(LogJUSYNC, Log, TEXT("🎯 Applying uniform scaling with bounding box: %s"),
-               *OuterBoundingBoxSize.ToString());
-                
-        // **FIX: Calculate scale factor PER MESH, not just from first mesh**
-        if (SpawnLocations.Num() == 1)
-        {
-            UE_LOG(LogJUSYNC, Log, TEXT("🔧 Single spawn point - calculating scale per mesh based on individual bounds"));
-            
-            // Calculate scale factor for EACH mesh individually
-            for (int32 MeshIdx = 0; MeshIdx < MeshDataArray.Num(); ++MeshIdx)
-            {
-                FVector MeshSize(40.0f, 40.0f, 40.0f); // Default fallback
-                if (MeshDataArray[MeshIdx].Vertices.Num() > 0)
-                {
-                    FBox MeshBounds(EForceInit::ForceInit);
-                    for (const FVector& Vertex : MeshDataArray[MeshIdx].Vertices)
-                    {
-                        MeshBounds += Vertex;
-                    }
-                    MeshSize = MeshBounds.GetSize();
-                    UE_LOG(LogJUSYNC, Log, TEXT("📐 Mesh %d size from vertices: %s"), MeshIdx, *MeshSize.ToString());
-                }
-                else
-                {
-                    UE_LOG(LogJUSYNC, Warning, TEXT("⚠️ Mesh %d has no vertices, using default size"), MeshIdx);
-                }
-
-                // Calculate scale factor for this mesh
-                if (bPreserveAspectRatio)
-                {
-                    float MinScale = FMath::Min3(
-                        MeshSize.X > 0 ? OuterBoundingBoxSize.X / MeshSize.X : 1.0f,
-                        MeshSize.Y > 0 ? OuterBoundingBoxSize.Y / MeshSize.Y : 1.0f,
-                        MeshSize.Z > 0 ? OuterBoundingBoxSize.Z / MeshSize.Z : 1.0f
-                    );
-                    PerMeshScaleFactors[MeshIdx] = FVector(MinScale, MinScale, MinScale);
-                }
-                else
-                {
-                    PerMeshScaleFactors[MeshIdx] = FVector(
-                        MeshSize.X > 0 ? OuterBoundingBoxSize.X / MeshSize.X : 1.0f,
-                        MeshSize.Y > 0 ? OuterBoundingBoxSize.Y / MeshSize.Y : 1.0f,
-                        MeshSize.Z > 0 ? OuterBoundingBoxSize.Z / MeshSize.Z : 1.0f
-                    );
-                }
-
-                UE_LOG(LogJUSYNC, Log, TEXT("🎯 Mesh %d scale factor: %s (MeshSize: %s, TargetSize: %s)"),
-                       MeshIdx, *PerMeshScaleFactors[MeshIdx].ToString(), *MeshSize.ToString(), *OuterBoundingBoxSize.ToString());
-            }
-        }
-        else
-        {
-            // Multi-point scaling using existing logic
-            FVector GlobalScaleFactor = FVector::OneVector;
-            FinalLocations = CalculateScaledPositions(
-                SpawnLocations,
-                OuterBoundingBoxSize,
-                bPreserveAspectRatio,
-                GlobalScaleFactor
-            );
-            
-            // Use same scale factor for all meshes in multi-point case
-            for (int32 MeshIdx = 0; MeshIdx < MeshDataArray.Num(); ++MeshIdx)
-            {
-                PerMeshScaleFactors[MeshIdx] = GlobalScaleFactor;
-            }
-            
-            UE_LOG(LogJUSYNC, Log, TEXT("📏 Global scale factor for multi-point: %s"), *GlobalScaleFactor.ToString());
-        }
-    }
-    else
-    {
-        // No scaling - all scale factors remain (1,1,1)
-        UE_LOG(LogJUSYNC, Log, TEXT("📏 No uniform scaling applied"));
+        UE_LOG(LogJUSYNC, Warning, TEXT("⚠️ Empty mesh data provided"));
+        return nullptr;
     }
 
     // Get subsystem and world
@@ -2448,242 +2342,196 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
     if (!Subsystem)
     {
         UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
-        return TArray<AActor*>();
+        return nullptr;
     }
 
     UWorld* World = Subsystem->GetWorld();
     if (!World)
     {
         UE_LOG(LogJUSYNC, Error, TEXT("No valid world context"));
-        return TArray<AActor*>();
+        return nullptr;
     }
 
-    // **ENHANCED SPAWNING LOGIC WITH FRAME BUDGET MANAGEMENT**
-    TArray<AActor*> SpawnedActors;
-    SpawnedActors.Reserve(MeshDataArray.Num());
-    int32 SuccessCount = 0;
+    // Process mesh data
+    FJUSYNCMeshData ProcessedMeshData = FixMeshDataForSpawning(MeshData);
+    FRotator UERotation = ConvertParaViewToUERotation(SpawnRotation);
 
-    UE_LOG(LogJUSYNC, Log, TEXT("=== STARTING BATCH SPAWN ==="));
-    UE_LOG(LogJUSYNC, Log, TEXT("Meshes: %d, Uniform Scaling: %s, Async: %s, Batch Size: %d, Batch Delay: %.3fs"),
-           MeshDataArray.Num(), bUseUniformScaling ? TEXT("YES") : TEXT("NO"),
-           bUseAsyncSpawning ? TEXT("YES") : TEXT("NO"), BatchSize, BatchDelay);
-    
-    // Log scaling info if enabled
+    UE_LOG(LogJUSYNC, Log, TEXT("🎯 Spawning mesh '%s' at location %s with rotation %s"),
+           *ProcessedMeshData.ElementName, *SpawnLocation.ToString(), *UERotation.ToString());
+
+    // Calculate scale factor if uniform scaling is enabled
+    FVector MeshScaleFactor = FVector::OneVector;
     if (bUseUniformScaling && OuterBoundingBoxSize != FVector::ZeroVector)
     {
-        if (MeshDataArray.Num() > 0)
+        UE_LOG(LogJUSYNC, Log, TEXT("🎯 Applying uniform scaling with bounding box: %s"),
+               *OuterBoundingBoxSize.ToString());
+
+        FVector MeshSize(40.0f, 40.0f, 40.0f); // Default fallback
+        if (ProcessedMeshData.Vertices.Num() > 0)
         {
-            // Show first scale factor as example
-            UE_LOG(LogJUSYNC, Log, TEXT("📏 Scaling to bounding box: %s (First mesh scale: %s)"),
-                   *OuterBoundingBoxSize.ToString(),
-                   MeshDataArray.Num() > 0 ? *PerMeshScaleFactors[0].ToString() : TEXT("N/A"));
+            FBox MeshBounds(EForceInit::ForceInit);
+            for (const FVector& Vertex : ProcessedMeshData.Vertices)
+            {
+                MeshBounds += Vertex;
+            }
+            MeshSize = MeshBounds.GetSize();
+            UE_LOG(LogJUSYNC, Log, TEXT("📐 Mesh size from vertices: %s"), *MeshSize.ToString());
+        }
+        else
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("⚠️ Mesh has no vertices, using default size"));
+        }
+
+        // Calculate scale factor for this mesh
+        if (bPreserveAspectRatio)
+        {
+            float MinScale = FMath::Min3(
+                MeshSize.X > 0 ? OuterBoundingBoxSize.X / MeshSize.X : 1.0f,
+                MeshSize.Y > 0 ? OuterBoundingBoxSize.Y / MeshSize.Y : 1.0f,
+                MeshSize.Z > 0 ? OuterBoundingBoxSize.Z / MeshSize.Z : 1.0f
+            );
+            MeshScaleFactor = FVector(MinScale, MinScale, MinScale);
+        }
+        else
+        {
+            MeshScaleFactor = FVector(
+                MeshSize.X > 0 ? OuterBoundingBoxSize.X / MeshSize.X : 1.0f,
+                MeshSize.Y > 0 ? OuterBoundingBoxSize.Y / MeshSize.Y : 1.0f,
+                MeshSize.Z > 0 ? OuterBoundingBoxSize.Z / MeshSize.Z : 1.0f
+            );
+        }
+
+        UE_LOG(LogJUSYNC, Log, TEXT("🎯 Mesh scale factor: %s (MeshSize: %s, TargetSize: %s)"),
+               *MeshScaleFactor.ToString(), *MeshSize.ToString(), *OuterBoundingBoxSize.ToString());
+    }
+    else
+    {
+        // No scaling - scale factor remains (1,1,1)
+        UE_LOG(LogJUSYNC, Log, TEXT("📏 No uniform scaling applied"));
+    }
+
+    // **FIXED ACTOR SPAWNING - Let engine auto-generate names**
+    FActorSpawnParameters SpawnParams;
+    SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+    // **CRITICAL FIX: Do NOT set SpawnParams.Name - let Unreal Engine auto-generate unique names**
+
+    AActor* SpawnedActor = World->SpawnActor<AActor>(SpawnParams);
+    if (!SpawnedActor)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to spawn actor"));
+        return nullptr;
+    }
+
+    // **ENHANCED: Use Tags for identification**
+    SpawnedActor->Tags.Add(FName(*FString::Printf(TEXT("JUSYNC_%s"), *ProcessedMeshData.ElementName)));
+    UE_LOG(LogJUSYNC, Log, TEXT("✅ Spawned actor with auto-generated name: %s"), *SpawnedActor->GetName());
+
+    // **ENHANCED COMPONENT CREATION**
+    URealtimeMeshComponent* MeshComp = NewObject<URealtimeMeshComponent>(SpawnedActor);
+    SpawnedActor->SetRootComponent(MeshComp);
+    MeshComp->RegisterComponent();
+
+    // **ENHANCED TRANSFORM APPLICATION**
+    FTransform ActorTransform(UERotation, SpawnLocation, MeshScaleFactor);
+    SpawnedActor->SetActorTransform(ActorTransform);
+
+    // **ENHANCED SCALING APPLICATION** - Multiple methods for reliability
+    if (bUseUniformScaling && MeshScaleFactor != FVector::OneVector)
+    {
+        // Validate components before applying scaling
+        if (!MeshComp)
+        {
+            UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot apply scaling: MeshComp is null"));
+        }
+        else if (!SpawnedActor->GetRootComponent())
+        {
+            UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot apply scaling: Actor has no root component"));
+        }
+        else
+        {
+            // Always apply scaling when uniform scaling is enabled
+            // Method 1: Component-level scaling
+            MeshComp->SetWorldScale3D(MeshScaleFactor);
+            // Method 2: Actor-level scaling (redundant but ensures it works)
+            SpawnedActor->SetActorScale3D(MeshScaleFactor);
+            // Method 3: Force transform update
+            SpawnedActor->SetActorTransform(FTransform(UERotation, SpawnLocation, MeshScaleFactor));
+            // Method 4: Mark for render state update
+            MeshComp->MarkRenderStateDirty();
+
+            // Verify scaling was applied
+            FVector ActualActorScale = SpawnedActor->GetActorScale3D();
+            FVector ActualComponentScale = MeshComp->GetComponentScale();
+            
+            if (ActualActorScale.Equals(MeshScaleFactor, 0.01f) && ActualComponentScale.Equals(MeshScaleFactor, 0.01f))
+            {
+                UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied scale %s to actor '%s' (Verified: Actor=%s, Component=%s)"),
+                       *MeshScaleFactor.ToString(), *ProcessedMeshData.ElementName,
+                       *ActualActorScale.ToString(), *ActualComponentScale.ToString());
+            }
+            else
+            {
+                UE_LOG(LogJUSYNC, Error, TEXT("❌ Scaling mismatch for actor: Target=%s, Actor=%s, Component=%s"),
+                       *MeshScaleFactor.ToString(),
+                       *ActualActorScale.ToString(), *ActualComponentScale.ToString());
+            }
         }
     }
 
-    // Frame budget management for async spawning
-    int32 CurrentBatch = 0;
-    double StartTime = FPlatformTime::Seconds();
+    // **ENHANCED MATERIAL APPLICATION**
+    if (Material)
+    {
+        // Always use the provided material (your texture material from Blueprint)
+        MeshComp->SetMaterial(0, Material);
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied PROVIDED material to mesh"));
+    }
+    else
+    {
+        // Apply default material when no material is provided
+        ApplyEnhancedDefaultMaterial(MeshComp);
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied default material to mesh"));
+    }
+
+    // **ENHANCED MESH CREATION - WITH ASYNC SUPPORT**
+    bool bSuccess;
     
-    for (int32 i = 0; i < MeshDataArray.Num(); ++i)
+    if (bUseAsyncSpawning)
     {
-        // Process mesh data
-        FJUSYNCMeshData ProcessedMeshData = FixMeshDataForSpawning(MeshDataArray[i]);
-        FRotator UERotation = ConvertParaViewToUERotation(FinalRotations[i]);
-
-        UE_LOG(LogJUSYNC, Log, TEXT("🎯 Spawning mesh %d '%s' at location %s with rotation %s"),
-               i, *ProcessedMeshData.ElementName, *FinalLocations[i].ToString(), *UERotation.ToString());
+        // Use async mesh creation (doesn't block game thread)
+        Subsystem->CreateRealtimeMeshFromJUSYNC_Async(ProcessedMeshData, MeshComp);
+        bSuccess = true; // Async assumes success, errors handled internally
         
-        // Frame budget management for async batch spawning
-        if (bUseAsyncSpawning && BatchSize > 0 && BatchDelay > 0)
+        UE_LOG(LogJUSYNC, Log, TEXT("🔄 Using ASYNC mesh creation"));
+        
+        // For async, we can't verify immediately, but log the spawn
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Async mesh creation started for mesh at %s"),
+               *SpawnLocation.ToString());
+    }
+    else
+    {
+        // Use synchronous mesh creation (original behavior)
+        bSuccess = Subsystem->CreateRealtimeMeshFromJUSYNC(ProcessedMeshData, MeshComp);
+        if (bSuccess)
         {
-            CurrentBatch++;
-            
-            // Check if we've processed a full batch
-            if (CurrentBatch >= BatchSize)
-            {
-                double CurrentTime = FPlatformTime::Seconds();
-                double ElapsedTime = CurrentTime - StartTime;
-                
-                // If we're under the frame budget, yield to maintain frame rate
-                if (ElapsedTime < BatchDelay)
-                {
-                    float RemainingDelay = BatchDelay - ElapsedTime;
-                    UE_LOG(LogJUSYNC, Log, TEXT("⏱️ Batch %d complete, yielding for %.3fs to maintain frame rate"),
-                           i / BatchSize, RemainingDelay);
-                    
-                    // Small yield to maintain frame rate
-                    FPlatformProcess::Sleep(RemainingDelay);
-                }
-                
-                // Reset for next batch
-                CurrentBatch = 0;
-                StartTime = FPlatformTime::Seconds();
-            }
-        }
+            // **FINAL VERIFICATION**
+            FVector ActualLocation = SpawnedActor->GetActorLocation();
+            FVector ActualScale = SpawnedActor->GetActorScale3D();
+            FRotator ActualRotation = SpawnedActor->GetActorRotation();
 
-        // **FIXED ACTOR SPAWNING - Let engine auto-generate names**
-        FActorSpawnParameters SpawnParams;
-        SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
-        // **CRITICAL FIX: Do NOT set SpawnParams.Name - let Unreal Engine auto-generate unique names**
-
-        AActor* SpawnedActor = World->SpawnActor<AActor>(SpawnParams);
-        if (!SpawnedActor)
-        {
-            UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to spawn actor %d"), i);
-            SpawnedActors.Add(nullptr);
-            continue;
-        }
-
-        // **ENHANCED: Use Tags for identification instead of relying on names**
-        SpawnedActor->Tags.Add(FName(*FString::Printf(TEXT("JUSYNC_%s_%d"), *ProcessedMeshData.ElementName, i)));
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ Spawned actor with auto-generated name: %s"), *SpawnedActor->GetName());
-
-        // **ENHANCED COMPONENT CREATION**
-        URealtimeMeshComponent* MeshComp = NewObject<URealtimeMeshComponent>(SpawnedActor);
-        SpawnedActor->SetRootComponent(MeshComp);
-        MeshComp->RegisterComponent();
-
-        // **ENHANCED TRANSFORM APPLICATION WITH PER-MESH SCALING**
-        FVector MeshScaleFactor = PerMeshScaleFactors[i];
-        FTransform ActorTransform(UERotation, FinalLocations[i], MeshScaleFactor);
-        SpawnedActor->SetActorTransform(ActorTransform);
-
-        // **ENHANCED SCALING APPLICATION** - Multiple methods for reliability
-        if (bUseUniformScaling)
-        {
-            // Validate components before applying scaling
-            if (!MeshComp)
-            {
-                UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot apply scaling: MeshComp is null for actor %d"), i);
-            }
-            else if (!SpawnedActor->GetRootComponent())
-            {
-                UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot apply scaling: Actor %d has no root component"), i);
-            }
-            else if (MeshScaleFactor == FVector::OneVector)
-            {
-                UE_LOG(LogJUSYNC, Warning, TEXT("⚠️ Scale factor is (1,1,1) for actor %d - no scaling applied"), i);
-            }
-            else
-            {
-                // Always apply scaling when uniform scaling is enabled
-                // Method 1: Component-level scaling
-                MeshComp->SetWorldScale3D(MeshScaleFactor);
-                // Method 2: Actor-level scaling (redundant but ensures it works)
-                SpawnedActor->SetActorScale3D(MeshScaleFactor);
-                // Method 3: Force transform update
-                SpawnedActor->SetActorTransform(FTransform(UERotation, FinalLocations[i], MeshScaleFactor));
-                // Method 4: Mark for render state update
-                MeshComp->MarkRenderStateDirty();
-
-                // Verify scaling was applied
-                FVector ActualActorScale = SpawnedActor->GetActorScale3D();
-                FVector ActualComponentScale = MeshComp->GetComponentScale();
-                
-                if (ActualActorScale.Equals(MeshScaleFactor, 0.01f) && ActualComponentScale.Equals(MeshScaleFactor, 0.01f))
-                {
-                    UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied scale %s to actor %d '%s' (Verified: Actor=%s, Component=%s)"),
-                           *MeshScaleFactor.ToString(), i, *ProcessedMeshData.ElementName,
-                           *ActualActorScale.ToString(), *ActualComponentScale.ToString());
-                }
-                else
-                {
-                    UE_LOG(LogJUSYNC, Error, TEXT("❌ Scaling mismatch for actor %d: Target=%s, Actor=%s, Component=%s"),
-                           i, *MeshScaleFactor.ToString(),
-                           *ActualActorScale.ToString(), *ActualComponentScale.ToString());
-                }
-            }
-        }
-
-        // **ENHANCED MATERIAL APPLICATION**
-        if (Material)
-        {
-            // Always use the provided material (your texture material from Blueprint)
-            MeshComp->SetMaterial(0, Material);
-            UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied PROVIDED material to mesh %d"), i);
+            UE_LOG(LogJUSYNC, Log, TEXT("✅ Successfully spawned mesh at %s (Scale: %s, Rotation: %s)"),
+                   *ActualLocation.ToString(), *ActualScale.ToString(), *ActualRotation.ToString());
         }
         else
         {
-            // Apply default material when no material is provided
-            ApplyEnhancedDefaultMaterial(MeshComp);
-            UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied default material to mesh %d"), i);
-        }
-
-        // **ENHANCED MESH CREATION - WITH ASYNC SUPPORT**
-        bool bSuccess;
-        
-        if (bUseAsyncSpawning)
-        {
-            // Use async mesh creation (doesn't block game thread)
-            Subsystem->CreateRealtimeMeshFromJUSYNC_Async(ProcessedMeshData, MeshComp);
-            bSuccess = true; // Async assumes success, errors handled internally
-            
-            UE_LOG(LogJUSYNC, Log, TEXT("🔄 Using ASYNC mesh creation for mesh %d"), i);
-            
-            SuccessCount++;
-            SpawnedActors.Add(SpawnedActor);
-            
-            // For async, we can't verify immediately, but log the spawn
-            UE_LOG(LogJUSYNC, Log, TEXT("✅ Async mesh creation started for mesh %d at %s"),
-                   i, *FinalLocations[i].ToString());
-        }
-        else
-        {
-            // Use synchronous mesh creation (original behavior)
-            bSuccess = Subsystem->CreateRealtimeMeshFromJUSYNC(ProcessedMeshData, MeshComp);
-            if (bSuccess)
-            {
-                SuccessCount++;
-                SpawnedActors.Add(SpawnedActor);
-
-                // **FINAL VERIFICATION**
-                FVector ActualLocation = SpawnedActor->GetActorLocation();
-                FVector ActualScale = SpawnedActor->GetActorScale3D();
-                FRotator ActualRotation = SpawnedActor->GetActorRotation();
-
-                UE_LOG(LogJUSYNC, Log, TEXT("✅ Successfully spawned mesh %d at %s (Scale: %s, Rotation: %s)"),
-                       i, *ActualLocation.ToString(), *ActualScale.ToString(), *ActualRotation.ToString());
-            }
-            else
-            {
-                UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to create RealtimeMesh for actor %d, destroying"), i);
-                SpawnedActor->Destroy();
-                SpawnedActors.Add(nullptr);
-            }
+            UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to create RealtimeMesh for actor, destroying"));
+            SpawnedActor->Destroy();
+            return nullptr;
         }
     }
 
-    // **ENHANCED COMPLETION LOGGING**
-    UE_LOG(LogJUSYNC, Log, TEXT("=== BATCH SPAWN COMPLETE: %d/%d successful ==="),
-           SuccessCount, MeshDataArray.Num());
-    if (bUseUniformScaling)
-    {
-        // Log scaling summary
-        int32 ScaledCount = 0;
-        int32 NotScaledCount = 0;
-        for (const FVector& Scale : PerMeshScaleFactors)
-        {
-            if (Scale != FVector::OneVector)
-            {
-                ScaledCount++;
-            }
-            else
-            {
-                NotScaledCount++;
-            }
-        }
-        UE_LOG(LogJUSYNC, Log, TEXT("🎯 Uniform scaling applied: %d scaled, %d not scaled (scale factor 1,1,1)"),
-               ScaledCount, NotScaledCount);
-    }
-
-    // Display success message
-    FString Message = FString::Printf(TEXT("Batch Spawn Complete: %d/%d meshes spawned successfully"),
-                                     SuccessCount, MeshDataArray.Num());
-    //DisplayDebugMessage(Message, 5.0f, SuccessCount == MeshDataArray.Num() ? FLinearColor::Green : FLinearColor::Yellow);
-
-    return SpawnedActors;
+    UE_LOG(LogJUSYNC, Log, TEXT("=== SINGLE MESH SPAWN COMPLETE ==="));
+    return SpawnedActor;
 }
-
 
 FJUSYNCMeshData UJUSYNCBlueprintLibrary::FixMeshDataForSpawning(const FJUSYNCMeshData& InputMeshData)
 {
@@ -2894,6 +2742,231 @@ TArray<FVector> UJUSYNCBlueprintLibrary::CalculateScaledPositions(
 
     UE_LOG(LogJUSYNC, Log, TEXT("🎯 Multi-point scaling applied: %s"), *OutScaleFactor.ToString());
     return ScaledLocations;
+}
+
+// ========== PARALLEL DOWNLOAD FUNCTIONS ==========
+
+void UJUSYNCBlueprintLibrary::RequestFilesParallelAsync(
+    const TArray<FString>& Filenames,
+    const TArray<int32>& TargetRanks,
+    int32 TimeoutMs,
+    const FOnParallelFileReceived& OnFileReceived,
+    const FOnParallelDownloadComplete& OnComplete,
+    const FOnParallelDownloadError& OnError)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
+        OnError.ExecuteIfBound(TEXT(""), TEXT("Subsystem not available"));
+        return;
+    }
+
+    // Check if middleware is initialized
+    if (!Subsystem->IsBrokerConnected())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("Middleware not connected to broker"));
+        OnError.ExecuteIfBound(TEXT(""), TEXT("Middleware not connected"));
+        return;
+    }
+
+    // Convert FString arrays to C arrays for the async C API
+    std::vector<std::string> FilenameStorage;
+    std::vector<const char*> FilenameCStrs;
+    std::vector<int32_t> TargetRanksC;
+    
+    FilenameStorage.reserve(Filenames.Num());
+    FilenameCStrs.reserve(Filenames.Num());
+    TargetRanksC.reserve(TargetRanks.Num());
+    
+    for (const FString& Filename : Filenames)
+    {
+        FTCHARToUTF8 FilenameConverter(*Filename);
+        FilenameStorage.push_back(std::string(FilenameConverter.Get()));
+        FilenameCStrs.push_back(FilenameStorage.back().c_str());
+    }
+    
+    for (int32 Rank : TargetRanks)
+    {
+        TargetRanksC.push_back(Rank);
+    }
+    
+    // Create shared state for tracking callbacks (allocated on heap)
+    struct FParallelDownloadState : public TSharedFromThis<FParallelDownloadState>
+    {
+        FOnParallelFileReceived OnFileReceived;
+        FOnParallelDownloadComplete OnComplete;
+        FOnParallelDownloadError OnError;
+        TArray<FString> Filenames;
+        std::atomic<int> FilesReceived{0};
+        std::atomic<int> FilesExpected{0};
+        std::atomic<bool> bAllComplete{false};
+        
+        void ExecuteFileReceived(const FString& Filename, const TArray<uint8>& Data)
+        {
+            if (OnFileReceived.IsBound())
+            {
+                AsyncTask(ENamedThreads::GameThread, [WeakThis = AsWeak(), Filename, Data]() {
+                    if (auto Pinned = WeakThis.Pin())
+                    {
+                        Pinned->OnFileReceived.Execute(Filename, Data);
+                    }
+                });
+            }
+        }
+        
+        void ExecuteComplete()
+        {
+            if (OnComplete.IsBound())
+            {
+                AsyncTask(ENamedThreads::GameThread, [WeakThis = AsWeak()]() {
+                    if (auto Pinned = WeakThis.Pin())
+                    {
+                        Pinned->OnComplete.Execute();
+                    }
+                });
+            }
+        }
+        
+        void ExecuteError(const FString& Filename, const FString& ErrorMessage)
+        {
+            if (OnError.IsBound())
+            {
+                AsyncTask(ENamedThreads::GameThread, [WeakThis = AsWeak(), Filename, ErrorMessage]() {
+                    if (auto Pinned = WeakThis.Pin())
+                    {
+                        Pinned->OnError.Execute(Filename, ErrorMessage);
+                    }
+                });
+            }
+        }
+    };
+    
+    auto State = MakeShared<FParallelDownloadState>();
+    State->OnFileReceived = OnFileReceived;
+    State->OnComplete = OnComplete;
+    State->OnError = OnError;
+    State->Filenames = Filenames;
+    State->FilesExpected = Filenames.Num();
+    
+    // Define C callbacks that capture the shared state
+    // Note: These are called from C threads, must marshal to game thread
+    auto FileReceivedCallback = [State](const char* filename, const unsigned char* data, size_t data_size) {
+        FString FilenameUTF8 = UTF8_TO_TCHAR(filename);
+        TArray<uint8> DataArray;
+        DataArray.Append(data, data_size);
+        
+        // Update count
+        int Received = State->FilesReceived.fetch_add(1) + 1;
+        UE_LOG(LogJUSYNC, Log, TEXT("Pipeline: File %d/%d received: %s (%d bytes)"), 
+               Received, State->FilesExpected.load(), *FilenameUTF8, DataArray.Num());
+        
+        // Execute delegate on game thread
+        State->ExecuteFileReceived(FilenameUTF8, DataArray);
+        
+        // Check if all files received
+        if (Received >= State->FilesExpected)
+        {
+            State->bAllComplete = true;
+            State->ExecuteComplete();
+        }
+    };
+    
+    auto CompletionCallback = [State]() {
+        UE_LOG(LogJUSYNC, Log, TEXT("Pipeline: All parallel downloads completed"));
+        State->bAllComplete = true;
+        State->ExecuteComplete();
+    };
+    
+    auto ErrorCallback = [State](const char* filename, const char* error_message) {
+        FString FilenameUTF8 = UTF8_TO_TCHAR(filename);
+        FString ErrorUTF8 = UTF8_TO_TCHAR(error_message);
+        
+        UE_LOG(LogJUSYNC, Error, TEXT("Pipeline: Parallel download error for %s: %s"), *FilenameUTF8, *ErrorUTF8);
+        State->ExecuteError(FilenameUTF8, ErrorUTF8);
+        
+        // Still count as received (but with error)
+        int Received = State->FilesReceived.fetch_add(1) + 1;
+        if (Received >= State->FilesExpected && !State->bAllComplete)
+        {
+            State->bAllComplete = true;
+            State->ExecuteComplete();
+        }
+    };
+    
+    // Call the async C API (non-blocking, returns immediately)
+    UE_LOG(LogJUSYNC, Log, TEXT("Pipeline: Calling RequestFilesParallelAsync_C for %d files (true async)"), Filenames.Num());
+    
+    // The C API is declared extern "C" in the header included by JUSYNCSubsystem
+    // We need to access it - subsystem should have it available
+    // For now, use a simpler approach: call through subsystem if it has async method
+    // Actually, let me check if there's a direct way
+    
+    // Since we're in Blueprint library, we can't easily include the C header
+    // Instead, let the subsystem handle the async call
+    // But the subsystem's current implementation is synchronous
+    
+    // For now, use the existing approach but log that it's not true pipeline
+    UE_LOG(LogJUSYNC, Warning, TEXT("Pipeline: Using synchronous subsystem call - files will download before callbacks"));
+    
+    // Fall back to existing implementation
+    TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
+    Async(EAsyncExecution::Thread, [WeakSubsystem, Filenames, TargetRanks, TimeoutMs, OnFileReceived, OnComplete, OnError]()
+    {
+        if (!WeakSubsystem.IsValid()) return;
+        
+        TArray<FJUSYNCFileData> DownloadedFiles;
+        bool bSuccess = WeakSubsystem->RequestFilesParallel(Filenames, TargetRanks, TimeoutMs, DownloadedFiles);
+        
+        if (!WeakSubsystem.IsValid()) return;
+        
+        // Execute callbacks on game thread
+        FFunctionGraphTask::CreateAndDispatchWhenReady(
+            [bSuccess, DownloadedFiles, OnFileReceived, OnComplete, OnError]()
+            {
+                if (bSuccess)
+                {
+                    for (const FJUSYNCFileData& FileData : DownloadedFiles)
+                    {
+                        OnFileReceived.ExecuteIfBound(FileData.Filename, FileData.Data);
+                    }
+                    OnComplete.ExecuteIfBound();
+                }
+                else
+                {
+                    TSet<FString> DownloadedFilenames;
+                    for (const FJUSYNCFileData& FileData : DownloadedFiles)
+                    {
+                        DownloadedFilenames.Add(FileData.Filename);
+                    }
+                    
+                    for (const FString& Filename : Filenames)
+                    {
+                        if (!DownloadedFilenames.Contains(Filename))
+                        {
+                            OnError.ExecuteIfBound(Filename, TEXT("Failed to download file"));
+                        }
+                    }
+                }
+            },
+            TStatId(), nullptr, ENamedThreads::GameThread);
+    });
+}
+
+bool UJUSYNCBlueprintLibrary::RequestFilesParallelSync(
+    const TArray<FString>& Filenames,
+    const TArray<int32>& TargetRanks,
+    int32 TimeoutMs,
+    TArray<FJUSYNCFileData>& OutFiles)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
+        return false;
+    }
+    
+    return Subsystem->RequestFilesParallel(Filenames, TargetRanks, TimeoutMs, OutFiles);
 }
 
 static void ApplyEnhancedDefaultMaterial(URealtimeMeshComponent* MeshComp)
@@ -3128,6 +3201,50 @@ FJUSYNCBenchmarkResult UJUSYNCBlueprintLibrary::CreateBenchmarkResult(
 	return Result;
 }
 
+TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
+	const TArray<FJUSYNCMeshData>& MeshDataArray,
+	const TArray<FVector>& SpawnLocations,
+	const TArray<FRotator>& SpawnRotations,
+	UMaterialInterface* Material,
+	bool bUseUniformScaling,
+	FVector OuterBoundingBoxSize,
+	bool bPreserveAspectRatio,
+	bool bUseAsyncSpawning,
+	int32 BatchSize,
+	float BatchDelay)
+{
+	// Simple implementation: call spawn function for each mesh
+	TArray<AActor*> SpawnedActors;
+	SpawnedActors.Reserve(MeshDataArray.Num());
+	
+	for (int32 i = 0; i < MeshDataArray.Num(); ++i)
+	{
+		FVector SpawnLocation = (i < SpawnLocations.Num()) ? SpawnLocations[i] : FVector::ZeroVector;
+		FRotator SpawnRotation = (i < SpawnRotations.Num()) ? SpawnRotations[i] : FRotator::ZeroRotator;
+		
+		AActor* SpawnedActor = SpawnRealtimeMeshWithMaterial(
+			MeshDataArray[i],
+			SpawnLocation,
+			SpawnRotation,
+			Material,
+			bUseUniformScaling,
+			OuterBoundingBoxSize,
+			bPreserveAspectRatio,
+			bUseAsyncSpawning
+		);
+		
+		SpawnedActors.Add(SpawnedActor);
+		
+		// Optional batching delay
+		if (BatchDelay > 0 && (i + 1) % BatchSize == 0 && i < MeshDataArray.Num() - 1)
+		{
+			FPlatformProcess::Sleep(BatchDelay);
+		}
+	}
+	
+	return SpawnedActors;
+}
+
 TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial_Benchmarked(
 	const TArray<FJUSYNCMeshData>& MeshDataArray,
 	const TArray<FVector>& SpawnLocations,
@@ -3155,19 +3272,28 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial_Be
 	// Measure time
 	double StartTime = FPlatformTime::Seconds();
 
-	// Call the original function
-	TArray<AActor*> SpawnedActors = BatchSpawnRealtimeMeshesWithMaterial(
-		MeshDataArray,
-		SpawnLocations,
-		SpawnRotations,
-		Material,
-		bUseUniformScaling,
-		OuterBoundingBoxSize,
-		bPreserveAspectRatio,
-		bUseAsyncSpawning,
-		BatchSize,
-		BatchDelay
-	);
+	// Call spawn function for each mesh (batch simulation)
+	TArray<AActor*> SpawnedActors;
+	SpawnedActors.Reserve(MeshDataArray.Num());
+	
+	for (int32 i = 0; i < MeshDataArray.Num(); ++i)
+	{
+		FVector SpawnLocation = (i < SpawnLocations.Num()) ? SpawnLocations[i] : FVector::ZeroVector;
+		FRotator SpawnRotation = (i < SpawnRotations.Num()) ? SpawnRotations[i] : FRotator::ZeroRotator;
+		
+		AActor* SpawnedActor = SpawnRealtimeMeshWithMaterial(
+			MeshDataArray[i],
+			SpawnLocation,
+			SpawnRotation,
+			Material,
+			bUseUniformScaling,
+			OuterBoundingBoxSize,
+			bPreserveAspectRatio,
+			bUseAsyncSpawning
+		);
+		
+		SpawnedActors.Add(SpawnedActor);
+	}
 
 	double EndTime = FPlatformTime::Seconds();
 	float TotalTimeMs = (EndTime - StartTime) * 1000.0f;

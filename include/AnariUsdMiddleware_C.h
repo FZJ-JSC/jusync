@@ -800,6 +800,84 @@ ANARI_USD_MIDDLEWARE_C_API void RequestFileListAsync_C(
     BrokerErrorCallback_C error_callback,
     int timeout_ms);
 
+// ========== PARALLEL FILE DOWNLOAD SUPPORT ==========
+
+/**
+ * Callback for individual file received during parallel download
+ * Called immediately when each file completes download
+ *
+ * @param filename Name of the file that was downloaded
+ * @param data Binary file data
+ * @param data_size Size of data in bytes
+ */
+typedef void (*ParallelFileReceivedCallback_C)(const char* filename, const unsigned char* data, size_t data_size);
+
+/**
+ * Callback for parallel download completion
+ * Called when ALL files in a parallel download batch are complete
+ */
+typedef void (*ParallelDownloadCompleteCallback_C)(void);
+
+/**
+ * Callback for parallel download errors (per-file)
+ * Called when a specific file fails to download
+ *
+ * @param filename Name of the file that failed
+ * @param error_message Error description
+ */
+typedef void (*ParallelDownloadErrorCallback_C)(const char* filename, const char* error_message);
+
+/**
+ * Request multiple files in parallel (non-blocking)
+ * Downloads files simultaneously with RAM awareness and immediate spawning
+ * Uses single DEALER socket with client-side multiplexing
+ *
+ * @param filenames Array of filenames to download
+ * @param filename_count Number of filenames in array
+ * @param target_ranks Array of target ranks (must match filename_count)
+ * @param file_received_callback Called immediately for each file as it downloads
+ * @param completion_callback Called when ALL files are complete (can be NULL)
+ * @param error_callback Called for each file that fails (can be NULL)
+ * @param timeout_ms Timeout in milliseconds
+ */
+ANARI_USD_MIDDLEWARE_C_API void RequestFilesParallelAsync_C(
+    const char** filenames,
+    size_t filename_count,
+    const int32_t* target_ranks,
+    ParallelFileReceivedCallback_C file_received_callback,
+    ParallelDownloadCompleteCallback_C completion_callback,
+    ParallelDownloadErrorCallback_C error_callback,
+    int timeout_ms);
+
+/**
+ * Version verification function - call this from Unreal to verify DLL is loaded correctly
+ * Returns: 1 if working, 0 if broken
+ */
+ANARI_USD_MIDDLEWARE_C_API int VerifyParallelDownloadDLL_C();
+
+/**
+ * Direct C API for parallel downloads (synchronous version)
+ * Downloads multiple files in parallel and returns results through callbacks
+ * This is a more direct wrapper that avoids C++ async complexities
+ * 
+ * @param filenames Array of filename strings
+ * @param filename_count Number of filenames
+ * @param target_ranks Array of target ranks (parallel to filenames)
+ * @param file_received_callback Called for each file received (can be NULL)
+ * @param completion_callback Called when all downloads complete (can be NULL)
+ * @param error_callback Called for each file that fails (can be NULL)
+ * @param timeout_ms Timeout in milliseconds
+ * @return 1 if download started successfully, 0 if failed
+ */
+ANARI_USD_MIDDLEWARE_C_API int RequestFilesParallelDirect_C(
+    const char** filenames,
+    size_t filename_count,
+    const int32_t* target_ranks,
+    ParallelFileReceivedCallback_C file_received_callback,
+    ParallelDownloadCompleteCallback_C completion_callback,
+    ParallelDownloadErrorCallback_C error_callback,
+    int timeout_ms);
+
 #ifdef __cplusplus
 }
 #endif

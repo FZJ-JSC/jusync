@@ -1,11 +1,16 @@
 #include "AnariUsdClient.h"
 #include "MiddlewareLogging.h"
+#include "ParallelDownloadManager.h"
 
 #include <regex>
 #include <algorithm>
 #include <thread>
 #include <future>
 #include "../../external/nlohmann/single_include/nlohmann/json.hpp"
+
+#ifdef _WIN32
+#include <Windows.h>
+#endif
 
 using json = nlohmann::json;
 
@@ -1828,6 +1833,209 @@ bool AnariUsdClient::getTotalWorkerCountSync(uint32_t& totalCount, int timeoutMs
     
     totalCount = future.get();
     MIDDLEWARE_LOG_INFO("Total worker count: %u", totalCount);
+    return true;
+}
+
+bool AnariUsdClient::requestFilesParallel(
+    const std::vector<std::string>& filenames,
+    const std::vector<int32_t>& target_ranks,
+    std::function<void(const std::string&, const std::vector<uint8_t>&)> spawn_callback,
+    std::function<void()> completion_callback,
+    std::function<void(const std::string&, const std::string&)> error_callback,
+    int timeout_ms) {
+    
+    // Extreme crash protection - check for stack corruption
+    try {
+        MIDDLEWARE_LOG_INFO("=== ENTERING requestFilesParallel ===");
+    } catch (...) {
+        // If logging fails, we have serious memory corruption
+        return false;
+    }
+    MIDDLEWARE_LOG_INFO("Filenames: %zu, TargetRanks: %zu", filenames.size(), target_ranks.size());
+    
+    #ifdef _WIN32
+    char debug_msg[512];
+    snprintf(debug_msg, sizeof(debug_msg), "[ANARI] requestFilesParallel: %zu files, first: %s\n", 
+             filenames.size(), filenames.empty() ? "(none)" : filenames[0].c_str());
+    OutputDebugStringA(debug_msg);
+    #endif
+    
+    if (!isConnected()) {
+        MIDDLEWARE_LOG_ERROR("Cannot start parallel downloads: client not connected");
+        if (error_callback) {
+            for (const auto& filename : filenames) {
+                error_callback(filename, "Client not connected");
+            }
+        }
+        return false;
+    }
+    
+    MIDDLEWARE_LOG_INFO("Client is connected");
+    
+    if (filenames.size() != target_ranks.size()) {
+        MIDDLEWARE_LOG_ERROR("Filename count (%zu) doesn't match target_ranks count (%zu)",
+                           filenames.size(), target_ranks.size());
+        return false;
+    }
+    
+    MIDDLEWARE_LOG_INFO("Input validation passed");
+    
+    // Create parallel download manager if not already created
+    MIDDLEWARE_LOG_INFO("Checking parallelDownloadManager: %p", parallelDownloadManager.get());
+    if (!parallelDownloadManager) {
+        MIDDLEWARE_LOG_INFO("Creating new ParallelDownloadManager instance");
+        try {
+            MIDDLEWARE_LOG_INFO("Attempting to create shared_ptr from this: %p", this);
+            auto shared_this = std::shared_ptr<AnariUsdClient>(this, [](auto*) {});
+            MIDDLEWARE_LOG_INFO("shared_ptr created successfully");
+            
+            MIDDLEWARE_LOG_INFO("Calling std::make_unique<ParallelDownloadManager>");
+            parallelDownloadManager = std::make_unique<ParallelDownloadManager>(
+                shared_this, // shared_ptr with no-op deleter
+                4 // max parallel downloads
+            );
+            MIDDLEWARE_LOG_INFO("ParallelDownloadManager created successfully at: %p", parallelDownloadManager.get());
+        } catch (const std::exception& e) {
+            MIDDLEWARE_LOG_ERROR("Failed to create ParallelDownloadManager: %s", e.what());
+            if (error_callback) {
+                for (const auto& filename : filenames) {
+                    error_callback(filename, std::string("Failed to create download manager: ") + e.what());
+                }
+            }
+            return false;
+        } catch (...) {
+            MIDDLEWARE_LOG_ERROR("Failed to create ParallelDownloadManager: unknown exception");
+            if (error_callback) {
+                for (const auto& filename : filenames) {
+                    error_callback(filename, "Failed to create download manager: unknown exception");
+                }
+            }
+            return false;
+        }
+    }
+    
+    MIDDLEWARE_LOG_INFO("parallelDownloadManager after creation: %p", parallelDownloadManager.get());
+    
+    if (!parallelDownloadManager) {
+        MIDDLEWARE_LOG_ERROR("ParallelDownloadManager is null after creation attempt");
+        if (error_callback) {
+            for (const auto& filename : filenames) {
+                error_callback(filename, "Download manager is null");
+            }
+        }
+        return false;
+    }
+    
+    MIDDLEWARE_LOG_INFO("Starting parallel download of %zu files using same logic as async node", filenames.size());
+    
+    // Create shared state for tracking all downloads
+    struct ParallelDownloadState {
+        std::atomic<size_t> completed_files{0};
+        std::atomic<size_t> successful_files{0};
+        std::mutex completion_mutex;
+    };
+    
+    auto state = std::make_shared<ParallelDownloadState>();
+    size_t total_files = filenames.size();
+    
+    // Start a download for each file (same pattern as getFileSync but async)
+    for (size_t i = 0; i < filenames.size(); ++i) {
+        std::string filename = filenames[i];
+        int32_t target_rank = target_ranks[i];
+        
+        // Create per-file state for accumulation
+        struct FileDownloadState {
+            std::vector<uint8_t> data;
+            uint64_t total_size = 0;
+            bool complete = false;
+            std::string filename;
+        };
+        
+        auto file_state = std::make_shared<FileDownloadState>();
+        file_state->filename = filename;
+        
+        // Define callbacks (same pattern as getFileSync)
+        // Use explicit std::function to ensure proper type conversion
+        std::function<void(const std::string&, const std::vector<uint8_t>&, uint64_t, uint64_t)> chunk_callback = 
+            [file_state](const std::string& fname, const std::vector<uint8_t>& chunk,
+                        uint64_t offset, uint64_t total_size) {
+                file_state->total_size = total_size;
+                if (file_state->data.size() < offset + chunk.size()) {
+                    file_state->data.resize(offset + chunk.size());
+                }
+                std::copy(chunk.begin(), chunk.end(), file_state->data.begin() + offset);
+            };
+        
+        std::function<void(const std::string&, uint64_t)> complete_callback = 
+            [file_state, state, spawn_callback, total_files, completion_callback](
+                const std::string& fname, uint64_t total_size) {
+                
+                file_state->complete = true;
+                file_state->data.resize(total_size);
+                
+                MIDDLEWARE_LOG_INFO("Parallel download complete: %s (%zu bytes)", 
+                                   fname.c_str(), file_state->data.size());
+                
+                // Call spawn callback with complete file data
+                if (spawn_callback && !file_state->data.empty()) {
+                    spawn_callback(fname, file_state->data);
+                }
+                
+                // Update completion state
+                size_t completed = state->completed_files.fetch_add(1) + 1;
+                size_t successful = state->successful_files.fetch_add(1) + 1;
+                
+                MIDDLEWARE_LOG_DEBUG("Parallel progress: %zu/%zu files", completed, total_files);
+                
+                // Check if all files are done
+                if (completed >= total_files) {
+                    MIDDLEWARE_LOG_INFO("All parallel downloads completed: %zu/%zu successful", 
+                                       successful, total_files);
+                    
+                    if (completion_callback && successful == total_files) {
+                        completion_callback();
+                    }
+                }
+            };
+        
+        std::function<void(const std::string&)> error_callback_wrapper = 
+            [filename, error_callback, state, total_files](const std::string& error_msg) {
+                
+                MIDDLEWARE_LOG_ERROR("Parallel download error for %s: %s", filename.c_str(), error_msg.c_str());
+                
+                if (error_callback) {
+                    error_callback(filename, error_msg);
+                }
+                
+                // Update completion state (with error)
+                size_t completed = state->completed_files.fetch_add(1) + 1;
+                
+                // Check if all files are done (including errors)
+                if (completed >= total_files) {
+                    MIDDLEWARE_LOG_INFO("All parallel downloads completed (with errors)");
+                    // Don't call completion_callback since there were errors
+                }
+            };
+        
+        // Start the async download (non-blocking)
+        bool started = this->requestFile(filename, target_rank, 
+                                        chunk_callback, complete_callback, 
+                                        error_callback_wrapper, timeout_ms);
+        
+        if (!started) {
+            MIDDLEWARE_LOG_ERROR("Failed to start parallel download for: %s", filename.c_str());
+            
+            if (error_callback) {
+                error_callback(filename, "Failed to start download");
+            }
+            
+            // Count as completed (with error)
+            state->completed_files.fetch_add(1);
+        }
+    }
+    
+    // Return true immediately - downloads run asynchronously
+    // Callbacks will handle completion and spawning
     return true;
 }
 

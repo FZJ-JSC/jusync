@@ -27,6 +27,9 @@
 
 namespace anari_usd_middleware {
 
+// Forward declaration
+class ParallelDownloadManager;
+
 /**
  * ANARI USD ZMQ DEALER Client
  * Connects to ANARI USD broker to request files from HPC workers
@@ -50,6 +53,7 @@ public:
     using FileCompleteCallback = std::function<void(const std::string& filename,
                                                     uint64_t totalSize)>;
     using FileListCallback = std::function<void(const std::vector<std::string>& files)>;
+    using FileListWithSizesCallback = std::function<void(const std::vector<FileInfo>& files)>;
     using ErrorCallback = std::function<void(const std::string& error)>;
     
     // Worker status callback types
@@ -116,8 +120,9 @@ public:
 
     // File request methods
     bool requestFileList(int32_t targetRank, FileListCallback callback, int timeoutMs = 10000);
-    bool requestFile(const std::string& filename, int32_t targetRank, 
-                     FileChunkCallback chunkCallback, 
+    bool requestFileListWithSizes(int32_t targetRank, FileListWithSizesCallback callback, int timeoutMs = 10000);
+    bool requestFile(const std::string& filename, int32_t targetRank,
+                     FileChunkCallback chunkCallback,
                      FileCompleteCallback completeCallback,
                      ErrorCallback errorCallback = nullptr,
                      int timeoutMs = 30000);
@@ -131,6 +136,7 @@ public:
     bool getFileSync(const std::string& filename, int32_t targetRank,
                      std::vector<uint8_t>& fileData, int timeoutMs = 30000);
     bool getFileListSync(int32_t targetRank, std::vector<std::string>& files, int timeoutMs = 10000);
+    bool getFileListWithSizesSync(int32_t targetRank, std::vector<FileInfo>& files, int timeoutMs = 10000);
 
     // Worker status queries
     bool requestWorkerStatus(int32_t targetRank, WorkerStatusCallback callback, int timeoutMs = 5000);
@@ -158,6 +164,19 @@ public:
     bool testConnection();
     void updateHealthStatus();
 
+    // Parallel download support
+    zmq::socket_t* getSocket() { return zmqSocket.get(); }
+    const zmq::socket_t* getSocket() const { return zmqSocket.get(); }
+    
+    // Parallel file requests
+    bool requestFilesParallel(
+        const std::vector<std::string>& filenames,
+        const std::vector<int32_t>& target_ranks,
+        std::function<void(const std::string&, const std::vector<uint8_t>&)> spawn_callback,
+        std::function<void()> completion_callback = nullptr,
+        std::function<void(const std::string&, const std::string&)> error_callback = nullptr,
+        int timeout_ms = 30000);
+
 private:
     // Connection management helpers
     bool configureSocket(int timeoutMs);
@@ -169,7 +188,7 @@ private:
     bool receiveResponse(void* buffer, size_t size, int timeoutMs);
 
     // Response handling
-    bool handleFileChunkResponse(const ZmqFileChunk& chunk, 
+    bool handleFileChunkResponse(const ZmqFileChunk& chunk,
                                   const std::vector<uint8_t>& chunkData,
                                   FileChunkCallback chunkCallback);
     bool handleFileCompleteResponse(const ZmqFileComplete& complete,
@@ -177,6 +196,9 @@ private:
     bool handleFileListResponse(const ZmqFileListResponse& list,
                                  const std::vector<uint8_t>& data,
                                  FileListCallback callback);
+    bool handleFileListWithSizesResponse(const ZmqFileListResponse& list,
+                                           const std::vector<uint8_t>& data,
+                                           FileListWithSizesCallback callback);
     bool handleErrorResponse(const ZmqErrorResponse& error,
                              ErrorCallback errorCallback);
 
@@ -194,6 +216,7 @@ private:
     // Member variables
     std::unique_ptr<zmq::context_t> zmqContext;
     std::unique_ptr<zmq::socket_t> zmqSocket;
+    std::unique_ptr<ParallelDownloadManager> parallelDownloadManager;
 
     // Connection state
     std::atomic<ConnectionStatus> connectionStatus{ConnectionStatus::Disconnected};
@@ -202,7 +225,7 @@ private:
 
     // Thread safety
     mutable std::mutex connectionMutex;
-    mutable std::mutex requestMutex;
+    mutable std::recursive_mutex requestMutex;
 
     // Request tracking
     std::atomic<uint32_t> nextRequestId{1};

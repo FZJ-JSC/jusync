@@ -152,6 +152,15 @@ public:
     void requestWorkerStatusAsync(int32_t targetRank, int timeoutMs, WorkerStatusCallback callback, BrokerErrorCallback errorCallback = nullptr);
     void requestFileListAsync(int32_t targetRank, int timeoutMs, FileListCallback callback, BrokerErrorCallback errorCallback = nullptr);
     void requestFileListWithSizesAsync(int32_t targetRank, int timeoutMs, FileListWithSizesCallback callback, BrokerErrorCallback errorCallback = nullptr);
+    
+    /* NEW: Parallel file downloads with RAM awareness and immediate spawning */
+    void requestFilesParallelAsync(
+        const std::vector<std::string>& filenames,
+        const std::vector<int32_t>& targetRanks,
+        int timeoutMs,
+        std::function<void(const std::string&, const std::vector<uint8_t>&)> fileReceivedCallback,
+        std::function<void()> completionCallback = nullptr,
+        std::function<void(const std::string&, const std::string&)> errorCallback = nullptr);
       
     /* NEW: String-based worker list (compatible with Python broker) */
     bool requestWorkerListString(std::vector<std::tuple<int32_t, std::string, std::string>>& outWorkers, int timeoutMs = 5000);
@@ -203,6 +212,9 @@ public:
 
     /* status / stats */
     std::string getStatusInfo() const;
+    
+    /* internal access for C API */
+    class AnariUsdClient* getClient() const;
 
 private:
     class Impl;
