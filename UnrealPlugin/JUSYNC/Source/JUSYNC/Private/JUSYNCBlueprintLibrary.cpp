@@ -2922,7 +2922,7 @@ void UJUSYNCBlueprintLibrary::RequestFilesParallelAsync(
         
         // Execute callbacks on game thread
         FFunctionGraphTask::CreateAndDispatchWhenReady(
-            [bSuccess, DownloadedFiles, OnFileReceived, OnComplete, OnError]()
+            [bSuccess, DownloadedFiles, Filenames, OnFileReceived, OnComplete, OnError]()
             {
                 if (bSuccess)
                 {
