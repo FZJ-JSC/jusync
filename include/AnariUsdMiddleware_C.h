@@ -462,6 +462,14 @@ ANARI_USD_MIDDLEWARE_C_API void FreeBuffer_C(unsigned char* buffer);
  */
 ANARI_USD_MIDDLEWARE_C_API void FreeFileData_C(CFileData* file_data);
 
+/**
+ * Free frame files array allocated by RequestFrame_C
+ *
+ * @param files Pointer to frame files array to free
+ * @param count Number of files in array
+ */
+ANARI_USD_MIDDLEWARE_C_API void FreeFrameFiles_C(CFileData* files, size_t count);
+
 // ============================================================================
 // CALLBACK REGISTRATION FUNCTIONS
 // ============================================================================

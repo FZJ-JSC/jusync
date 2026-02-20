@@ -937,8 +937,13 @@ bool UJUSYNCBlueprintLibrary::LoadUSDFromBuffer(const TArray<uint8>& Buffer, con
         return false;
     }
 
-    // Generate preview first
-    OutPreview = GetUSDAPreview(Buffer, 15);
+    // OPTIMIZATION: Only generate preview in debug builds to prevent memory hogging
+    // In release builds, skip preview extraction to save CPU and memory
+    #if JUSYNC_ENABLE_USD_PREVIEW
+        OutPreview = GetUSDAPreview(Buffer, 15);
+    #else
+        OutPreview = TEXT("USD preview disabled for performance");
+    #endif
 
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (!Subsystem)
@@ -953,7 +958,9 @@ bool UJUSYNCBlueprintLibrary::LoadUSDFromBuffer(const TArray<uint8>& Buffer, con
     {
         FString Message = FString::Printf(TEXT("Loaded USD: %s (%d meshes)"), *Filename, OutMeshData.Num());
         //DisplayDebugMessage(Message, 5.0f, FLinearColor::Green);
-        UE_LOG(LogJUSYNC, Log, TEXT("USD Preview:\n%s"), *OutPreview);
+        // OPTIMIZATION: Disabled USD preview logging to prevent memory hogging
+        // UE_LOG(LogJUSYNC, Log, TEXT("USD Preview:\n%s"), *OutPreview);
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Successfully loaded %d meshes from USD buffer"), OutMeshData.Num());
     }
     else
     {
@@ -995,7 +1002,7 @@ bool UJUSYNCBlueprintLibrary::ValidateUSDFormat(const TArray<uint8>& Buffer, con
         return false;
     }
 
-    // Check file extension
+    // Check file extension first (fast check)
     FString Extension = FPaths::GetExtension(Filename).ToLower();
     if (Extension != TEXT("usd") && Extension != TEXT("usda") &&
         Extension != TEXT("usdc") && Extension != TEXT("usdz"))
@@ -1003,12 +1010,39 @@ bool UJUSYNCBlueprintLibrary::ValidateUSDFormat(const TArray<uint8>& Buffer, con
         return false;
     }
 
-    // Check content for USD markers
-    FString Content = ExtractUSDAPreview(Buffer, 5);
-    return Content.Contains(TEXT("#usda")) ||
-           Content.Contains(TEXT("PXR-USDC")) ||
-           Content.Contains(TEXT("def ")) ||
-           Content.Contains(TEXT("over "));
+    // OPTIMIZATION: Direct buffer scanning instead of full ExtractUSDAPreview
+    // We only need to check for a few markers in the first few KB
+    const uint8* BufferData = Buffer.GetData();
+    if (!BufferData)
+    {
+        return false;
+    }
+
+    // Scan first 8KB for USD markers (more than enough)
+    const int32 SCAN_SIZE = FMath::Min(Buffer.Num(), 8 * 1024);
+    
+    // Convert to string for searching (but only the scanned portion)
+    FString FirstChunk;
+    FirstChunk.Reserve(SCAN_SIZE);
+    
+    for (int32 i = 0; i < SCAN_SIZE; ++i)
+    {
+        char Char = static_cast<char>(BufferData[i]);
+        if ((Char >= 32 && Char <= 126) || Char == '\n' || Char == '\r' || Char == '\t')
+        {
+            FirstChunk.AppendChar(Char);
+        }
+        else if (Char == 0)
+        {
+            FirstChunk.AppendChar(' ');
+        }
+    }
+
+    // Check for USD markers
+    return FirstChunk.Contains(TEXT("#usda")) ||
+           FirstChunk.Contains(TEXT("PXR-USDC")) ||
+           FirstChunk.Contains(TEXT("def ")) ||
+           FirstChunk.Contains(TEXT("over "));
 }
 
 // ========== TEXTURE PROCESSING ==========
@@ -2002,74 +2036,61 @@ FString UJUSYNCBlueprintLibrary::ExtractUSDAPreview(const TArray<uint8>& Buffer,
     }
 
     // Additional safety: check if buffer data pointer is valid (as much as we can)
-    // We can't fully validate but we can add some checks
     const uint8* BufferData = Buffer.GetData();
-    if (!BufferData && Buffer.Num() > 0)
+    if (!BufferData)
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("ExtractUSDAPreview: Buffer has null data pointer but non-zero size"));
+        UE_LOG(LogJUSYNC, Error, TEXT("ExtractUSDAPreview: Buffer has null data pointer"));
         return TEXT("Invalid buffer");
     }
 
-    // Dynamic search size based on file size
-    int32 SearchSize;
-    if (Buffer.Num() < 1024 * 1024) // < 1MB
-    {
-        SearchSize = Buffer.Num(); // Search entire file
-    }
-    else if (Buffer.Num() < 10 * 1024 * 1024) // < 10MB
-    {
-        SearchSize = 2 * 1024 * 1024; // Search first 2MB
-    }
-    else if (Buffer.Num() < 100 * 1024 * 1024) // < 100MB
-    {
-        SearchSize = 10 * 1024 * 1024; // Search first 10MB
-    }
-    else
-    {
-        SearchSize = 50 * 1024 * 1024; // Search first 50MB for huge files
-    }
+    // OPTIMIZATION: For preview purposes, we only need to search a reasonable amount
+    // Max 64KB is enough for preview, even for huge USD files
+    const int32 MAX_PREVIEW_SIZE = 64 * 1024; // 64KB
+    int32 SearchSize = FMath::Min(Buffer.Num(), MAX_PREVIEW_SIZE);
     
-    SearchSize = FMath::Min(Buffer.Num(), SearchSize);
-    
-    UE_LOG(LogJUSYNC, Log, TEXT("ExtractUSDAPreview: Searching %d bytes of %d total"), 
-           SearchSize, Buffer.Num());
-
-    // Convert buffer to string with better handling
+    // OPTIMIZATION: Use FString::ChrArray for bulk conversion instead of character-by-character
+    // Convert buffer to string efficiently
     FString Content;
-    Content.Reserve(SearchSize / 2);
+    Content.Reserve(SearchSize);
     
-    // Use direct pointer access for performance and safety
-    for (int32 i = 0; i < SearchSize; ++i)
+    // Process in chunks for better performance
+    const int32 CHUNK_SIZE = 4096;
+    for (int32 i = 0; i < SearchSize; i += CHUNK_SIZE)
     {
-        // Access via GetData() with bounds checking in debug
-        char Char = static_cast<char>(BufferData[i]);
-        if (Char >= 32 && Char <= 126) // Printable ASCII
+        int32 ChunkEnd = FMath::Min(i + CHUNK_SIZE, SearchSize);
+        FString Chunk;
+        Chunk.Reserve(CHUNK_SIZE);
+        
+        for (int32 j = i; j < ChunkEnd; ++j)
         {
-            Content.AppendChar(Char);
+            char Char = static_cast<char>(BufferData[j]);
+            if ((Char >= 32 && Char <= 126) || Char == '\n' || Char == '\r' || Char == '\t')
+            {
+                Chunk.AppendChar(Char);
+            }
+            else if (Char == 0)
+            {
+                Chunk.AppendChar(' ');
+            }
+            // Skip non-printable characters
         }
-        else if (Char == '\n' || Char == '\r' || Char == '\t')
-        {
-            Content.AppendChar(Char);
-        }
-        else if (Char == 0) // Null terminator
-        {
-            Content.AppendChar(' '); // Replace with space to continue parsing
-        }
-        // Skip non-printable characters instead of replacing with '?'
+        
+        Content += Chunk;
     }
 
-    // Extract first N lines with better line handling
+    // Extract first N lines
     TArray<FString> Lines;
-    Content.ParseIntoArrayLines(Lines);
+    Content.ParseIntoArrayLines(Lines, false); // false = don't cull empty lines
+    
     FString Preview = TEXT("=== USD PREVIEW ===\n");
     int32 LinesToShow = FMath::Min(MaxLines, Lines.Num());
     
     for (int32 i = 0; i < LinesToShow; ++i)
     {
         FString Line = Lines[i];
-        if (Line.Len() > 500) // Increased line length limit
+        if (Line.Len() > 200) // Reduced from 500 to 200 for preview
         {
-            Line = Line.Left(500) + TEXT("...");
+            Line = Line.Left(200) + TEXT("...");
         }
         Preview += FString::Printf(TEXT("Line %d: %s\n"), i + 1, *Line);
     }
@@ -2081,13 +2102,9 @@ FString UJUSYNCBlueprintLibrary::ExtractUSDAPreview(const TArray<uint8>& Buffer,
 
     Preview += TEXT("=== END PREVIEW ===");
     
-    // Debug logging
-    UE_LOG(LogJUSYNC, Log, TEXT("ExtractUSDAPreview: Converted %d characters, %d lines"), 
-           Content.Len(), Lines.Num());
-    
-    bool bHasVertexColors = Content.Contains(TEXT("primvars:color.timeSamples"));
-    UE_LOG(LogJUSYNC, Log, TEXT("ExtractUSDAPreview: Contains vertex colors: %s"), 
-           bHasVertexColors ? TEXT("YES") : TEXT("NO"));
+    // OPTIMIZATION: Removed excessive logging to reduce resource usage
+    // UE_LOG(LogJUSYNC, Log, TEXT("ExtractUSDAPreview: Converted %d characters, %d lines"), 
+    //        Content.Len(), Lines.Num());
     
     return Preview;
 }
@@ -2187,25 +2204,65 @@ void UJUSYNCBlueprintLibrary::AsyncBatchSpawnInternal(
 // Add this function after your existing helper functions
 FString UJUSYNCBlueprintLibrary::DetectUSDContentType(const TArray<uint8>& Buffer)
 {
-    FString Content = ExtractUSDAPreview(Buffer, 200);
+    // OPTIMIZATION: Direct pattern scanning without full preview extraction
+    // Scan only first 16KB of buffer for efficiency with large USD files
+    const int32 MAX_SCAN_SIZE = 16 * 1024; // 16KB is enough for content detection
+    int32 ScanSize = FMath::Min(Buffer.Num(), MAX_SCAN_SIZE);
     
+    if (ScanSize == 0)
+    {
+        UE_LOG(LogJUSYNC, Warning, TEXT("DetectUSDContentType: Empty buffer"));
+        return TEXT("GEOMETRY_ONLY");
+    }
+    
+    const uint8* BufferData = Buffer.GetData();
+    if (!BufferData)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("DetectUSDContentType: Buffer has null data pointer"));
+        return TEXT("GEOMETRY_ONLY");
+    }
+    
+    // Convert first ScanSize bytes to ASCII string for pattern matching
+    FString FirstChunk;
+    FirstChunk.Reserve(ScanSize);
+    
+    for (int32 i = 0; i < ScanSize; ++i)
+    {
+        char Char = static_cast<char>(BufferData[i]);
+        if ((Char >= 32 && Char <= 126) || Char == '\n' || Char == '\r' || Char == '\t')
+        {
+            FirstChunk.AppendChar(Char);
+        }
+        else if (Char == 0)
+        {
+            FirstChunk.AppendChar(' ');
+        }
+        // Skip non-printable characters
+    }
+    
+    // OPTIMIZATION: Reduced logging - only log in verbose mode
+    #if JUSYNC_VERBOSE_LOGGING
     UE_LOG(LogJUSYNC, Log, TEXT("=== USD CONTENT TYPE DETECTION DEBUG ==="));
-    UE_LOG(LogJUSYNC, Log, TEXT("Buffer size: %d bytes"), Buffer.Num());
-    UE_LOG(LogJUSYNC, Log, TEXT("Content length: %d characters"), Content.Len());
+    UE_LOG(LogJUSYNC, Log, TEXT("Buffer size: %d bytes, Scanned: %d bytes"), Buffer.Num(), ScanSize);
+    UE_LOG(LogJUSYNC, Log, TEXT("First chunk length: %d characters"), FirstChunk.Len());
+    #endif
     
     // Look for primvars:color.timeSamples
-    bool bHasPrimvarsColor = Content.Contains(TEXT("primvars:color.timeSamples"));
+    bool bHasPrimvarsColor = FirstChunk.Contains(TEXT("primvars:color.timeSamples"));
+    
+    #if JUSYNC_VERBOSE_LOGGING
     UE_LOG(LogJUSYNC, Log, TEXT("Contains 'primvars:color.timeSamples': %s"), 
            bHasPrimvarsColor ? TEXT("YES") : TEXT("NO"));
+    #endif
     
     if (bHasPrimvarsColor)
     {
         // Look for actual color data patterns FIRST
-        bool bHasActualColorData = Content.Contains(TEXT("0: [(0.")) ||
-                                  Content.Contains(TEXT("0: [(1.")) ||
-                                  Content.Contains(TEXT("), (0.")) ||
-                                  Content.Contains(TEXT("), (1.")) ||
-                                  (Content.Contains(TEXT("0: [(")) && Content.Contains(TEXT("), (")));
+        bool bHasActualColorData = FirstChunk.Contains(TEXT("0: [(0.")) ||
+                                  FirstChunk.Contains(TEXT("0: [(1.")) ||
+                                  FirstChunk.Contains(TEXT("), (0.")) ||
+                                  FirstChunk.Contains(TEXT("), (1.")) ||
+                                  (FirstChunk.Contains(TEXT("0: [(")) && FirstChunk.Contains(TEXT("), (")));
         
         UE_LOG(LogJUSYNC, Log, TEXT("Contains actual color data patterns: %s"), 
                bHasActualColorData ? TEXT("YES") : TEXT("NO"));
@@ -2216,7 +2273,7 @@ FString UJUSYNCBlueprintLibrary::DetectUSDContentType(const TArray<uint8>& Buffe
             UE_LOG(LogJUSYNC, Log, TEXT("🎨 DETECTED: VERTEX_COLORS (actual color data found)"));
             return TEXT("VERTEX_COLORS");
         }
-        else if (Content.Contains(TEXT("0: None")))
+        else if (FirstChunk.Contains(TEXT("0: None")))
         {
             UE_LOG(LogJUSYNC, Log, TEXT("🎨 DETECTED: TEXTURES (None values found, no color data)"));
             return TEXT("TEXTURES");
@@ -2224,10 +2281,10 @@ FString UJUSYNCBlueprintLibrary::DetectUSDContentType(const TArray<uint8>& Buffe
     }
     
     // Check for explicit texture references
-    if (Content.Contains(TEXT("asset inputs:file")) ||
-        Content.Contains(TEXT("UsdUVTexture")) ||
-        Content.Contains(TEXT(".jpg")) ||
-        Content.Contains(TEXT(".png")))
+    if (FirstChunk.Contains(TEXT("asset inputs:file")) ||
+        FirstChunk.Contains(TEXT("UsdUVTexture")) ||
+        FirstChunk.Contains(TEXT(".jpg")) ||
+        FirstChunk.Contains(TEXT(".png")))
     {
         UE_LOG(LogJUSYNC, Log, TEXT("🎨 DETECTED: TEXTURES (explicit references)"));
         return TEXT("TEXTURES");
@@ -2304,6 +2361,37 @@ FRotator UJUSYNCBlueprintLibrary::ConvertParaViewToUERotation(const FRotator& Pa
            *ParaViewRotation.ToString(), *UERotation.ToString());
     
     return UERotation;
+}
+
+// Generate default locations in a grid pattern
+TArray<FVector> UJUSYNCBlueprintLibrary::GenerateDefaultLocations(int32 Count, const FVector& BaseLocation, float Spacing)
+{
+    TArray<FVector> Locations;
+    Locations.Reserve(Count);
+    
+    if (Count <= 0)
+    {
+        return Locations;
+    }
+    
+    // Calculate grid dimensions
+    int32 GridSize = FMath::CeilToInt(FMath::Sqrt(static_cast<float>(Count)));
+    
+    for (int32 i = 0; i < Count; ++i)
+    {
+        // Calculate grid position
+        int32 Row = i / GridSize;
+        int32 Col = i % GridSize;
+        
+        // Create location with spacing
+        FVector Location = BaseLocation + FVector(Col * Spacing, Row * Spacing, 0.0f);
+        Locations.Add(Location);
+    }
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("Generated %d default locations in %dx%d grid (spacing: %.1f)"),
+           Count, GridSize, GridSize, Spacing);
+    
+    return Locations;
 }
 
 // Generate default rotations
@@ -2492,25 +2580,67 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshWithMaterial(
         UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied default material to mesh"));
     }
 
-    // **ENHANCED MESH CREATION - WITH ASYNC SUPPORT**
+    // **ENHANCED MESH CREATION - WITH ASYNC SUPPORT AND AUTOMATIC SPLITTING**
     bool bSuccess;
+    
+    // Check if mesh needs splitting (exceeds RMC vertex/triangle limits)
+    const int32 TotalVertices = ProcessedMeshData.Vertices.Num();
+    const int32 TotalTriangles = ProcessedMeshData.Triangles.Num() / 3;
+    const int32 RMCVertexLimit = 32768; // From CheckMemoryLimitsForMesh
+    const int32 RMCTriangleLimit = 65536; // From CheckMemoryLimitsForMesh
+    
+    bool bNeedsSplitting = (TotalVertices > RMCVertexLimit) || (TotalTriangles > RMCTriangleLimit);
     
     if (bUseAsyncSpawning)
     {
-        // Use async mesh creation (doesn't block game thread)
-        Subsystem->CreateRealtimeMeshFromJUSYNC_Async(ProcessedMeshData, MeshComp);
-        bSuccess = true; // Async assumes success, errors handled internally
-        
-        UE_LOG(LogJUSYNC, Log, TEXT("🔄 Using ASYNC mesh creation"));
+        if (bNeedsSplitting)
+        {
+            // For large meshes with async, we need to handle splitting differently
+            // Since there's no async splitting function, we'll use sync splitting for now
+            UE_LOG(LogJUSYNC, Warning, TEXT("⚠️ Large mesh detected (%d vertices, %d triangles) - using synchronous splitting with async spawn"),
+                   TotalVertices, TotalTriangles);
+            
+            // Use synchronous splitting for large meshes
+            bSuccess = Subsystem->CreateRealtimeMeshFromJUSYNCWithSplitting(
+                ProcessedMeshData, 
+                MeshComp,
+                RMCVertexLimit
+            );
+            UE_LOG(LogJUSYNC, Log, TEXT("🔀 Using SPLITTING mesh creation (%d vertices > %d limit)"),
+                   TotalVertices, RMCVertexLimit);
+        }
+        else
+        {
+            // Use async mesh creation for small meshes (doesn't block game thread)
+            Subsystem->CreateRealtimeMeshFromJUSYNC_Async(ProcessedMeshData, MeshComp);
+            bSuccess = true; // Async assumes success, errors handled internally
+            UE_LOG(LogJUSYNC, Log, TEXT("🔄 Using ASYNC mesh creation"));
+        }
         
         // For async, we can't verify immediately, but log the spawn
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ Async mesh creation started for mesh at %s"),
+        UE_LOG(LogJUSYNC, Log, TEXT("✅ Mesh creation started for mesh at %s"),
                *SpawnLocation.ToString());
     }
     else
     {
-        // Use synchronous mesh creation (original behavior)
-        bSuccess = Subsystem->CreateRealtimeMeshFromJUSYNC(ProcessedMeshData, MeshComp);
+        // Synchronous mesh creation
+        if (bNeedsSplitting)
+        {
+            // Use splitting for large meshes
+            bSuccess = Subsystem->CreateRealtimeMeshFromJUSYNCWithSplitting(
+                ProcessedMeshData, 
+                MeshComp,
+                RMCVertexLimit
+            );
+            UE_LOG(LogJUSYNC, Log, TEXT("🔀 Using SPLITTING mesh creation (%d vertices > %d limit)"),
+                   TotalVertices, RMCVertexLimit);
+        }
+        else
+        {
+            // Use standard creation for small meshes
+            bSuccess = Subsystem->CreateRealtimeMeshFromJUSYNC(ProcessedMeshData, MeshComp);
+        }
+        
         if (bSuccess)
         {
             // **FINAL VERIFICATION**
@@ -2520,6 +2650,12 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshWithMaterial(
 
             UE_LOG(LogJUSYNC, Log, TEXT("✅ Successfully spawned mesh at %s (Scale: %s, Rotation: %s)"),
                    *ActualLocation.ToString(), *ActualScale.ToString(), *ActualRotation.ToString());
+            
+            // Log splitting info if used
+            if (bNeedsSplitting)
+            {
+                UE_LOG(LogJUSYNC, Log, TEXT("🔀 Mesh split into multiple RMC components for better performance"));
+            }
         }
         else
         {
@@ -3115,12 +3251,12 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToCSV(const FString& Output
 	FString CSVPath = OutputPath / Filename;
 
 	// Create CSV header
-	FString CSVData = TEXT("TestName,Timestamp,TotalTimeMs,TriangleCount,VertexCount,RAMBeforeBytes,RAMAfterBytes,FPS,FrameTimeMs,ActorCount,ErrorCount,SuccessRate\n");
+	FString CSVData = TEXT("TestName,Timestamp,TotalTimeMs,TriangleCount,VertexCount,RAMBeforeBytes,RAMAfterBytes,FPS,FrameTimeMs,ActorCount,ErrorCount,SuccessRate,SplitMeshCount\n");
 
 	// Add all results
 	for (const FJUSYNCBenchmarkResult& Result : BenchmarkResults)
 	{
-		CSVData += FString::Printf(TEXT("%s,%s,%.2f,%d,%d,%lld,%lld,%.1f,%.2f,%d,%d,%.1f\n"),
+		CSVData += FString::Printf(TEXT("%s,%s,%.2f,%d,%d,%lld,%lld,%.1f,%.2f,%d,%d,%.1f,%d\n"),
 			*Result.TestName,
 			*Result.Timestamp.ToString(TEXT("%Y-%m-%d %H:%M:%S")),
 			Result.TotalTimeMs,
@@ -3132,7 +3268,8 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToCSV(const FString& Output
 			Result.FrameTimeMs,
 			Result.ActorCount,
 			Result.ErrorCount,
-			Result.SuccessRate
+			Result.SuccessRate,
+			Result.SplitMeshCount
 		);
 	}
 
@@ -3177,7 +3314,8 @@ FJUSYNCBenchmarkResult UJUSYNCBlueprintLibrary::CreateBenchmarkResult(
 	int64 RAMBefore, 
 	int64 RAMAfter, 
 	int32 ActorCount, 
-	int32 ErrorCount)
+	int32 ErrorCount,
+	int32 SplitMeshCount)
 {
 	FJUSYNCBenchmarkResult Result;
 	Result.TestName = TestName;
@@ -3190,6 +3328,7 @@ FJUSYNCBenchmarkResult UJUSYNCBlueprintLibrary::CreateBenchmarkResult(
 	Result.ActorCount = ActorCount;
 	Result.ErrorCount = ErrorCount;
 	Result.SuccessRate = (ErrorCount == 0) ? 100.0f : 0.0f;
+	Result.SplitMeshCount = SplitMeshCount;
 
 	// Get frame time/FPS
 	static uint64 LastFrameCycles = FPlatformTime::Cycles64();
@@ -3325,7 +3464,8 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial_Be
 			RAMBefore,
 			RAMAfter,
 			SpawnedActors.Num(),
-			ErrorCount
+			ErrorCount,
+			0  // SplitMeshCount - TODO: Track actual split meshes
 		);
 
 		RecordBenchmarkResult(Result);

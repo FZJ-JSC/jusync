@@ -219,18 +219,19 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
         bool bDetectedVertexInterp = (ColorCount == VertexCount);
         bool bDetectedUniformInterp = (ColorCount == FaceCount);
         
-        UE_LOG(LogJUSYNC, Log, TEXT("🎨 Color conversion: %d colors, %d vertices, %d faces"),
-               ColorCount, VertexCount, FaceCount);
-        UE_LOG(LogJUSYNC, Log, TEXT("🎨 Detected: %s | Force Vertex: %s"),
-               bDetectedVertexInterp ? TEXT("VERTEX") : (bDetectedUniformInterp ? TEXT("UNIFORM") : TEXT("UNKNOWN")),
-               bForceVertexInterpolation ? TEXT("YES") : TEXT("NO"));
+        // OPTIMIZATION: Reduced logging to improve performance
+        // UE_LOG(LogJUSYNC, Log, TEXT("🎨 Color conversion: %d colors, %d vertices, %d faces"),
+        //        ColorCount, VertexCount, FaceCount);
+        // UE_LOG(LogJUSYNC, Log, TEXT("🎨 Detected: %s | Force Vertex: %s"),
+        //        bDetectedVertexInterp ? TEXT("VERTEX") : (bDetectedUniformInterp ? TEXT("UNIFORM") : TEXT("UNKNOWN")),
+        //        bForceVertexInterpolation ? TEXT("YES") : TEXT("NO"));
 
         UEMesh.VertexColors.Reserve(VertexCount);
 
         if (bDetectedVertexInterp)
         {
             // ✅ CASE 1: Already vertex interpolation - direct mapping (PRESERVED)
-            UE_LOG(LogJUSYNC, Log, TEXT("🎨 Using direct VERTEX interpolation"));
+            // UE_LOG(LogJUSYNC, Log, TEXT("🎨 Using direct VERTEX interpolation"));
             for (int32 i = 0; i < VertexCount; ++i)
             {
                 int64 idx = int64(i) * 4;
@@ -244,7 +245,7 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
         else if (bDetectedUniformInterp && bForceVertexInterpolation)
         {
             // ✅ CASE 2: Uniform detected + Force Vertex = Convert uniform to smooth vertex interpolation
-            UE_LOG(LogJUSYNC, Log, TEXT("🎨 CONVERTING uniform to smooth VERTEX interpolation"));
+            // UE_LOG(LogJUSYNC, Log, TEXT("🎨 CONVERTING uniform to smooth VERTEX interpolation"));
             
             // Initialize vertex color accumulation arrays
             TArray<FLinearColor> AccumulatedColors;
@@ -870,8 +871,8 @@ bool UJUSYNCSubsystem::GetImageRowAsPNGBuffer(const TArray<uint8>& Buffer, int32
         OutPNGBuffer.SetNum(out_size);
         FMemory::Memcpy(OutPNGBuffer.GetData(), out_buffer, out_size);
         
-        // Free the C-allocated buffer
-        delete[] out_buffer;
+        // Free the C-allocated buffer using middleware function
+        FreeBuffer_C(out_buffer);
         
         UE_LOG(LogJUSYNC, Log, TEXT("Extracted row %d as PNG buffer: %d bytes"), RowIndex, out_size);
         return true;
@@ -880,7 +881,7 @@ bool UJUSYNCSubsystem::GetImageRowAsPNGBuffer(const TArray<uint8>& Buffer, int32
     {
         if (out_buffer)
         {
-            delete[] out_buffer;
+            FreeBuffer_C(out_buffer);
         }
         UE_LOG(LogJUSYNC, Error, TEXT("Failed to extract row %d as PNG buffer"), RowIndex);
     }
@@ -947,15 +948,35 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
     const FJUSYNCMeshData& InMeshData,
     URealtimeMeshComponent* RealtimeMeshComponent)
 {
-    if (!RealtimeMeshComponent || !InMeshData.IsValid())
+    // Enhanced safety checks
+    if (!RealtimeMeshComponent || !RealtimeMeshComponent->IsValidLowLevel())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid input to CreateRealtimeMeshFromJUSYNC"));
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid or destroyed RealtimeMeshComponent"));
+        return false;
+    }
+
+    if (!InMeshData.IsValid())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid mesh data"));
         return false;
     }
 
     // Use the mesh data as-is (already processed by ConvertCMeshDataToUE_Helper with forced vertex interpolation)
     const FJUSYNCMeshData& MeshData = InMeshData;
     
+    // Additional validation of mesh data arrays
+    if (MeshData.Vertices.Num() == 0)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Mesh has no vertices"));
+        return false;
+    }
+
+    if (MeshData.Triangles.Num() < 3 || (MeshData.Triangles.Num() % 3) != 0)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid triangle count: %d (must be multiple of 3)"), MeshData.Triangles.Num());
+        return false;
+    }
+
     UE_LOG(LogJUSYNC, Log, TEXT("🎨 === SMOOTH VERTEX INTERPOLATION MESH CREATION ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Mesh: %d vertices, %d triangles, %d colors"),
            MeshData.Vertices.Num(), MeshData.Triangles.Num() / 3, MeshData.VertexColors.Num());
@@ -963,6 +984,12 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
     // Calculate final counts (already processed by helper function)
     const int32 FinalVertexCount = MeshData.Vertices.Num();
     const int32 FinalTriCount = MeshData.Triangles.Num() / 3;
+
+    // Safety: Ensure we don't exceed reasonable limits
+    if (FinalVertexCount > 1000000)
+    {
+        UE_LOG(LogJUSYNC, Warning, TEXT("⚠️ Very large mesh: %d vertices (consider splitting)"), FinalVertexCount);
+    }
 
     // Initialize RealtimeMesh builder
     URealtimeMeshSimple* RealtimeMesh = RealtimeMeshComponent->InitializeRealtimeMesh<URealtimeMeshSimple>();
@@ -1084,6 +1111,539 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
     return true;
 }
 
+bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNCWithSplitting(
+    const FJUSYNCMeshData& MeshData,
+    URealtimeMeshComponent* RealtimeMeshComponent,
+    int32 MaxVerticesPerChunk)
+{
+    // Enhanced safety checks
+    if (!RealtimeMeshComponent || !RealtimeMeshComponent->IsValidLowLevel())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid or destroyed RealtimeMeshComponent"));
+        return false;
+    }
+
+    if (!MeshData.IsValid())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid mesh data"));
+        return false;
+    }
+
+    const int32 TotalVertices = MeshData.Vertices.Num();
+    const int32 TotalTriangles = MeshData.Triangles.Num() / 3;
+
+    UE_LOG(LogJUSYNC, Log, TEXT("🎨 === MESH CREATION WITH SPLITTING ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Mesh: %d vertices, %d triangles, MaxVerticesPerChunk: %d"),
+           TotalVertices, TotalTriangles, MaxVerticesPerChunk);
+
+    // If mesh is small enough, use the standard method
+    if (TotalVertices <= MaxVerticesPerChunk)
+    {
+        UE_LOG(LogJUSYNC, Log, TEXT("Mesh is small enough (%d vertices), using standard creation"), TotalVertices);
+        return this->CreateRealtimeMeshFromJUSYNC(MeshData, RealtimeMeshComponent);
+    }
+
+    // Calculate number of chunks needed
+    const int32 NumChunks = FMath::CeilToInt((float)TotalVertices / MaxVerticesPerChunk);
+    UE_LOG(LogJUSYNC, Log, TEXT("Splitting mesh into %d chunks (each <= %d vertices)"), NumChunks, MaxVerticesPerChunk);
+
+    // Initialize RealtimeMesh builder
+    URealtimeMeshSimple* RealtimeMesh = RealtimeMeshComponent->InitializeRealtimeMesh<URealtimeMeshSimple>();
+    if (!RealtimeMesh)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to initialize RealtimeMesh"));
+        return false;
+    }
+
+    RealtimeMesh->SetupMaterialSlot(0, TEXT("PrimaryMaterial"));
+
+    // Apply material if none is set
+    if (!RealtimeMeshComponent->GetMaterial(0))
+    {
+        UMaterialInterface* VertexColorMaterial = GetCachedMaterial(TEXT("/Game/Materials/M_VertexColor"));
+        if (VertexColorMaterial)
+        {
+            RealtimeMeshComponent->SetMaterial(0, VertexColorMaterial);
+            UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied cached M_VertexColor material"));
+        }
+    }
+
+    // Use the new splitting system
+    TArray<FJUSYNCMeshData> SplitMeshes = this->SplitLargeMeshForRealtimeMesh(MeshData, MaxVerticesPerChunk, true);
+    
+    if (SplitMeshes.Num() == 0)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to split mesh"));
+        return false;
+    }
+
+    UE_LOG(LogJUSYNC, Log, TEXT("✅ Successfully split mesh into %d chunks"), SplitMeshes.Num());
+
+    // Create mesh sections for each chunk
+    for (int32 ChunkIdx = 0; ChunkIdx < SplitMeshes.Num(); ++ChunkIdx)
+    {
+        const FJUSYNCMeshData& ChunkMesh = SplitMeshes[ChunkIdx];
+        
+        FRealtimeMeshSectionGroupKey GroupKey = FRealtimeMeshSectionGroupKey::Create(0, *FString::Printf(TEXT("Chunk%d"), ChunkIdx));
+        FRealtimeMeshSectionKey SectionKey = FRealtimeMeshSectionKey::CreateForPolyGroup(GroupKey, 0);
+        
+        RealtimeMesh::FRealtimeMeshStreamSet Streams;
+        auto Builder = RealtimeMesh::TRealtimeMeshBuilderLocal<uint32>(Streams);
+        Builder.EnableTangents();
+        Builder.EnableTexCoords();
+        Builder.EnableColors();
+        Builder.EnablePolyGroups();
+        
+        const int32 VertexCount = ChunkMesh.Vertices.Num();
+        const int32 TriangleCount = ChunkMesh.Triangles.Num() / 3;
+        
+        // Add vertices
+        for (int32 i = 0; i < VertexCount; ++i)
+        {
+            Builder.AddVertex(FVector3f(ChunkMesh.Vertices[i]));
+            
+            // Normals
+            FVector3f N = FVector3f(ChunkMesh.Normals.IsValidIndex(i) ? ChunkMesh.Normals[i] : FVector::UpVector);
+            Builder.SetNormal(i, N);
+            
+            // UVs
+            if (ChunkMesh.UVs.IsValidIndex(i))
+            {
+                Builder.SetTexCoord(i, 0, FVector2DHalf(FVector2f(ChunkMesh.UVs[i])));
+            }
+            else
+            {
+                Builder.SetTexCoord(i, 0, FVector2DHalf(FVector2f::ZeroVector));
+            }
+            
+            // Colors
+            if (ChunkMesh.VertexColors.IsValidIndex(i))
+            {
+                Builder.SetColor(i, ChunkMesh.VertexColors[i]);
+            }
+            else
+            {
+                Builder.SetColor(i, FColor::White);
+            }
+        }
+        
+        // Add triangles
+        for (int32 Face = 0; Face < TriangleCount; ++Face)
+        {
+            int32 i0 = ChunkMesh.Triangles[Face * 3 + 0];
+            int32 i1 = ChunkMesh.Triangles[Face * 3 + 1];
+            int32 i2 = ChunkMesh.Triangles[Face * 3 + 2];
+            
+            if (i0 < VertexCount && i1 < VertexCount && i2 < VertexCount)
+            {
+                Builder.AddTriangle(i0, i1, i2);
+            }
+            else
+            {
+                UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid triangle %d in chunk %d: [%d,%d,%d] vs %d vertices"),
+                       Face, ChunkIdx, i0, i1, i2, VertexCount);
+            }
+        }
+        
+        // Create section group
+        RealtimeMesh->CreateSectionGroup(GroupKey, Streams);
+        
+        // Configure section
+        FRealtimeMeshSectionConfig SectionConfig(0);
+        SectionConfig.bIsVisible = true;
+        SectionConfig.bCastsShadow = true;
+        RealtimeMesh->UpdateSectionConfig(SectionKey, SectionConfig, true);
+        
+        UE_LOG(LogJUSYNC, Log, TEXT("  Created chunk %d: %d vertices, %d triangles"),
+               ChunkIdx, VertexCount, TriangleCount);
+    }
+
+    UE_LOG(LogJUSYNC, Log, TEXT("✅ Successfully created mesh with %d sections"), SplitMeshes.Num());
+    UE_LOG(LogJUSYNC, Log, TEXT("🎨 === MESH CREATION WITH SPLITTING COMPLETE ==="));
+
+    return true;
+}
+
+TArray<FJUSYNCMeshData> UJUSYNCSubsystem::SplitLargeMeshForRealtimeMesh(
+    const FJUSYNCMeshData& LargeMesh,
+    int32 MaxVerticesPerChunk,
+    bool bPreserveConnectivity)
+{
+    TArray<FJUSYNCMeshData> SplitMeshes;
+    
+    if (!LargeMesh.IsValid())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot split invalid mesh"));
+        return SplitMeshes;
+    }
+
+    const int32 TotalVertices = LargeMesh.Vertices.Num();
+    const int32 TotalTriangles = LargeMesh.Triangles.Num() / 3;
+
+    UE_LOG(LogJUSYNC, Log, TEXT("🔪 === SPLITTING LARGE MESH ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Input: %d vertices, %d triangles"), TotalVertices, TotalTriangles);
+    UE_LOG(LogJUSYNC, Log, TEXT("Max vertices per chunk: %d, Preserve connectivity: %s"),
+           MaxVerticesPerChunk, bPreserveConnectivity ? TEXT("Yes") : TEXT("No"));
+
+    // If mesh is already small enough, return it as a single chunk
+    if (TotalVertices <= MaxVerticesPerChunk)
+    {
+        UE_LOG(LogJUSYNC, Log, TEXT("Mesh is already small enough (%d vertices), returning as single chunk"), TotalVertices);
+        SplitMeshes.Add(LargeMesh);
+        return SplitMeshes;
+    }
+
+    // Calculate bounding box for spatial partitioning
+    FBox BoundingBox(ForceInit);
+    for (const FVector& Vertex : LargeMesh.Vertices)
+    {
+        BoundingBox += Vertex;
+    }
+
+    FVector BoxSize = BoundingBox.GetSize();
+    UE_LOG(LogJUSYNC, Log, TEXT("Bounding box: Min=%s, Max=%s, Size=%s"),
+           *BoundingBox.Min.ToString(), *BoundingBox.Max.ToString(), *BoxSize.ToString());
+
+    // Simple spatial partitioning: grid-based splitting
+    // Calculate grid dimensions based on vertex count and desired chunk size
+    int32 NumChunks = FMath::CeilToInt((float)TotalVertices / MaxVerticesPerChunk);
+    
+    // For spatial partitioning, use cubic root to get roughly equal chunks in 3D
+    int32 GridCellsPerAxis = FMath::CeilToInt(FMath::Pow((float)NumChunks, 1.0f / 3.0f));
+    NumChunks = GridCellsPerAxis * GridCellsPerAxis * GridCellsPerAxis;
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("Splitting into %d chunks (%dx%dx%d grid)"),
+           NumChunks, GridCellsPerAxis, GridCellsPerAxis, GridCellsPerAxis);
+
+    // Initialize chunk data structures
+    TArray<TArray<int32>> ChunkVertices;  // Vertex indices per chunk
+    TArray<TArray<int32>> ChunkTriangles; // Triangle indices per chunk
+    TArray<TMap<int32, int32>> VertexRemapping; // Original -> Chunk vertex mapping
+    
+    ChunkVertices.SetNum(NumChunks);
+    ChunkTriangles.SetNum(NumChunks);
+    VertexRemapping.SetNum(NumChunks);
+
+    // Calculate grid cell size
+    FVector CellSize = BoxSize / GridCellsPerAxis;
+    if (CellSize.X < 1.0f) CellSize.X = 1.0f;
+    if (CellSize.Y < 1.0f) CellSize.Y = 1.0f;
+    if (CellSize.Z < 1.0f) CellSize.Z = 1.0f;
+
+    // Assign vertices to grid cells
+    for (int32 VertexIdx = 0; VertexIdx < TotalVertices; ++VertexIdx)
+    {
+        const FVector& Vertex = LargeMesh.Vertices[VertexIdx];
+        
+        // Calculate grid cell coordinates
+        FVector RelativePos = Vertex - BoundingBox.Min;
+        int32 CellX = FMath::Clamp(FMath::FloorToInt(RelativePos.X / CellSize.X), 0, GridCellsPerAxis - 1);
+        int32 CellY = FMath::Clamp(FMath::FloorToInt(RelativePos.Y / CellSize.Y), 0, GridCellsPerAxis - 1);
+        int32 CellZ = FMath::Clamp(FMath::FloorToInt(RelativePos.Z / CellSize.Z), 0, GridCellsPerAxis - 1);
+        
+        int32 ChunkIdx = CellX + CellY * GridCellsPerAxis + CellZ * GridCellsPerAxis * GridCellsPerAxis;
+        
+        if (ChunkIdx >= 0 && ChunkIdx < NumChunks)
+        {
+            // Add vertex to chunk with remapping
+            int32 NewVertexIdx = ChunkVertices[ChunkIdx].Num();
+            ChunkVertices[ChunkIdx].Add(VertexIdx);
+            VertexRemapping[ChunkIdx].Add(VertexIdx, NewVertexIdx);
+        }
+        else
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("Vertex %d at %s assigned to invalid chunk %d"),
+                   VertexIdx, *Vertex.ToString(), ChunkIdx);
+        }
+    }
+
+    // Assign triangles to chunks based on their vertices
+    for (int32 TriIdx = 0; TriIdx < TotalTriangles; ++TriIdx)
+    {
+        int32 V0 = LargeMesh.Triangles[TriIdx * 3 + 0];
+        int32 V1 = LargeMesh.Triangles[TriIdx * 3 + 1];
+        int32 V2 = LargeMesh.Triangles[TriIdx * 3 + 2];
+
+        // Find which chunk contains the triangle centroid
+        FVector Centroid = (LargeMesh.Vertices[V0] + LargeMesh.Vertices[V1] + LargeMesh.Vertices[V2]) / 3.0f;
+        FVector RelativePos = Centroid - BoundingBox.Min;
+        
+        int32 CellX = FMath::Clamp(FMath::FloorToInt(RelativePos.X / CellSize.X), 0, GridCellsPerAxis - 1);
+        int32 CellY = FMath::Clamp(FMath::FloorToInt(RelativePos.Y / CellSize.Y), 0, GridCellsPerAxis - 1);
+        int32 CellZ = FMath::Clamp(FMath::FloorToInt(RelativePos.Z / CellSize.Z), 0, GridCellsPerAxis - 1);
+        
+        int32 ChunkIdx = CellX + CellY * GridCellsPerAxis + CellZ * GridCellsPerAxis * GridCellsPerAxis;
+
+        if (ChunkIdx >= 0 && ChunkIdx < NumChunks)
+        {
+            // Check if all triangle vertices are in this chunk (or have been remapped)
+            bool bV0InChunk = VertexRemapping[ChunkIdx].Contains(V0);
+            bool bV1InChunk = VertexRemapping[ChunkIdx].Contains(V1);
+            bool bV2InChunk = VertexRemapping[ChunkIdx].Contains(V2);
+
+            if (bV0InChunk && bV1InChunk && bV2InChunk)
+            {
+                // All vertices are in this chunk, add triangle with remapped indices
+                ChunkTriangles[ChunkIdx].Add(VertexRemapping[ChunkIdx][V0]);
+                ChunkTriangles[ChunkIdx].Add(VertexRemapping[ChunkIdx][V1]);
+                ChunkTriangles[ChunkIdx].Add(VertexRemapping[ChunkIdx][V2]);
+            }
+            else if (bPreserveConnectivity)
+            {
+                // Some vertices are not in this chunk, but we need to preserve connectivity
+                // For now, we'll add the triangle anyway with the vertices we have
+                // In a more advanced implementation, we would duplicate vertices at chunk boundaries
+                UE_LOG(LogJUSYNC, Verbose, TEXT("Triangle %d spans multiple chunks, connectivity may be broken"), TriIdx);
+            }
+        }
+    }
+
+    // Create split meshes from chunks
+    int32 ValidChunks = 0;
+    for (int32 ChunkIdx = 0; ChunkIdx < NumChunks; ++ChunkIdx)
+    {
+        if (ChunkVertices[ChunkIdx].Num() == 0 || ChunkTriangles[ChunkIdx].Num() == 0)
+        {
+            // Empty chunk, skip it
+            continue;
+        }
+
+        FJUSYNCMeshData ChunkMesh;
+        ChunkMesh.ElementName = FString::Printf(TEXT("%s_Chunk%d"), *LargeMesh.ElementName, ChunkIdx);
+        ChunkMesh.TypeName = LargeMesh.TypeName;
+
+        // Copy vertices with remapping
+        ChunkMesh.Vertices.Reserve(ChunkVertices[ChunkIdx].Num());
+        for (int32 OrigVertexIdx : ChunkVertices[ChunkIdx])
+        {
+            ChunkMesh.Vertices.Add(LargeMesh.Vertices[OrigVertexIdx]);
+        }
+
+        // Copy triangles (already remapped)
+        ChunkMesh.Triangles = ChunkTriangles[ChunkIdx];
+
+        // Copy normals if available
+        if (LargeMesh.Normals.Num() == TotalVertices)
+        {
+            ChunkMesh.Normals.Reserve(ChunkVertices[ChunkIdx].Num());
+            for (int32 OrigVertexIdx : ChunkVertices[ChunkIdx])
+            {
+                ChunkMesh.Normals.Add(LargeMesh.Normals[OrigVertexIdx]);
+            }
+        }
+
+        // Copy UVs if available
+        if (LargeMesh.UVs.Num() == TotalVertices)
+        {
+            ChunkMesh.UVs.Reserve(ChunkVertices[ChunkIdx].Num());
+            for (int32 OrigVertexIdx : ChunkVertices[ChunkIdx])
+            {
+                ChunkMesh.UVs.Add(LargeMesh.UVs[OrigVertexIdx]);
+            }
+        }
+
+        // Copy vertex colors if available
+        if (LargeMesh.VertexColors.Num() == TotalVertices)
+        {
+            ChunkMesh.VertexColors.Reserve(ChunkVertices[ChunkIdx].Num());
+            for (int32 OrigVertexIdx : ChunkVertices[ChunkIdx])
+            {
+                ChunkMesh.VertexColors.Add(LargeMesh.VertexColors[OrigVertexIdx]);
+            }
+        }
+
+        if (ChunkMesh.IsValid())
+        {
+            SplitMeshes.Add(ChunkMesh);
+            ValidChunks++;
+            
+            UE_LOG(LogJUSYNC, Log, TEXT("  Chunk %d: %d vertices, %d triangles"),
+                   ChunkIdx, ChunkMesh.Vertices.Num(), ChunkMesh.Triangles.Num() / 3);
+        }
+    }
+
+    UE_LOG(LogJUSYNC, Log, TEXT("✅ Split mesh into %d valid chunks (from %d total grid cells)"), ValidChunks, NumChunks);
+    UE_LOG(LogJUSYNC, Log, TEXT("🔪 === SPLITTING COMPLETE ==="));
+
+    return SplitMeshes;
+}
+
+bool UJUSYNCSubsystem::CheckMemoryLimitsForMesh(
+    const FJUSYNCMeshData& MeshData,
+    float& OutRequiredRAM_MB,
+    float& OutRequiredVRAM_MB,
+    float SafetyMarginPercent)
+{
+    OutRequiredRAM_MB = 0.0f;
+    OutRequiredVRAM_MB = 0.0f;
+
+    if (!MeshData.IsValid())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot check memory limits for invalid mesh"));
+        return false;
+    }
+
+    const int32 TotalVertices = MeshData.Vertices.Num();
+    const int32 TotalTriangles = MeshData.Triangles.Num() / 3;
+
+    UE_LOG(LogJUSYNC, Log, TEXT("💾 === MEMORY LIMIT CHECK ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Mesh: %d vertices, %d triangles"), TotalVertices, TotalTriangles);
+    UE_LOG(LogJUSYNC, Log, TEXT("Safety margin: %.1f%%"), SafetyMarginPercent);
+
+    // Estimate memory usage
+    // Vertex data: position (12 bytes) + normal (12 bytes) + UV (8 bytes) + color (4 bytes) = ~36 bytes per vertex
+    // Triangle indices: 3 * 4 bytes = 12 bytes per triangle
+    float BytesPerVertex = 36.0f; // Conservative estimate
+    float BytesPerTriangle = 12.0f;
+    
+    // Add additional attributes if present
+    if (MeshData.Normals.Num() > 0) BytesPerVertex += 12.0f;
+    if (MeshData.UVs.Num() > 0) BytesPerVertex += 8.0f;
+    if (MeshData.VertexColors.Num() > 0) BytesPerVertex += 4.0f;
+    
+    OutRequiredRAM_MB = (TotalVertices * BytesPerVertex + TotalTriangles * BytesPerTriangle) / (1024.0f * 1024.0f);
+    
+    // VRAM usage is typically 2-3x RAM usage for rendering buffers
+    OutRequiredVRAM_MB = OutRequiredRAM_MB * 2.5f;
+
+    UE_LOG(LogJUSYNC, Log, TEXT("Estimated RAM usage: %.2f MB"), OutRequiredRAM_MB);
+    UE_LOG(LogJUSYNC, Log, TEXT("Estimated VRAM usage: %.2f MB"), OutRequiredVRAM_MB);
+
+    // Get available system memory
+    FPlatformMemoryStats MemoryStats = FPlatformMemory::GetStats();
+    float AvailableRAMMB = MemoryStats.AvailablePhysical / (1024.0f * 1024.0f);
+    
+    // Apply safety margin
+    float SafeAvailableRAMMB = AvailableRAMMB * (1.0f - SafetyMarginPercent / 100.0f);
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("Available RAM: %.2f MB (Safe after %.1f%% margin: %.2f MB)"),
+           AvailableRAMMB, SafetyMarginPercent, SafeAvailableRAMMB);
+
+    bool bCanLoad = true;
+
+    // Check RAM limits
+    if (OutRequiredRAM_MB > SafeAvailableRAMMB)
+    {
+        UE_LOG(LogJUSYNC, Warning, TEXT("⚠️ Mesh exceeds available RAM (%.2f MB > %.2f MB)"),
+               OutRequiredRAM_MB, SafeAvailableRAMMB);
+        bCanLoad = false;
+    }
+
+    // Check RMC vertex/triangle limits
+    const int32 RecommendedMaxVertices = 32768;
+    const int32 RecommendedMaxTriangles = 65536;
+    
+    if (TotalVertices > RecommendedMaxVertices)
+    {
+        UE_LOG(LogJUSYNC, Warning, TEXT("⚠️ Mesh exceeds RMC vertex limit (%d > %d)"),
+               TotalVertices, RecommendedMaxVertices);
+        bCanLoad = false;
+    }
+
+    if (TotalTriangles > RecommendedMaxTriangles)
+    {
+        UE_LOG(LogJUSYNC, Warning, TEXT("⚠️ Mesh exceeds RMC triangle limit (%d > %d)"),
+               TotalTriangles, RecommendedMaxTriangles);
+        bCanLoad = false;
+    }
+
+    UE_LOG(LogJUSYNC, Log, TEXT("Can load: %s"), bCanLoad ? TEXT("✅ Yes") : TEXT("❌ No"));
+    UE_LOG(LogJUSYNC, Log, TEXT("💾 === MEMORY CHECK COMPLETE ==="));
+
+    return bCanLoad;
+}
+
+TArray<URealtimeMeshComponent*> UJUSYNCSubsystem::CreateMultipleRMCComponentsForLargeMesh(
+    AActor* ParentActor,
+    const FJUSYNCMeshData& LargeMesh,
+    int32 MaxVerticesPerComponent)
+{
+    TArray<URealtimeMeshComponent*> CreatedComponents;
+
+    if (!LargeMesh.IsValid())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot create RMC components for invalid mesh"));
+        return CreatedComponents;
+    }
+
+    if (!ParentActor)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Parent actor is null"));
+        return CreatedComponents;
+    }
+
+    UE_LOG(LogJUSYNC, Log, TEXT("🏗️ === CREATING MULTIPLE RMC COMPONENTS ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Large mesh: %d vertices, %d triangles"),
+           LargeMesh.Vertices.Num(), LargeMesh.Triangles.Num() / 3);
+    UE_LOG(LogJUSYNC, Log, TEXT("Parent actor: %s"), *ParentActor->GetName());
+    UE_LOG(LogJUSYNC, Log, TEXT("Max vertices per component: %d"), MaxVerticesPerComponent);
+
+    // Use default material from cache
+    UMaterialInterface* DefaultMaterial = this->GetCachedMaterial(TEXT("/Game/Materials/M_VertexColor"));
+    
+    // Split the mesh
+    TArray<FJUSYNCMeshData> SplitMeshes = this->SplitLargeMeshForRealtimeMesh(
+        LargeMesh,
+        MaxVerticesPerComponent,
+        true); // Preserve connectivity
+
+    if (SplitMeshes.Num() == 0)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to split mesh"));
+        return CreatedComponents;
+    }
+
+    UE_LOG(LogJUSYNC, Log, TEXT("Successfully split mesh into %d chunks"), SplitMeshes.Num());
+
+    // Create RMC component for each split mesh
+    for (int32 ChunkIdx = 0; ChunkIdx < SplitMeshes.Num(); ++ChunkIdx)
+    {
+        const FJUSYNCMeshData& ChunkMesh = SplitMeshes[ChunkIdx];
+        
+        // Create unique name for component
+        FString ComponentName = FString::Printf(TEXT("RMC_%s_Chunk%d"), *LargeMesh.ElementName, ChunkIdx);
+        
+        // Create RMC component
+        URealtimeMeshComponent* ChunkComponent = NewObject<URealtimeMeshComponent>(ParentActor, FName(*ComponentName));
+        if (!ChunkComponent)
+        {
+            UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to create RMC component for chunk %d"), ChunkIdx);
+            continue;
+        }
+
+        // Register and attach component
+        ChunkComponent->RegisterComponent();
+        ChunkComponent->AttachToComponent(ParentActor->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
+
+        // Create mesh from chunk data
+        if (this->CreateRealtimeMeshFromJUSYNC(ChunkMesh, ChunkComponent))
+        {
+            // Apply default material if available
+            if (DefaultMaterial)
+            {
+                ChunkComponent->SetMaterial(0, DefaultMaterial);
+            }
+
+            CreatedComponents.Add(ChunkComponent);
+            
+            UE_LOG(LogJUSYNC, Log, TEXT("✅ Created chunk %d: %s (%d vertices, %d triangles)"),
+                   ChunkIdx, *ChunkComponent->GetName(),
+                   ChunkMesh.Vertices.Num(), ChunkMesh.Triangles.Num() / 3);
+        }
+        else
+        {
+            UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to create mesh for chunk %d"), ChunkIdx);
+            ChunkComponent->DestroyComponent();
+        }
+    }
+
+    UE_LOG(LogJUSYNC, Log, TEXT("🏗️ Created %d RMC components for large mesh"), CreatedComponents.Num());
+    UE_LOG(LogJUSYNC, Log, TEXT("🏗️ === RMC COMPONENT CREATION COMPLETE ==="));
+
+    return CreatedComponents;
+}
+
+
 
 
 bool UJUSYNCSubsystem::BatchCreateRealtimeMeshesFromJUSYNC(const TArray<FJUSYNCMeshData>& MeshDataArray, const TArray<URealtimeMeshComponent*>& MeshComponents)
@@ -1105,7 +1665,7 @@ bool UJUSYNCSubsystem::BatchCreateRealtimeMeshesFromJUSYNC(const TArray<FJUSYNCM
     
     for (int32 i = 0; i < MeshDataArray.Num(); ++i)
     {
-        if (CreateRealtimeMeshFromJUSYNC(MeshDataArray[i], MeshComponents[i]))
+        if (this->CreateRealtimeMeshFromJUSYNC(MeshDataArray[i], MeshComponents[i]))
         {
             SuccessCount++;
         }
@@ -1658,7 +2218,7 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(const FJUSYNCMeshDa
     SpawnedActor->SetActorRotation(SpawnRotation);
 
     // Create the mesh using your existing function
-    bool bSuccess = CreateRealtimeMeshFromJUSYNC(MeshData, MeshComp);
+    bool bSuccess = Subsystem->CreateRealtimeMeshFromJUSYNC(MeshData, MeshComp);
     
     if (bSuccess)
     {
@@ -1708,10 +2268,17 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocations(
     UE_LOG(LogJUSYNC, Log, TEXT("SpawnRotations.Num(): %d"), SpawnRotations.Num());
     UE_LOG(LogJUSYNC, Log, TEXT("Async Mode: %s"), bUseAsyncSpawning ? TEXT("YES") : TEXT("NO"));
 
-    if (MeshDataArray.Num() != SpawnLocations.Num())
+    // Generate default locations if none are provided
+    TArray<FVector> FinalLocations = SpawnLocations;
+    if (FinalLocations.Num() == 0)
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Array size mismatch! Meshes: %d, Locations: %d"), 
-               MeshDataArray.Num(), SpawnLocations.Num());
+        FinalLocations = UJUSYNCBlueprintLibrary::GenerateDefaultLocations(MeshDataArray.Num());
+        UE_LOG(LogJUSYNC, Log, TEXT("Generated %d default locations"), FinalLocations.Num());
+    }
+    else if (FinalLocations.Num() != MeshDataArray.Num())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("❌ Array size mismatch! Meshes: %d, Locations: %d"),
+               MeshDataArray.Num(), FinalLocations.Num());
         return TArray<AActor*>();
     }
 
@@ -1719,7 +2286,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocations(
     TArray<FRotator> FinalRotations = SpawnRotations;
     if (FinalRotations.Num() == 0)
     {
-        FinalRotations = GenerateDefaultRotations(MeshDataArray.Num());
+        FinalRotations = UJUSYNCBlueprintLibrary::GenerateDefaultRotations(MeshDataArray.Num());
         UE_LOG(LogJUSYNC, Log, TEXT("Generated %d default rotations"), FinalRotations.Num());
     }
     else if (FinalRotations.Num() != MeshDataArray.Num())
@@ -2129,7 +2696,7 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
         UE_LOG(LogJUSYNC, Error, TEXT("❌ Exception caught in RequestFile_C"));
         if (FileData)
         {
-            free(FileData);
+            FreeBuffer_C(FileData);
             FileData = nullptr;
         }
         return false;
@@ -2144,7 +2711,7 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
         if (FileSize > MAX_REASONABLE_FILE_SIZE)
         {
             UE_LOG(LogJUSYNC, Error, TEXT("❌ File size suspiciously large: %llu bytes (max: %llu)"), FileSize, MAX_REASONABLE_FILE_SIZE);
-            free(FileData);
+            FreeBuffer_C(FileData);
             return false;
         }
         
@@ -2155,7 +2722,7 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
         if (OutData.Num() != static_cast<int32>(FileSize))
         {
             UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to allocate buffer for file (requested: %llu, got: %d)"), FileSize, OutData.Num());
-            delete[] FileData;
+            FreeBuffer_C(FileData);
             return false;
         }
         
@@ -2164,14 +2731,14 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
         if (!DestPtr && FileSize > 0)
         {
             UE_LOG(LogJUSYNC, Error, TEXT("❌ Destination buffer is null for non-zero file size"));
-            delete[] FileData;
+            FreeBuffer_C(FileData);
             return false;
         }
         
         FMemory::Memcpy(DestPtr, FileData, FileSize);
         
-        // Free C memory (allocated with malloc in middleware)
-        free(FileData);
+        // Free C memory (allocated with new[] in middleware)
+        FreeBuffer_C(FileData);
         FileData = nullptr; // Prevent accidental reuse
         
         UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved file '%s' (%d bytes) from broker"), *Filename, OutData.Num());
@@ -2182,7 +2749,7 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
         UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to request file (Result: %d)"), Result);
         if (FileData)
         {
-            free(FileData);
+            FreeBuffer_C(FileData);
             FileData = nullptr;
         }
     }
@@ -2452,15 +3019,8 @@ bool UJUSYNCSubsystem::RequestFrame(int32 FrameNumber, int32 TargetRank, int32 T
             OutFiles.Add(FileData);
         }
         
-        // Free C memory
-        for (size_t i = 0; i < FileCount; ++i)
-        {
-            if (CFrameFiles[i].data)
-            {
-                delete[] CFrameFiles[i].data;
-            }
-        }
-        delete[] CFrameFiles;
+        // Free C memory using middleware function
+        FreeFrameFiles_C(CFrameFiles, FileCount);
         
         UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved frame %d with %d files from broker"), FrameNumber, OutFiles.Num());
         return true;
@@ -2470,14 +3030,7 @@ bool UJUSYNCSubsystem::RequestFrame(int32 FrameNumber, int32 TargetRank, int32 T
         UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to request frame (Result: %d)"), Result);
         if (CFrameFiles)
         {
-            for (size_t i = 0; i < FileCount; ++i)
-            {
-                if (CFrameFiles[i].data)
-                {
-                    delete[] CFrameFiles[i].data;
-                }
-            }
-            delete[] CFrameFiles;
+            FreeFrameFiles_C(CFrameFiles, FileCount);
         }
     }
 #endif
@@ -2716,4 +3269,371 @@ void UJUSYNCSubsystem::CreateMaterialFromTexture_Async(UTexture2D* Texture, URea
             }
         });
     });
+}
+
+// ========== PERFORMANCE METRICS IMPLEMENTATIONS ==========
+
+void UJUSYNCSubsystem::ConfigureMetrics(const FJUSYNCMetricsConfig& NewConfig)
+{
+    FScopeLock Lock(&MetricsMutex);
+    MetricsConfig = NewConfig;
+    UE_LOG(LogJUSYNC, Log, TEXT("Metrics configuration updated"));
+}
+
+FJUSYNCMetricsConfig UJUSYNCSubsystem::GetMetricsConfig() const
+{
+    FScopeLock Lock(&MetricsMutex);
+    return MetricsConfig;
+}
+
+void UJUSYNCSubsystem::StartMetricsCollection()
+{
+    FScopeLock Lock(&MetricsMutex);
+    bMetricsCollectionActive = true;
+    MetricsHistory.Empty();
+    MetricsAccumulator.Reset();
+    LastCollectionTime = 0.0f;
+    UE_LOG(LogJUSYNC, Log, TEXT("Metrics collection started"));
+}
+
+void UJUSYNCSubsystem::StopMetricsCollection()
+{
+    FScopeLock Lock(&MetricsMutex);
+    bMetricsCollectionActive = false;
+    UE_LOG(LogJUSYNC, Log, TEXT("Metrics collection stopped"));
+}
+
+bool UJUSYNCSubsystem::IsMetricsCollectionActive() const
+{
+    return bMetricsCollectionActive.load();
+}
+
+FJUSYNCMetricsData UJUSYNCSubsystem::GetCurrentMetrics() const
+{
+    FScopeLock Lock(&MetricsMutex);
+    return CurrentMetrics;
+}
+
+TArray<FJUSYNCMetricsData> UJUSYNCSubsystem::GetMetricsHistory(int32 MaxSamples) const
+{
+    FScopeLock Lock(&MetricsMutex);
+    
+    TArray<FJUSYNCMetricsData> Result;
+    
+    if (MetricsHistory.Num() <= MaxSamples)
+    {
+        Result = MetricsHistory;
+    }
+    else
+    {
+        // Return the most recent MaxSamples entries
+        int32 StartIndex = MetricsHistory.Num() - MaxSamples;
+        for (int32 i = StartIndex; i < MetricsHistory.Num(); ++i)
+        {
+            Result.Add(MetricsHistory[i]);
+        }
+    }
+    
+    return Result;
+}
+
+void UJUSYNCSubsystem::ClearMetricsHistory()
+{
+    FScopeLock Lock(&MetricsMutex);
+    MetricsHistory.Empty();
+    UE_LOG(LogJUSYNC, Log, TEXT("Metrics history cleared"));
+}
+
+bool UJUSYNCSubsystem::ExportMetricsToCSV(const FString& FilePath)
+{
+    FScopeLock Lock(&MetricsMutex);
+    
+    if (MetricsHistory.Num() == 0)
+    {
+        UE_LOG(LogJUSYNC, Warning, TEXT("No metrics data to export"));
+        return false;
+    }
+    
+    FString CSVContent = TEXT("Timestamp,SystemRAM_Used_GB,VRAM_Used_GB,TotalMeshesProcessed,SplitMeshes,TotalErrors,MemoryWarnings,CPUUsage_Percent,GPUUsage_Percent\n");
+    
+    for (const FJUSYNCMetricsData& Metrics : MetricsHistory)
+    {
+        CSVContent += FString::Printf(TEXT("%s,%f,%f,%d,%d,%d,%d,%f,%f\n"),
+            *Metrics.Timestamp.ToString(),
+            Metrics.SystemRAM_Used_GB,
+            Metrics.VRAM_Used_GB,
+            Metrics.TotalMeshesProcessed,
+            Metrics.SplitMeshes,
+            Metrics.TotalErrors,
+            Metrics.MemoryWarnings,
+            Metrics.CPUUsage_Percent,
+            Metrics.GPUUsage_Percent);
+    }
+    
+    return FFileHelper::SaveStringToFile(CSVContent, *FilePath);
+}
+
+bool UJUSYNCSubsystem::ExportMetricsToJSON(const FString& FilePath)
+{
+    FScopeLock Lock(&MetricsMutex);
+    
+    if (MetricsHistory.Num() == 0)
+    {
+        UE_LOG(LogJUSYNC, Warning, TEXT("No metrics data to export"));
+        return false;
+    }
+    
+    FString JSONContent = TEXT("{\n  \"metrics\": [\n");
+    
+    for (int32 i = 0; i < MetricsHistory.Num(); ++i)
+    {
+        const FJUSYNCMetricsData& Metrics = MetricsHistory[i];
+        JSONContent += FString::Printf(TEXT("    {\n      \"timestamp\": \"%s\",\n      \"system_ram_used_gb\": %f,\n      \"vram_used_gb\": %f,\n      \"total_meshes_processed\": %d,\n      \"split_meshes\": %d,\n      \"total_errors\": %d,\n      \"memory_warnings\": %d,\n      \"cpu_usage_percent\": %f,\n      \"gpu_usage_percent\": %f\n    }"),
+            *Metrics.Timestamp.ToString(),
+            Metrics.SystemRAM_Used_GB,
+            Metrics.VRAM_Used_GB,
+            Metrics.TotalMeshesProcessed,
+            Metrics.SplitMeshes,
+            Metrics.TotalErrors,
+            Metrics.MemoryWarnings,
+            Metrics.CPUUsage_Percent,
+            Metrics.GPUUsage_Percent);
+        
+        if (i < MetricsHistory.Num() - 1)
+        {
+            JSONContent += TEXT(",\n");
+        }
+        else
+        {
+            JSONContent += TEXT("\n");
+        }
+    }
+    
+    JSONContent += TEXT("  ]\n}");
+    
+    return FFileHelper::SaveStringToFile(JSONContent, *FilePath);
+}
+
+void UJUSYNCSubsystem::RecordMeshSplit(int32 OriginalVertices, int32 OriginalTriangles, int32 ChunksCreated, float SplitTime_ms)
+{
+    if (!bMetricsCollectionActive.load()) return;
+    
+    FScopeLock Lock(&MetricsMutex);
+    MetricsAccumulator.MeshSplitCount++;
+    MetricsAccumulator.TotalSplitVertices += OriginalVertices;
+    MetricsAccumulator.TotalSplitTriangles += OriginalTriangles;
+    MetricsAccumulator.TotalChunksCreated += ChunksCreated;
+    MetricsAccumulator.TotalSplitTime_ms += SplitTime_ms;
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("Metrics: Recorded mesh split - %d vertices, %d triangles, %d chunks, %.2f ms"),
+           OriginalVertices, OriginalTriangles, ChunksCreated, SplitTime_ms);
+}
+
+void UJUSYNCSubsystem::RecordMeshCreation(int32 Vertices, int32 Triangles, float CreationTime_ms)
+{
+    if (!bMetricsCollectionActive.load()) return;
+    
+    FScopeLock Lock(&MetricsMutex);
+    MetricsAccumulator.MeshCreationCount++;
+    MetricsAccumulator.TotalCreatedVertices += Vertices;
+    MetricsAccumulator.TotalCreatedTriangles += Triangles;
+    MetricsAccumulator.TotalCreationTime_ms += CreationTime_ms;
+    
+    UE_LOG(LogJUSYNC, Log, TEXT("Metrics: Recorded mesh creation - %d vertices, %d triangles, %.2f ms"),
+           Vertices, Triangles, CreationTime_ms);
+}
+
+void UJUSYNCSubsystem::RecordError(const FString& ErrorType)
+{
+    if (!bMetricsCollectionActive.load()) return;
+    
+    FScopeLock Lock(&MetricsMutex);
+    MetricsAccumulator.ErrorCount++;
+    
+    UE_LOG(LogJUSYNC, Error, TEXT("Metrics: Recorded error: %s"), *ErrorType);
+}
+
+void UJUSYNCSubsystem::RecordMemoryWarning(const FString& WarningType)
+{
+    if (!bMetricsCollectionActive.load()) return;
+    
+    FScopeLock Lock(&MetricsMutex);
+    MetricsAccumulator.MemoryWarningCount++;
+    
+    UE_LOG(LogJUSYNC, Warning, TEXT("Metrics: Recorded memory warning: %s"), *WarningType);
+}
+
+void UJUSYNCSubsystem::ShowMetricsDisplay(bool bShow)
+{
+    bMetricsDisplayVisible = bShow;
+    UE_LOG(LogJUSYNC, Log, TEXT("Metrics display %s"), bShow ? TEXT("shown") : TEXT("hidden"));
+}
+
+bool UJUSYNCSubsystem::IsMetricsDisplayVisible() const
+{
+    return bMetricsDisplayVisible;
+}
+
+// ========== PRIVATE METRICS FUNCTIONS ==========
+
+void UJUSYNCSubsystem::CollectMetrics()
+{
+    if (!bMetricsCollectionActive.load()) return;
+    
+    FScopeLock Lock(&MetricsMutex);
+    UpdateMetricsData();
+    SaveMetricsToHistory();
+}
+
+void UJUSYNCSubsystem::UpdateMetricsData()
+{
+    // Update timestamp
+    CurrentMetrics.Timestamp = FDateTime::Now();
+    
+    // Update hardware metrics
+    CurrentMetrics.SystemRAM_Used_GB = GetSystemRAMUsage_GB();
+    CurrentMetrics.VRAM_Used_GB = GetVRAMUsage_GB();
+    CurrentMetrics.CPUUsage_Percent = GetCPUUsage_Percent();
+    CurrentMetrics.GPUUsage_Percent = GetGPUUsage_Percent();
+    
+    // Update mesh metrics from accumulator
+    CurrentMetrics.TotalMeshesProcessed = MetricsAccumulator.MeshSplitCount + MetricsAccumulator.MeshCreationCount;
+    CurrentMetrics.SplitMeshes = MetricsAccumulator.MeshSplitCount;
+    CurrentMetrics.TotalChunksCreated = MetricsAccumulator.TotalChunksCreated;
+    
+    // Calculate averages
+    if (MetricsAccumulator.MeshSplitCount > 0)
+    {
+        CurrentMetrics.AverageSplitTime_ms = MetricsAccumulator.TotalSplitTime_ms / MetricsAccumulator.MeshSplitCount;
+        CurrentMetrics.AverageChunksPerSplit = static_cast<float>(MetricsAccumulator.TotalChunksCreated) / MetricsAccumulator.MeshSplitCount;
+    }
+    
+    if (MetricsAccumulator.MeshCreationCount > 0)
+    {
+        CurrentMetrics.MeshProcessingTime_ms = MetricsAccumulator.TotalCreationTime_ms / MetricsAccumulator.MeshCreationCount;
+    }
+    
+    // Update error metrics
+    CurrentMetrics.TotalErrors = MetricsAccumulator.ErrorCount;
+    CurrentMetrics.MemoryWarnings = MetricsAccumulator.MemoryWarningCount;
+    
+    // Update component metrics
+    CurrentMetrics.TotalRMCComponents = CountRMCComponents();
+    CurrentMetrics.ActiveComponents = CountActiveRMCComponents();
+    CurrentMetrics.InstancedComponents = CountInstancedRMCComponents();
+    
+    // Reset accumulator for next collection period
+    MetricsAccumulator.Reset();
+}
+
+void UJUSYNCSubsystem::SaveMetricsToHistory()
+{
+    // Add current metrics to history
+    MetricsHistory.Add(CurrentMetrics);
+    
+    // Limit history size
+    if (MetricsHistory.Num() > MetricsConfig.MaxHistorySize)
+    {
+        MetricsHistory.RemoveAt(0, MetricsHistory.Num() - MetricsConfig.MaxHistorySize);
+    }
+    
+    // Broadcast update event
+    OnMetricsUpdated.Broadcast(CurrentMetrics);
+}
+
+// ========== HARDWARE MONITORING FUNCTIONS ==========
+
+float UJUSYNCSubsystem::GetSystemRAMUsage_GB() const
+{
+    // Placeholder implementation - would query actual system RAM usage
+    // In a real implementation, you would use platform-specific APIs
+    return 0.0f;
+}
+
+float UJUSYNCSubsystem::GetVRAMUsage_GB() const
+{
+    // Placeholder implementation - would query actual VRAM usage
+    // In a real implementation, you would use graphics API queries
+    return 0.0f;
+}
+
+float UJUSYNCSubsystem::GetCPUUsage_Percent() const
+{
+    // Placeholder implementation - would query actual CPU usage
+    // In a real implementation, you would use platform-specific APIs
+    return 0.0f;
+}
+
+float UJUSYNCSubsystem::GetGPUUsage_Percent() const
+{
+    // Placeholder implementation - would query actual GPU usage
+    // In a real implementation, you would use graphics API queries
+    return 0.0f;
+}
+
+// ========== COMPONENT TRACKING FUNCTIONS ==========
+
+int32 UJUSYNCSubsystem::CountRMCComponents() const
+{
+    // Count all RealtimeMeshComponents in the world
+    int32 Count = 0;
+    if (UWorld* World = GetWorld())
+    {
+        for (TObjectIterator<URealtimeMeshComponent> It; It; ++It)
+        {
+            if (It->GetWorld() == World)
+            {
+                Count++;
+            }
+        }
+    }
+    return Count;
+}
+
+int32 UJUSYNCSubsystem::CountActiveRMCComponents() const
+{
+    // Count active RealtimeMeshComponents (visible and not culled)
+    int32 Count = 0;
+    if (UWorld* World = GetWorld())
+    {
+        for (TObjectIterator<URealtimeMeshComponent> It; It; ++It)
+        {
+            if (It->GetWorld() == World && It->IsVisible())
+            {
+                Count++;
+            }
+        }
+    }
+    return Count;
+}
+
+int32 UJUSYNCSubsystem::CountInstancedRMCComponents() const
+{
+    // Count RealtimeMeshComponents that appear to be created by splitting
+    // We check component names for patterns that indicate splitting
+    int32 Count = 0;
+    if (UWorld* World = GetWorld())
+    {
+        for (TObjectIterator<URealtimeMeshComponent> It; It; ++It)
+        {
+            if (It->GetWorld() == World)
+            {
+                FString ComponentName = It->GetName();
+                
+                // Check for names that indicate splitting/chunking
+                // Common patterns in mesh splitting systems:
+                if (ComponentName.Contains(TEXT("Chunk")) ||
+                    ComponentName.Contains(TEXT("Split")) ||
+                    ComponentName.Contains(TEXT("Part")) ||
+                    ComponentName.Contains(TEXT("Segment")) ||
+                    ComponentName.Contains(TEXT("Slice")) ||
+                    ComponentName.Contains(TEXT("_C")) ||  // Common suffix for chunks
+                    ComponentName.Contains(TEXT("_")) && ComponentName.Contains(TEXT("of"))) // "Mesh_1_of_4"
+                {
+                    Count++;
+                }
+            }
+        }
+    }
+    return Count;
 }

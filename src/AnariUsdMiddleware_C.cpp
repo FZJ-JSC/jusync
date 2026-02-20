@@ -428,14 +428,14 @@ int RequestFile_C(const char* filename, int32_t target_rank,
                 return 0;
             }
             
-            *out_data = static_cast<unsigned char*>(malloc(*out_size));
+            *out_data = new unsigned char[*out_size];
             if (!*out_data) {
                 MIDDLEWARE_LOG_ERROR("Memory allocation failed for %zu bytes", *out_size);
                 *out_size = 0;
                 return 0;
             }
             std::memcpy(*out_data, fileData.data(), *out_size);
-            MIDDLEWARE_LOG_DEBUG("Allocated %zu bytes at %p using malloc", *out_size, (void*)*out_data);
+            MIDDLEWARE_LOG_DEBUG("Allocated %zu bytes at %p using new[]", *out_size, (void*)*out_data);
         } else {
             *out_data = nullptr;
             MIDDLEWARE_LOG_WARNING("File size is 0 bytes");
@@ -1384,17 +1384,17 @@ const char* GetProcessingStats_C() {
 void FreeMeshData_C(CMeshData* meshes, size_t count) {
     if (!meshes) return;
 
-    // Free each mesh's internal arrays
+    // Free each mesh's internal arrays with null checks
     for (size_t i = 0; i < count; ++i) {
-        delete[] meshes[i].points;
-        delete[] meshes[i].indices;
-        delete[] meshes[i].normals;
-        delete[] meshes[i].uvs;
-        delete[] meshes[i].vertex_colors;
+        if (meshes[i].points) delete[] meshes[i].points;
+        if (meshes[i].indices) delete[] meshes[i].indices;
+        if (meshes[i].normals) delete[] meshes[i].normals;
+        if (meshes[i].uvs) delete[] meshes[i].uvs;
+        if (meshes[i].vertex_colors) delete[] meshes[i].vertex_colors;
 
-        // ✅ NEW: Free collision data
-        delete[] meshes[i].collision_vertices;
-        delete[] meshes[i].collision_indices;
+        // ✅ NEW: Free collision data with null checks
+        if (meshes[i].collision_vertices) delete[] meshes[i].collision_vertices;
+        if (meshes[i].collision_indices) delete[] meshes[i].collision_indices;
     }
 
     // Free the main array
@@ -1428,6 +1428,24 @@ void FreeFileData_C(CFileData* file_data) {
         file_data->data = nullptr;
         file_data->data_size = 0;
     }
+}
+
+/**
+ * Free frame files array allocated by RequestFrame_C
+ */
+void FreeFrameFiles_C(CFileData* files, size_t count) {
+    if (!files) {
+        return;
+    }
+    
+    for (size_t i = 0; i < count; ++i) {
+        if (files[i].data) {
+            delete[] files[i].data;
+            files[i].data = nullptr;
+            files[i].data_size = 0;
+        }
+    }
+    delete[] files;
 }
 
 // ============================================================================

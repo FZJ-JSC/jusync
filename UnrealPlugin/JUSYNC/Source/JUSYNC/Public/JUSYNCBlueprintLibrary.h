@@ -366,6 +366,9 @@ public:
 	static FRotator ConvertParaViewToUERotation(const FRotator& ParaViewRotation);
 
 	UFUNCTION(BlueprintCallable, Category = "JUSYNC|Utilities")
+	static TArray<FVector> GenerateDefaultLocations(int32 Count, const FVector& BaseLocation = FVector::ZeroVector, float Spacing = 200.0f);
+
+	UFUNCTION(BlueprintCallable, Category = "JUSYNC|Utilities")
 	static TArray<FRotator> GenerateDefaultRotations(int32 Count, const FRotator& BaseRotation = FRotator::ZeroRotator);
 
 	// ========== Async ===============
@@ -502,5 +505,5 @@ private:
 
 	// Benchmark helper functions
 	static void RecordBenchmarkResult(const FJUSYNCBenchmarkResult& Result);
-	static FJUSYNCBenchmarkResult CreateBenchmarkResult(const FString& TestName, float TotalTimeMs, int32 TriangleCount, int32 VertexCount, int64 RAMBefore, int64 RAMAfter, int32 ActorCount, int32 ErrorCount);
+	static FJUSYNCBenchmarkResult CreateBenchmarkResult(const FString& TestName, float TotalTimeMs, int32 TriangleCount, int32 VertexCount, int64 RAMBefore, int64 RAMAfter, int32 ActorCount, int32 ErrorCount, int32 SplitMeshCount);
 };

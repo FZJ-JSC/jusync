@@ -310,6 +310,10 @@ struct JUSYNC_API FJUSYNCBenchmarkResult
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float SuccessRate;
 
+	// Splitting metrics (for large meshes that exceed RMC limits)
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int32 SplitMeshCount;
+
 	FJUSYNCBenchmarkResult()
 	{
 		TestName = TEXT("");
@@ -324,6 +328,7 @@ struct JUSYNC_API FJUSYNCBenchmarkResult
 		ActorCount = 0;
 		ErrorCount = 0;
 		SuccessRate = 0.0f;
+		SplitMeshCount = 0;
 	}
 };
 
@@ -354,3 +359,369 @@ struct JUSYNC_API FJUSYNCBenchmarkConfig
 		bAppendTimestamp = true;
 	}
 };
+
+// ========== PERFORMANCE METRICS STRUCTURES ==========
+
+/**
+ * Comprehensive performance metrics for real-time monitoring
+ */
+USTRUCT(BlueprintType)
+struct JUSYNC_API FJUSYNCMetricsData
+{
+	GENERATED_BODY()
+
+	// Timestamp
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics")
+	FDateTime Timestamp;
+
+	// ===== MEMORY USAGE METRICS =====
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Memory")
+	float SystemRAM_Used_GB;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Memory")
+	float SystemRAM_Total_GB;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Memory")
+	float VRAM_Used_GB;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Memory")
+	float VRAM_Total_GB;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Memory")
+	float MeshData_GB;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Memory")
+	float TextureData_GB;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Memory")
+	float Cache_GB;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Memory")
+	float AvailableRAM_GB;
+
+	// ===== MESH SPLITTING METRICS =====
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Splitting")
+	int32 TotalMeshesProcessed;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Splitting")
+	int32 SplitMeshes;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Splitting")
+	float AverageSplitTime_ms;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Splitting")
+	int32 LargestMesh_Vertices;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Splitting")
+	int32 SmallestMesh_Vertices;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Splitting")
+	int32 TotalChunksCreated;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Splitting")
+	float AverageChunksPerSplit;
+
+	// ===== PERFORMANCE TIMING METRICS =====
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Performance")
+	float FrameTime_ms;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Performance")
+	float FPS;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Performance")
+	float MeshProcessingTime_ms;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Performance")
+	float SplittingAlgorithmTime_ms;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Performance")
+	float MemoryAllocationTime_ms;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Performance")
+	float GPUUploadTime_ms;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Performance")
+	float AsyncTasksTime_ms;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Performance")
+	float IdleTime_ms;
+
+	// ===== COMPONENT METRICS =====
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Components")
+	int32 TotalRMCComponents;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Components")
+	int32 ActiveComponents;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Components")
+	int32 CulledComponents;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Components")
+	int32 InstancedComponents;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Components")
+	int32 DrawCalls;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Components")
+	int32 TrianglesRendered_Millions;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Components")
+	int32 VerticesRendered_Millions;
+
+	// ===== STREAMING METRICS =====
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Streaming")
+	float StreamingBandwidth_MBps;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Streaming")
+	int32 QueueLength;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Streaming")
+	float AverageLoadTime_ms;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Streaming")
+	float CacheHitRate_Percent;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Streaming")
+	int32 PrefetchedMeshes;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Streaming")
+	int32 EvictedMeshes;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Streaming")
+	FString MemoryPressure;
+
+	// ===== QUALITY METRICS =====
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Quality")
+	int32 CurrentLODLevel;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Quality")
+	int32 MaxLODLevel;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Quality")
+	int32 TargetFPS;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Quality")
+	float ActualFPS;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Quality")
+	float QualityReduction_Percent;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Quality")
+	FString TextureResolution;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Quality")
+	float MeshDecimation_Percent;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Quality")
+	float VisualFidelity_Percent;
+
+	// ===== ERROR METRICS =====
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Errors")
+	int32 TotalErrors;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Errors")
+	int32 MemoryWarnings;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Errors")
+	int32 SplitFailures;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Errors")
+	int32 RecoveryAttempts;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Errors")
+	float SuccessRate_Percent;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Errors")
+	FString LastErrorTime;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Errors")
+	FString WarningLevel;
+
+	// ===== HARDWARE METRICS =====
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Hardware")
+	float CPUUsage_Percent;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Hardware")
+	float GPUUsage_Percent;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Hardware")
+	int32 ActiveCPUThreads;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Hardware")
+	int32 TotalCPUThreads;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Hardware")
+	float GPUMemoryBandwidth_GBps;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Hardware")
+	float PCIeBandwidth_GBps;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Hardware")
+	float CPUTemperature_C;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Hardware")
+	float GPUTemperature_C;
+
+	// Constructor
+	FJUSYNCMetricsData()
+	{
+		Timestamp = FDateTime::Now();
+		
+		// Initialize all metrics to zero/default values
+		SystemRAM_Used_GB = 0.0f;
+		SystemRAM_Total_GB = 0.0f;
+		VRAM_Used_GB = 0.0f;
+		VRAM_Total_GB = 0.0f;
+		MeshData_GB = 0.0f;
+		TextureData_GB = 0.0f;
+		Cache_GB = 0.0f;
+		AvailableRAM_GB = 0.0f;
+		
+		TotalMeshesProcessed = 0;
+		SplitMeshes = 0;
+		AverageSplitTime_ms = 0.0f;
+		LargestMesh_Vertices = 0;
+		SmallestMesh_Vertices = 0;
+		TotalChunksCreated = 0;
+		AverageChunksPerSplit = 0.0f;
+		
+		FrameTime_ms = 0.0f;
+		FPS = 0.0f;
+		MeshProcessingTime_ms = 0.0f;
+		SplittingAlgorithmTime_ms = 0.0f;
+		MemoryAllocationTime_ms = 0.0f;
+		GPUUploadTime_ms = 0.0f;
+		AsyncTasksTime_ms = 0.0f;
+		IdleTime_ms = 0.0f;
+		
+		TotalRMCComponents = 0;
+		ActiveComponents = 0;
+		CulledComponents = 0;
+		InstancedComponents = 0;
+		DrawCalls = 0;
+		TrianglesRendered_Millions = 0;
+		VerticesRendered_Millions = 0;
+		
+		StreamingBandwidth_MBps = 0.0f;
+		QueueLength = 0;
+		AverageLoadTime_ms = 0.0f;
+		CacheHitRate_Percent = 0.0f;
+		PrefetchedMeshes = 0;
+		EvictedMeshes = 0;
+		MemoryPressure = TEXT("Low");
+		
+		CurrentLODLevel = 0;
+		MaxLODLevel = 0;
+		TargetFPS = 60;
+		ActualFPS = 0.0f;
+		QualityReduction_Percent = 0.0f;
+		TextureResolution = TEXT("N/A");
+		MeshDecimation_Percent = 0.0f;
+		VisualFidelity_Percent = 100.0f;
+		
+		TotalErrors = 0;
+		MemoryWarnings = 0;
+		SplitFailures = 0;
+		RecoveryAttempts = 0;
+		SuccessRate_Percent = 100.0f;
+		LastErrorTime = TEXT("Never");
+		WarningLevel = TEXT("Low");
+		
+		CPUUsage_Percent = 0.0f;
+		GPUUsage_Percent = 0.0f;
+		ActiveCPUThreads = 0;
+		TotalCPUThreads = 0;
+		GPUMemoryBandwidth_GBps = 0.0f;
+		PCIeBandwidth_GBps = 0.0f;
+		CPUTemperature_C = 0.0f;
+		GPUTemperature_C = 0.0f;
+	}
+
+	// Helper methods
+	FString ToFormattedString() const;
+	FString ToCSV() const;
+	FString ToJSON() const;
+};
+
+/**
+ * Metrics configuration
+ */
+USTRUCT(BlueprintType)
+struct JUSYNC_API FJUSYNCMetricsConfig
+{
+	GENERATED_BODY()
+
+	// Enable/disable metrics collection
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
+	bool bEnableMetrics = true;
+
+	// Collection frequency (seconds)
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
+	float CollectionInterval_Seconds = 1.0f;
+
+	// Maximum history size
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
+	int32 MaxHistorySize = 3600; // 1 hour at 1-second intervals
+
+	// Enable real-time display
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
+	bool bEnableDisplay = true;
+
+	// Export settings
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
+	bool bAutoExport = false;
+
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
+	FString ExportDirectory;
+
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
+	float ExportInterval_Seconds = 60.0f;
+
+	// Which metrics to collect
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
+	bool bCollectMemoryMetrics = true;
+
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
+	bool bCollectSplittingMetrics = true;
+
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
+	bool bCollectPerformanceMetrics = true;
+
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
+	bool bCollectComponentMetrics = true;
+
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
+	bool bCollectStreamingMetrics = true;
+
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
+	bool bCollectQualityMetrics = true;
+
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
+	bool bCollectErrorMetrics = true;
+
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
+	bool bCollectHardwareMetrics = true;
+
+	FJUSYNCMetricsConfig()
+	{
+		bEnableMetrics = true;
+		CollectionInterval_Seconds = 1.0f;
+		MaxHistorySize = 3600;
+		bEnableDisplay = true;
+		bAutoExport = false;
+		ExportDirectory = TEXT("");
+		ExportInterval_Seconds = 60.0f;
+		
+		bCollectMemoryMetrics = true;
+		bCollectSplittingMetrics = true;
+		bCollectPerformanceMetrics = true;
+		bCollectComponentMetrics = true;
+		bCollectStreamingMetrics = true;
+		bCollectQualityMetrics = true;
+		bCollectErrorMetrics = true;
+		bCollectHardwareMetrics = true;
+	}
+};
+
+// Metrics collection delegate
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCMetricsUpdated, const FJUSYNCMetricsData&, MetricsData);
