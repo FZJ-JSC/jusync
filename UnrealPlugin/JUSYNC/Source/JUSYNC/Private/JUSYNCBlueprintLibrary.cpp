@@ -799,6 +799,29 @@ void UJUSYNCBlueprintLibrary::RequestFileListWithSizesAndRanksAsync(int32 Target
 
 void UJUSYNCBlueprintLibrary::RequestFileAsync(const FString& Filename, int32 TargetRank, int32 TimeoutMs, const FOnFileReceived& OnComplete, const FOnBrokerError& OnError)
 {
+    // If timeout is excessively large (like 2,000,000ms), use dynamic timeout instead
+    const int32 MAX_REASONABLE_TIMEOUT = 300000; // 5 minutes max
+    if (TimeoutMs > MAX_REASONABLE_TIMEOUT)
+    {
+        UE_LOG(LogJUSYNC, Warning, TEXT("Timeout %dms is too large, using dynamic timeout instead"), TimeoutMs);
+        
+        // Extract rank from filename if possible
+        int32 ExtractedRank = ExtractRankFromFilename(Filename);
+        if (ExtractedRank >= 0 && ExtractedRank != TargetRank)
+        {
+            UE_LOG(LogJUSYNC, Log, TEXT("Adjusting target rank from %d to %d based on filename"), TargetRank, ExtractedRank);
+            TargetRank = ExtractedRank;
+        }
+        
+        // Calculate dynamic timeout
+        int32 DynamicTimeout = CalculateDynamicTimeout(Filename, TargetRank, false, 0);
+        UE_LOG(LogJUSYNC, Log, TEXT("Using dynamic timeout: %dms for file '%s'"), DynamicTimeout, *Filename);
+        
+        // Use the new dynamic async function with single retry
+        RequestFileAsyncDynamic(Filename, TargetRank, OnComplete, OnError, 1, true);
+        return;
+    }
+    
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (!Subsystem)
     {
@@ -3478,4 +3501,355 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial_Be
 	}
 
 	return SpawnedActors;
+}
+
+// ========== DYNAMIC TIMEOUT & RETRY LOGIC IMPLEMENTATION ==========
+
+// Static member initialization
+UJUSYNCBlueprintLibrary::FRankPerformanceTracker UJUSYNCBlueprintLibrary::RankPerformanceTracker;
+
+// FRankPerformanceTracker methods
+float UJUSYNCBlueprintLibrary::FRankPerformanceTracker::GetRankPerformanceFactor(int32 Rank)
+{
+	FScopeLock Lock(&StatsMutex);
+	
+	if (!RankStats.Contains(Rank)) {
+		return 1.0f; // Default factor
+	}
+	
+	const FRankStats& Stats = RankStats[Rank];
+	
+	// Calculate performance factor:
+	// 1.0 = normal, >1.0 = slower, <1.0 = faster
+	float TimeFactor = FMath::Max(0.5f, FMath::Min(2.0f, Stats.AverageResponseTime / 10000.0f));
+	float SuccessFactor = 1.0f + (1.0f - Stats.SuccessRate); // 1.0 for 100% success, 2.0 for 0% success
+	
+	return TimeFactor * SuccessFactor;
+}
+
+bool UJUSYNCBlueprintLibrary::FRankPerformanceTracker::CanTryRank(int32 Rank)
+{
+	FScopeLock Lock(&StatsMutex);
+	
+	if (!RankStats.Contains(Rank)) {
+		return true;
+	}
+	
+	const FRankStats& Stats = RankStats[Rank];
+	const int32 MAX_FAILURES = 3;
+	const FTimespan COOLDOWN_PERIOD = FTimespan::FromMinutes(1);
+	
+	// Check if rank has too many failures recently
+	if (Stats.RequestCount - Stats.SuccessCount >= MAX_FAILURES) {
+		FDateTime Now = FDateTime::UtcNow();
+		if (Now - Stats.LastRequestTime < COOLDOWN_PERIOD) {
+			return false; // Rank is in cooldown
+		}
+	}
+	
+	return true;
+}
+
+void UJUSYNCBlueprintLibrary::FRankPerformanceTracker::RecordRequestStart(int32 Rank)
+{
+	FScopeLock Lock(&StatsMutex);
+	FRankStats& Stats = RankStats.FindOrAdd(Rank);
+	Stats.LastRequestTime = FDateTime::UtcNow();
+	Stats.RequestCount++;
+}
+
+void UJUSYNCBlueprintLibrary::FRankPerformanceTracker::RecordRequestResult(int32 Rank, bool bSuccess, int32 ResponseTimeMs)
+{
+	FScopeLock Lock(&StatsMutex);
+	FRankStats& Stats = RankStats.FindOrAdd(Rank);
+	
+	// Update moving average of response time
+	if (Stats.AverageResponseTime == 0.0f) {
+		Stats.AverageResponseTime = ResponseTimeMs;
+	} else {
+		Stats.AverageResponseTime = 0.7f * Stats.AverageResponseTime + 0.3f * ResponseTimeMs;
+	}
+	
+	if (bSuccess) {
+		Stats.SuccessCount++;
+	}
+	
+	// Update success rate
+	if (Stats.RequestCount > 0) {
+		Stats.SuccessRate = static_cast<float>(Stats.SuccessCount) / Stats.RequestCount;
+	}
+}
+
+void UJUSYNCBlueprintLibrary::FRankPerformanceTracker::ClearStats()
+{
+	FScopeLock Lock(&StatsMutex);
+	RankStats.Empty();
+}
+
+FString UJUSYNCBlueprintLibrary::FRankPerformanceTracker::GetStatsAsString() const
+{
+	FScopeLock Lock(&StatsMutex);
+	FString Result;
+	
+	for (const auto& Pair : RankStats) {
+		const FRankStats& Stats = Pair.Value;
+		Result += FString::Printf(TEXT("Rank %d: Requests=%d, Success=%d (%.1f%%), AvgTime=%.1fms\n"),
+			Pair.Key, Stats.RequestCount, Stats.SuccessCount, Stats.SuccessRate * 100.0f, Stats.AverageResponseTime);
+	}
+	
+	return Result;
+}
+
+// Helper functions
+int64 UJUSYNCBlueprintLibrary::EstimateFileSizeFromFilename(const FString& Filename)
+{
+	// Pattern-based estimation from your log files:
+	// clips/vtk_actor__triangles_0_Geom__r5_0.000000.usda = ~76MB
+	// clips/vtk_actor__triangles_0_Geom__r15_0.000000.usda = ~71MB
+	
+	if (Filename.Contains(TEXT("vtk_actor__triangles_0_Geom__r5_"))) {
+		return 76 * 1024 * 1024;  // 76MB
+	}
+	else if (Filename.Contains(TEXT("vtk_actor__triangles_0_Geom__r10_"))) {
+		return 70 * 1024 * 1024;  // 70MB (estimated)
+	}
+	else if (Filename.Contains(TEXT("vtk_actor__triangles_0_Geom__r15_"))) {
+		return 71 * 1024 * 1024;  // 71MB
+	}
+	else if (Filename.Contains(TEXT(".usda"))) {
+		// Generic USD file estimation
+		if (Filename.Contains(TEXT("_Geom__"))) {
+			return 50 * 1024 * 1024;  // 50MB for geometry files
+		}
+		return 10 * 1024 * 1024;     // 10MB for other USD files
+	}
+	
+	return 5 * 1024 * 1024;  // Default 5MB
+}
+
+int32 UJUSYNCBlueprintLibrary::CalculateDynamicTimeout(const FString& Filename, int32 TargetRank, bool bIsRetry, int32 RetryCount)
+{
+	// Base factors
+	const int32 BASE_TIMEOUT = 5000;           // 5 seconds minimum
+	const int32 PER_MB_TIMEOUT = 200;          // 200ms per MB
+	const int32 NETWORK_LATENCY_FACTOR = 1000; // 1 second for network overhead
+	const int32 RETRY_PENALTY = 2000;          // +2 seconds per retry
+	
+	// 1. Estimate file size from filename patterns
+	int64 EstimatedSize = EstimateFileSizeFromFilename(Filename);
+	
+	// 2. Calculate size-based timeout
+	int64 SizeMB = FMath::Max(1LL, EstimatedSize / (1024 * 1024));
+	int32 SizeTimeout = SizeMB * PER_MB_TIMEOUT;
+	
+	// 3. Network conditions
+	int32 NetworkTimeout = NETWORK_LATENCY_FACTOR;
+	
+	// 4. Retry penalty
+	int32 RetryTimeout = bIsRetry ? (RetryCount * RETRY_PENALTY) : 0;
+	
+	// 5. Rank-specific adjustments
+	float RankFactor = RankPerformanceTracker.GetRankPerformanceFactor(TargetRank);
+	int32 RankAdjustment = static_cast<int32>(RankFactor * 1000.0f);
+	
+	// 6. Calculate final timeout with reasonable bounds
+	int32 TotalTimeout = BASE_TIMEOUT + SizeTimeout + NetworkTimeout + RetryTimeout + RankAdjustment;
+	
+	// Enforce reasonable bounds: 5s min, 120s max for normal, 300s max for retries
+	int32 MaxTimeout = bIsRetry ? 300000 : 120000; // 5 minutes max for retries, 2 minutes normal
+	return FMath::Clamp(TotalTimeout, 5000, MaxTimeout);
+}
+
+TArray<int32> UJUSYNCBlueprintLibrary::GetFallbackRanks(int32 TargetRank)
+{
+	TArray<int32> Ranks;
+	
+	// Add ranks from same "family" (e.g., r5, r15, r10 are related)
+	// Based on your log patterns, files exist on ranks 5, 10, 15
+	// Note: TargetRank is already added by the caller, so we don't add it here
+	
+	if (TargetRank == 5) {
+		Ranks.Add(10);
+		Ranks.Add(15);
+		Ranks.Add(0);  // Rank 0 might have files
+	}
+	else if (TargetRank == 10) {
+		Ranks.Add(5);
+		Ranks.Add(15);
+		Ranks.Add(0);
+	}
+	else if (TargetRank == 15) {
+		Ranks.Add(5);
+		Ranks.Add(10);
+		Ranks.Add(0);
+	}
+	else {
+		// For other ranks, try common ranks (excluding the target rank)
+		if (TargetRank != 5) Ranks.Add(5);
+		if (TargetRank != 10) Ranks.Add(10);
+		if (TargetRank != 15) Ranks.Add(15);
+		if (TargetRank != 0) Ranks.Add(0);
+	}
+	
+	return Ranks;
+}
+
+void UJUSYNCBlueprintLibrary::ClearRankPerformanceStats()
+{
+	RankPerformanceTracker.ClearStats();
+}
+
+FString UJUSYNCBlueprintLibrary::GetRankPerformanceStats()
+{
+	return RankPerformanceTracker.GetStatsAsString();
+}
+
+void UJUSYNCBlueprintLibrary::RequestFileAsyncDynamic(
+	const FString& Filename,
+	int32 TargetRank,
+	const FOnFileReceived& OnComplete,
+	const FOnBrokerError& OnError,
+	int32 MaxRetries,
+	bool bUseExtractedRank)
+{
+	UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+	if (!Subsystem)
+	{
+		UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available"));
+		OnError.ExecuteIfBound(TEXT("Subsystem not available"));
+		return;
+	}
+	
+	// 1. First, try to extract correct rank from filename (if enabled)
+	int32 ExtractedRank = -1;
+	if (bUseExtractedRank)
+	{
+		ExtractedRank = ExtractRankFromFilename(Filename);
+		if (ExtractedRank >= 0 && ExtractedRank != TargetRank) {
+			UE_LOG(LogJUSYNC, Warning, TEXT("Filename suggests rank %d, but requesting from rank %d. Using extracted rank."),
+				   ExtractedRank, TargetRank);
+			TargetRank = ExtractedRank;
+		}
+	}
+	else
+	{
+		UE_LOG(LogJUSYNC, Log, TEXT("Rank extraction from filename disabled. Using provided TargetRank: %d"), TargetRank);
+	}
+	
+	// 2. Create list of ranks to try (primary + fallbacks)
+	TArray<int32> RanksToTry;
+	RanksToTry.Add(TargetRank);
+	RanksToTry.Append(GetFallbackRanks(TargetRank));
+	
+	// 3. Get subsystem as weak pointer for thread safety
+	TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
+	
+	// 4. Launch async retry logic with proper memory safety
+	Async(EAsyncExecution::Thread, [WeakSubsystem, RanksToTry, Filename, MaxRetries, OnComplete, OnError]()
+	{
+		// Check if subsystem still exists
+		UJUSYNCSubsystem* SubsystemPtr = WeakSubsystem.Get();
+		if (!SubsystemPtr)
+		{
+			UE_LOG(LogJUSYNC, Error, TEXT("Subsystem destroyed before async operation could complete"));
+			AsyncTask(ENamedThreads::GameThread, [Filename, OnError]()
+			{
+				OnError.ExecuteIfBound(FString::Printf(TEXT("Subsystem destroyed while trying to retrieve '%s'"), *Filename));
+			});
+			return;
+		}
+		
+		TArray<uint8> FileData;
+		bool bSuccess = false;
+		int32 ActualRankUsed = -1;
+		int32 TotalAttempts = 0;
+		FString FinalError;
+		
+		// Safety: Calculate maximum total time to prevent infinite loops
+		const int32 MAX_TOTAL_TIME_MS = 300000; // 5 minutes maximum
+		FDateTime OperationStartTime = FDateTime::UtcNow();
+		
+		// Try each rank with retries
+		for (int32 RankIndex = 0; RankIndex < RanksToTry.Num() && !bSuccess; RankIndex++)
+		{
+			int32 CurrentRank = RanksToTry[RankIndex];
+			
+			// Check if we should try this rank (circuit breaker)
+			if (!RankPerformanceTracker.CanTryRank(CurrentRank)) {
+				UE_LOG(LogJUSYNC, Log, TEXT("Skipping rank %d due to circuit breaker"), CurrentRank);
+				continue;
+			}
+			
+			for (int32 Retry = 0; Retry < MaxRetries && !bSuccess; Retry++)
+			{
+				// Check if we've exceeded maximum total time
+				FTimespan ElapsedTime = FDateTime::UtcNow() - OperationStartTime;
+				if (ElapsedTime.GetTotalMilliseconds() > MAX_TOTAL_TIME_MS)
+				{
+					FinalError = FString::Printf(TEXT("Exceeded maximum total time of %dms"), MAX_TOTAL_TIME_MS);
+					UE_LOG(LogJUSYNC, Error, TEXT("⚠️ %s for file: %s"), *FinalError, *Filename);
+					break;
+				}
+				
+				TotalAttempts++;
+				
+				// Dynamic timeout based on retry count and rank performance
+				bool bIsRetry = (Retry > 0);
+				int32 DynamicTimeout = CalculateDynamicTimeout(Filename, CurrentRank, bIsRetry, Retry);
+				
+				// Apply exponential backoff for retries
+				if (bIsRetry) {
+					int32 BackoffMs = FMath::Min(1000 * (1 << (Retry - 1)), 30000);
+					FPlatformProcess::Sleep(BackoffMs / 1000.0f);
+				}
+				
+				// Track request start
+				RankPerformanceTracker.RecordRequestStart(CurrentRank);
+				FDateTime StartTime = FDateTime::UtcNow();
+				
+				// Make the request
+				bSuccess = SubsystemPtr->RequestFile(Filename, CurrentRank, DynamicTimeout, FileData);
+				
+				// Calculate response time
+				FDateTime EndTime = FDateTime::UtcNow();
+				FTimespan ResponseTime = EndTime - StartTime;
+				int32 ResponseTimeMs = ResponseTime.GetTotalMilliseconds();
+				
+				// Update performance tracker
+				RankPerformanceTracker.RecordRequestResult(CurrentRank, bSuccess, ResponseTimeMs);
+				
+				if (bSuccess) {
+					ActualRankUsed = CurrentRank;
+					UE_LOG(LogJUSYNC, Log, TEXT("✅ Successfully retrieved '%s' from rank %d in %dms (attempt %d, timeout: %dms)"),
+						   *Filename, ActualRankUsed, ResponseTimeMs, TotalAttempts, DynamicTimeout);
+					break;
+				} else {
+					FinalError = FString::Printf(TEXT("Failed attempt %d for '%s' from rank %d (timeout: %dms, actual: %dms)"),
+						TotalAttempts, *Filename, CurrentRank, DynamicTimeout, ResponseTimeMs);
+					UE_LOG(LogJUSYNC, Warning, TEXT("⚠️ %s"), *FinalError);
+				}
+			}
+		}
+		
+		// Execute callback on game thread
+		AsyncTask(ENamedThreads::GameThread, [bSuccess, Filename, FileData, ActualRankUsed, TotalAttempts, FinalError, OnComplete, OnError]()
+		{
+			if (bSuccess) {
+				if (OnComplete.IsBound()) {
+					OnComplete.Execute(Filename, FileData);
+				} else {
+					UE_LOG(LogJUSYNC, Warning, TEXT("OnComplete delegate not bound for successful file retrieval: %s"), *Filename);
+				}
+			} else {
+				FString ErrorMsg = FString::Printf(
+					TEXT("Failed to retrieve '%s' after %d attempts (last tried rank: %d). %s"),
+					*Filename, TotalAttempts, ActualRankUsed, *FinalError);
+				if (OnError.IsBound()) {
+					OnError.Execute(ErrorMsg);
+				} else {
+					UE_LOG(LogJUSYNC, Error, TEXT("OnError delegate not bound for failed file retrieval: %s"), *Filename);
+				}
+			}
+		});
+	});
 }

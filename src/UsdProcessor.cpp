@@ -330,7 +330,7 @@ UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vecto
         }
 
         // MEMORY SAFETY: Validate dimensions returned by STB
-        if (width <= 0 || height <= 0 || width > 32768 || height > 32768) {
+        if (width <= 0 || height <= 0) {
             MIDDLEWARE_LOG_ERROR("Invalid image dimensions from STB: %dx%d", width, height);
             stbi_image_free(imageData);
             stats.processingErrors.fetch_add(1);
@@ -755,11 +755,11 @@ int32_t UsdProcessor::getMaxRecursionDepth() const {
 }
 
 void UsdProcessor::setMemoryLimit(size_t limitMB) {
-    if (limitMB >= 1 && limitMB <= 4096) {
+    if (limitMB >= 1) {
         memoryLimitMB.store(limitMB);
         MIDDLEWARE_LOG_INFO("Memory limit set to %zu MB", limitMB);
     } else {
-        MIDDLEWARE_LOG_ERROR("Invalid memory limit: %zu MB (must be 1-4096)", limitMB);
+        MIDDLEWARE_LOG_ERROR("Invalid memory limit: %zu MB (must be >= 1)", limitMB);
     }
 }
 

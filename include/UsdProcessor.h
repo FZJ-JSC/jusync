@@ -7,6 +7,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <functional>
+#include <limits>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include "MiddlewareLogging.h"
@@ -336,7 +337,7 @@ private:
 
     // Configuration
     std::atomic<int32_t> maxRecursionDepth{safety::MAX_RECURSION_DEPTH};
-    std::atomic<size_t> memoryLimitMB{1024};
+    std::atomic<size_t> memoryLimitMB{static_cast<size_t>(std::numeric_limits<int64_t>::max() / (1024 * 1024))}; // Essentially unlimited (4.6EB)
     std::atomic<bool> referenceResolutionEnabled{true};
 
     // Statistics - using the fixed version

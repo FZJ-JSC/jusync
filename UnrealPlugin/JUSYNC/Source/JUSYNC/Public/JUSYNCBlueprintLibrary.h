@@ -496,7 +496,82 @@ private:
 		float BatchDelay = 0.016f
 	);
 
+	// ========== DYNAMIC TIMEOUT & RETRY LOGIC ==========
+	
+	/**
+	 * Request file with dynamic timeout and retry logic
+	 */
+	UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request File Async (Dynamic Timeout)")
+	static void RequestFileAsyncDynamic(
+		const FString& Filename,
+		int32 TargetRank,
+		const FOnFileReceived& OnComplete,
+		const FOnBrokerError& OnError,
+		int32 MaxRetries = 3,
+		bool bUseExtractedRank = true);
+
+	/**
+	 * Calculate dynamic timeout based on file size, rank performance, and retry count
+	 */
+	UFUNCTION(BlueprintCallable, Category = "JUSYNC|Utilities")
+	static int32 CalculateDynamicTimeout(
+		const FString& Filename,
+		int32 TargetRank,
+		bool bIsRetry = false,
+		int32 RetryCount = 0);
+
+	/**
+	 * Estimate file size from filename patterns
+	 */
+	UFUNCTION(BlueprintCallable, Category = "JUSYNC|Utilities")
+	static int64 EstimateFileSizeFromFilename(const FString& Filename);
+
+	/**
+	 * Get fallback ranks for a given target rank
+	 */
+	UFUNCTION(BlueprintCallable, Category = "JUSYNC|Utilities")
+	static TArray<int32> GetFallbackRanks(int32 TargetRank);
+
+	/**
+	 * Clear rank performance statistics
+	 */
+	UFUNCTION(BlueprintCallable, Category = "JUSYNC|Utilities")
+	static void ClearRankPerformanceStats();
+
+	/**
+	 * Get rank performance statistics as string
+	 */
+	UFUNCTION(BlueprintPure, Category = "JUSYNC|Utilities")
+	static FString GetRankPerformanceStats();
+
 private:
+	// Rank performance tracking
+	class FRankPerformanceTracker
+	{
+	private:
+		struct FRankStats
+		{
+			FDateTime LastRequestTime;
+			float AverageResponseTime = 0.0f;
+			int32 RequestCount = 0;
+			int32 SuccessCount = 0;
+			float SuccessRate = 1.0f;
+		};
+		
+		TMap<int32, FRankStats> RankStats;
+		mutable FCriticalSection StatsMutex;
+		
+	public:
+		float GetRankPerformanceFactor(int32 Rank);
+		bool CanTryRank(int32 Rank);
+		void RecordRequestStart(int32 Rank);
+		void RecordRequestResult(int32 Rank, bool bSuccess, int32 ResponseTimeMs);
+		void ClearStats();
+		FString GetStatsAsString() const;
+	};
+	
+	static FRankPerformanceTracker RankPerformanceTracker;
+
 	// Benchmark data storage
 	static TArray<FJUSYNCBenchmarkResult> BenchmarkResults;
 	static FString CurrentBenchmarkTest;

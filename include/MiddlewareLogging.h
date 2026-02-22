@@ -47,6 +47,7 @@
 // Standard C++ environment
 #include <iostream>
 #include <cstdio>
+#include <limits>
 
 #define MIDDLEWARE_LOG_INFO(format, ...) printf("[INFO] " format "\n", ##__VA_ARGS__)
 #define MIDDLEWARE_LOG_WARNING(format, ...) fprintf(stderr, "[WARNING] " format "\n", ##__VA_ARGS__)
@@ -85,15 +86,15 @@
 
 #endif
 
-// Common safety constants
+// Common safety constants - Unlimited for RMC compatibility
 namespace anari_usd_middleware {
     namespace safety {
-        static constexpr size_t MAX_BUFFER_SIZE = 500000000;        // 500MB
-        static constexpr size_t MAX_VECTOR_SIZE = 100000000;        // 100M elements
-        static constexpr size_t MAX_STRING_SIZE = 10000000;         // 10MB
-        static constexpr size_t MAX_MESH_VERTICES = 10000000;       // 10M vertices
-        static constexpr size_t MAX_MESH_INDICES = 30000000;        // 30M indices
-        static constexpr int32_t MAX_RECURSION_DEPTH = 100;         // Max USD hierarchy depth
+        static constexpr size_t MAX_BUFFER_SIZE = static_cast<size_t>(std::numeric_limits<int64_t>::max() / 2); // Essentially unlimited (4.6EB)
+        static constexpr size_t MAX_VECTOR_SIZE = static_cast<size_t>(std::numeric_limits<int64_t>::max() / 2); // Unlimited elements
+        static constexpr size_t MAX_STRING_SIZE = static_cast<size_t>(std::numeric_limits<int64_t>::max() / 2); // Unlimited string size
+        static constexpr size_t MAX_MESH_VERTICES = static_cast<size_t>(std::numeric_limits<int64_t>::max() / 2); // Unlimited vertices for RMC
+        static constexpr size_t MAX_MESH_INDICES = static_cast<size_t>(std::numeric_limits<int64_t>::max() / 2); // Unlimited indices for RMC
+        static constexpr int32_t MAX_RECURSION_DEPTH = 1000;        // Increased USD hierarchy depth
         static constexpr double EPSILON = 1e-10;                    // For floating point comparisons
     }
 }

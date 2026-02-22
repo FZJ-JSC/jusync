@@ -75,14 +75,56 @@ extern "C" void FileReceivedCallback_Static(const CFileData* file_data)
     
     UE_LOG(LogJUSYNC, Log, TEXT("Creating async task for file processing..."));
     
-    // Create a copy of the data for the lambda
-    CFileData LocalData = *file_data;
-
+    // Create a DEEP copy of the data for the lambda to avoid use-after-free
+    // We need to copy all C strings and binary data since the original may be freed
+    // Create a custom structure to hold the copied data
+    struct LocalFileData
+    {
+        char* filename = nullptr;
+        char* hash = nullptr;
+        char* file_type = nullptr;
+        unsigned char* data = nullptr;
+        size_t data_size = 0;
+        
+        ~LocalFileData()
+        {
+            if (filename) delete[] filename;
+            if (hash) delete[] hash;
+            if (file_type) delete[] file_type;
+            if (data) delete[] data;
+        }
+    };
+    
+    LocalFileData LocalData;
+    
+    // Copy filename (C string)
+    if (file_data->filename && file_data->filename[0] != '\0') {
+        size_t filename_len = strlen(file_data->filename) + 1;
+        LocalData.filename = new char[filename_len];
+        strcpy_s(LocalData.filename, filename_len, file_data->filename);
+    }
+    
+    // Copy hash (C string)
+    if (file_data->hash && file_data->hash[0] != '\0') {
+        size_t hash_len = strlen(file_data->hash) + 1;
+        LocalData.hash = new char[hash_len];
+        strcpy_s(LocalData.hash, hash_len, file_data->hash);
+    }
+    
+    // Copy file_type (C string)
+    if (file_data->file_type && file_data->file_type[0] != '\0') {
+        size_t file_type_len = strlen(file_data->file_type) + 1;
+        LocalData.file_type = new char[file_type_len];
+        strcpy_s(LocalData.file_type, file_type_len, file_data->file_type);
+    }
+    
+    // Copy binary data
+    LocalData.data_size = file_data->data_size;
     if (file_data->data && file_data->data_size > 0) {
         LocalData.data = new unsigned char[file_data->data_size];
         std::memcpy(LocalData.data, file_data->data, file_data->data_size);
     }
-
+    
     
     AsyncTask(ENamedThreads::GameThread, [LocalData]()
     {
@@ -98,11 +140,14 @@ extern "C" void FileReceivedCallback_Static(const CFileData* file_data)
         UE_LOG(LogJUSYNC, Log, TEXT("Converting C data to UE format..."));
         
         FJUSYNCFileData UEFileData;
-        UEFileData.Filename = FString(UTF8_TO_TCHAR(LocalData.filename));
-        UEFileData.Hash = FString(UTF8_TO_TCHAR(LocalData.hash));
-        UEFileData.FileType = FString(UTF8_TO_TCHAR(LocalData.file_type));
-        UEFileData.Data.SetNum(LocalData.data_size);
-        FMemory::Memcpy(UEFileData.Data.GetData(), LocalData.data, LocalData.data_size);
+        UEFileData.Filename = LocalData.filename ? FString(UTF8_TO_TCHAR(LocalData.filename)) : TEXT("");
+        UEFileData.Hash = LocalData.hash ? FString(UTF8_TO_TCHAR(LocalData.hash)) : TEXT("");
+        UEFileData.FileType = LocalData.file_type ? FString(UTF8_TO_TCHAR(LocalData.file_type)) : TEXT("");
+        
+        if (LocalData.data && LocalData.data_size > 0) {
+            UEFileData.Data.SetNum(LocalData.data_size);
+            FMemory::Memcpy(UEFileData.Data.GetData(), LocalData.data, LocalData.data_size);
+        }
         
         UE_LOG(LogJUSYNC, Log, TEXT("Broadcasting to Blueprint events..."));
         UE_LOG(LogJUSYNC, Log, TEXT("  - UE Filename: %s"), *UEFileData.Filename);
@@ -116,11 +161,6 @@ extern "C" void FileReceivedCallback_Static(const CFileData* file_data)
         Subsystem->OnFileReceived.Broadcast(UEFileData);
         
         UE_LOG(LogJUSYNC, Log, TEXT("=== FILE PROCESSING COMPLETE ==="));
-
-        if (LocalData.data) {
-            delete[] LocalData.data;
-        }
-
     });
 }
 
@@ -136,7 +176,7 @@ extern "C" void MessageReceivedCallback_Static(const char* message)
     
     UE_LOG(LogJUSYNC, Log, TEXT("ZMQ Message: %s"), UTF8_TO_TCHAR(message));
     
-    // Create a copy of the message for the lambda
+    // Create a copy of the message for the lambda (deep copy to avoid use-after-free)
     FString MessageCopy = FString(UTF8_TO_TCHAR(message));
     
     AsyncTask(ENamedThreads::GameThread, [MessageCopy]()
@@ -147,6 +187,10 @@ extern "C" void MessageReceivedCallback_Static(const char* message)
             UE_LOG(LogJUSYNC, Log, TEXT("Broadcasting message to Blueprint: %s"), *MessageCopy);
             Subsystem->OnMessageReceived.Broadcast(MessageCopy);
             Subsystem->HandleMessageReceivedForLibrary(MessageCopy);
+        }
+        else
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("MessageReceivedCallback_Static: Subsystem instance is null, message dropped: %s"), *MessageCopy);
         }
     });
 }
@@ -480,6 +524,13 @@ void UJUSYNCSubsystem::ShutdownMiddleware()
     UE_LOG(LogJUSYNC, Log, TEXT("=== SHUTTING DOWN JUSYNC MIDDLEWARE ==="));
     
 #ifdef WITH_ANARI_USD_MIDDLEWARE
+    // Clear global instance BEFORE shutting down to prevent callbacks from using destroyed instance
+    if (g_SubsystemInstance.load() == this)
+    {
+        g_SubsystemInstance.store(nullptr);
+        UE_LOG(LogJUSYNC, Log, TEXT("Cleared global subsystem instance"));
+    }
+    
     ShutdownMiddleware_C();
     bIsInitialized.store(false);
     UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Middleware shutdown"));

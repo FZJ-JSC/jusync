@@ -16,6 +16,48 @@ UJUSYNCAsyncLoadUSD* UJUSYNCAsyncLoadUSD::AsyncLoadUSDFromBuffer(
     Action->BufferData = Buffer;
     Action->FilenameData = Filename;
     Action->bIsFromDisk = false;
+    
+    // Try to register with game instance, but don't fail if we can't find a world
+    // The Activate() method will try again with more comprehensive world detection
+    UWorld* World = nullptr;
+    
+    // Method 1: Use GWorld global
+    if (GWorld)
+    {
+        World = GWorld;
+    }
+    
+    // Method 2: Try engine world contexts
+    if (!World && GEngine)
+    {
+        for (const FWorldContext& WorldContext : GEngine->GetWorldContexts())
+        {
+            if (WorldContext.World() && (WorldContext.WorldType == EWorldType::PIE || WorldContext.WorldType == EWorldType::Game))
+            {
+                World = WorldContext.World();
+                break;
+            }
+        }
+    }
+    
+    if (World)
+    {
+        if (UGameInstance* GameInstance = World->GetGameInstance())
+        {
+            Action->RegisterWithGameInstance(GameInstance);
+            UE_LOG(LogJUSYNC, Log, TEXT("AsyncLoadUSDFromBuffer: Registered with game instance"));
+        }
+        else
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("AsyncLoadUSDFromBuffer: Found world but no game instance"));
+        }
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Warning, TEXT("AsyncLoadUSDFromBuffer: Could not find world context for registration"));
+        // Don't fail - Activate() will try again
+    }
+    
     return Action;
 }
 
@@ -24,14 +66,130 @@ UJUSYNCAsyncLoadUSD* UJUSYNCAsyncLoadUSD::AsyncLoadUSDFromDisk(const FString& Fi
     UJUSYNCAsyncLoadUSD* Action = NewObject<UJUSYNCAsyncLoadUSD>();
     Action->FilePathData = FilePath;
     Action->bIsFromDisk = true;
+    
+    // Try to register with game instance, but don't fail if we can't find a world
+    // The Activate() method will try again with more comprehensive world detection
+    UWorld* World = nullptr;
+    
+    // Method 1: Use GWorld global
+    if (GWorld)
+    {
+        World = GWorld;
+    }
+    
+    // Method 2: Try engine world contexts
+    if (!World && GEngine)
+    {
+        for (const FWorldContext& WorldContext : GEngine->GetWorldContexts())
+        {
+            if (WorldContext.World() && (WorldContext.WorldType == EWorldType::PIE || WorldContext.WorldType == EWorldType::Game))
+            {
+                World = WorldContext.World();
+                break;
+            }
+        }
+    }
+    
+    if (World)
+    {
+        if (UGameInstance* GameInstance = World->GetGameInstance())
+        {
+            Action->RegisterWithGameInstance(GameInstance);
+            UE_LOG(LogJUSYNC, Log, TEXT("AsyncLoadUSDFromDisk: Registered with game instance"));
+        }
+        else
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("AsyncLoadUSDFromDisk: Found world but no game instance"));
+        }
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Warning, TEXT("AsyncLoadUSDFromDisk: Could not find world context for registration"));
+        // Don't fail - Activate() will try again
+    }
+    
     return Action;
 }
 
 void UJUSYNCAsyncLoadUSD::Activate()
 {
+    // Enhanced world detection similar to UJUSYNCAsyncReceiveFiles
+    UWorld* World = nullptr;
+    
+    // Method 1: Use GWorld global (most reliable for PIE)
+    if (GWorld)
+    {
+        UE_LOG(LogJUSYNC, Log, TEXT("AsyncLoadUSD: Got world from GWorld: %s"), *GWorld->GetName());
+        World = GWorld;
+    }
+    
+    // Method 2: Try to get world from JUSYNC subsystem
+    if (!World)
+    {
+        if (UJUSYNCSubsystem* Subsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem())
+        {
+            if (UGameInstance* GameInstance = Subsystem->GetGameInstance())
+            {
+                World = GameInstance->GetWorld();
+                if (World)
+                {
+                    UE_LOG(LogJUSYNC, Log, TEXT("AsyncLoadUSD: Got world from subsystem: %s"), *World->GetName());
+                }
+            }
+        }
+    }
+    
+    // Method 3: Iterate through world contexts (comprehensive fallback)
+    if (!World && GEngine)
+    {
+        // First try PIE worlds
+        for (const FWorldContext& WorldContext : GEngine->GetWorldContexts())
+        {
+            if (WorldContext.World() && WorldContext.WorldType == EWorldType::PIE)
+            {
+                World = WorldContext.World();
+                UE_LOG(LogJUSYNC, Log, TEXT("AsyncLoadUSD: Got PIE world: %s"), *World->GetName());
+                break;
+            }
+        }
+        
+        // Then try game worlds
+        if (!World)
+        {
+            for (const FWorldContext& WorldContext : GEngine->GetWorldContexts())
+            {
+                if (WorldContext.World() && WorldContext.WorldType == EWorldType::Game)
+                {
+                    World = WorldContext.World();
+                    UE_LOG(LogJUSYNC, Log, TEXT("AsyncLoadUSD: Got game world: %s"), *World->GetName());
+                    break;
+                }
+            }
+        }
+    }
+    
+    // Register with game instance if we found a world
+    if (World)
+    {
+        if (UGameInstance* GameInstance = World->GetGameInstance())
+        {
+            RegisterWithGameInstance(GameInstance);
+            UE_LOG(LogJUSYNC, Log, TEXT("AsyncLoadUSD: Registered with game instance in Activate()"));
+        }
+        else
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("AsyncLoadUSD: Could not get game instance from world"));
+        }
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Warning, TEXT("AsyncLoadUSD: Could not find any valid world context"));
+    }
+    
     // Validate inputs first
     if (bIsFromDisk && FilePathData.IsEmpty())
     {
+        UE_LOG(LogJUSYNC, Warning, TEXT("AsyncLoadUSD: Empty file path for disk load"));
         OnFailure.Broadcast(TArray<FJUSYNCMeshData>(), false);
         SetReadyToDestroy();
         return;
@@ -39,55 +197,80 @@ void UJUSYNCAsyncLoadUSD::Activate()
     
     if (!bIsFromDisk && BufferData.Num() == 0)
     {
+        UE_LOG(LogJUSYNC, Warning, TEXT("AsyncLoadUSD: Empty buffer for memory load"));
         OnFailure.Broadcast(TArray<FJUSYNCMeshData>(), false);
         SetReadyToDestroy();
         return;
     }
 
-    // Perform async loading on background thread
-    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this]()
+    UE_LOG(LogJUSYNC, Log, TEXT("AsyncLoadUSD: Starting async load (from disk: %d)"), bIsFromDisk);
+    
+    // Perform async loading on background thread with memory safety
+    TWeakObjectPtr<UJUSYNCAsyncLoadUSD> WeakThis(this);
+    bool bIsFromDiskCopy = bIsFromDisk;
+    FString FilePathDataCopy = FilePathData;
+    TArray<uint8> BufferDataCopy = BufferData;
+    FString FilenameDataCopy = FilenameData;
+    
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakThis, bIsFromDiskCopy, FilePathDataCopy, BufferDataCopy, FilenameDataCopy]()
     {
         TArray<FJUSYNCMeshData> MeshData;
         FString Preview;
         bool bSuccess = false;
 
-        // Broadcast initial progress
-        AsyncTask(ENamedThreads::GameThread, [this]()
+        // Broadcast initial progress (check if object still exists)
+        AsyncTask(ENamedThreads::GameThread, [WeakThis]()
         {
-            BroadcastProgress(0.1f);
+            if (UJUSYNCAsyncLoadUSD* StrongThis = WeakThis.Get())
+            {
+                StrongThis->BroadcastProgress(0.1f);
+            }
         });
 
-        if (bIsFromDisk)
+        if (bIsFromDiskCopy)
         {
             // Load from disk using your existing function
-            bSuccess = UJUSYNCBlueprintLibrary::LoadUSDFromDisk(FilePathData, MeshData, Preview);
+            bSuccess = UJUSYNCBlueprintLibrary::LoadUSDFromDisk(FilePathDataCopy, MeshData, Preview);
         }
         else
         {
             // Load from buffer using your existing function
-            bSuccess = UJUSYNCBlueprintLibrary::LoadUSDFromBuffer(BufferData, FilenameData, MeshData, Preview);
+            bSuccess = UJUSYNCBlueprintLibrary::LoadUSDFromBuffer(BufferDataCopy, FilenameDataCopy, MeshData, Preview);
         }
 
-        // Return to game thread for Blueprint callback
-        AsyncTask(ENamedThreads::GameThread, [this, bSuccess, MeshData]()
+        // Return to game thread for Blueprint callback (check if object still exists)
+        AsyncTask(ENamedThreads::GameThread, [WeakThis, bSuccess, MeshData]()
         {
-            BroadcastProgress(1.0f);
-            OnLoadComplete(bSuccess, MeshData);
+            if (UJUSYNCAsyncLoadUSD* StrongThis = WeakThis.Get())
+            {
+                StrongThis->BroadcastProgress(1.0f);
+                StrongThis->OnLoadComplete(bSuccess, MeshData);
+            }
+            else
+            {
+                UE_LOG(LogJUSYNC, Warning, TEXT("AsyncLoadUSD: Object destroyed before completion"));
+            }
         });
     });
 }
 
 void UJUSYNCAsyncLoadUSD::OnLoadComplete(bool bSuccess, const TArray<FJUSYNCMeshData>& MeshData)
 {
+    UE_LOG(LogJUSYNC, Log, TEXT("AsyncLoadUSD::OnLoadComplete: bSuccess=%d, MeshCount=%d, Object=%p"), 
+           bSuccess, MeshData.Num(), this);
+    
     if (bSuccess)
     {
+        UE_LOG(LogJUSYNC, Log, TEXT("AsyncLoadUSD: Broadcasting OnSuccess to Blueprint (MeshCount=%d)"), MeshData.Num());
         OnSuccess.Broadcast(MeshData, true);
     }
     else
     {
+        UE_LOG(LogJUSYNC, Warning, TEXT("AsyncLoadUSD: Broadcasting OnFailure"));
         OnFailure.Broadcast(TArray<FJUSYNCMeshData>(), false);
     }
     
+    UE_LOG(LogJUSYNC, Log, TEXT("AsyncLoadUSD: Setting ready to destroy"));
     SetReadyToDestroy();
 }
 
@@ -100,6 +283,17 @@ void UJUSYNCAsyncLoadUSD::BroadcastProgress(float Progress)
 UJUSYNCAsyncReceiveFiles* UJUSYNCAsyncReceiveFiles::AsyncStartReceiving()
 {
     UJUSYNCAsyncReceiveFiles* Action = NewObject<UJUSYNCAsyncReceiveFiles>();
+    
+    // CRITICAL: Register with game instance to prevent garbage collection
+    if (UWorld* World = GEngine->GetWorldFromContextObject(Action, EGetWorldErrorMode::LogAndReturnNull))
+    {
+        Action->RegisterWithGameInstance(World->GetGameInstance());
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Warning, TEXT("AsyncStartReceiving: Could not get world context for registration"));
+    }
+    
     return Action;
 }
 
@@ -212,6 +406,17 @@ UJUSYNCAsyncCreateTexture* UJUSYNCAsyncCreateTexture::AsyncCreateTextureFromBuff
 {
     UJUSYNCAsyncCreateTexture* Action = NewObject<UJUSYNCAsyncCreateTexture>();
     Action->BufferData = Buffer;
+    
+    // CRITICAL: Register with game instance to prevent garbage collection
+    if (UWorld* World = GEngine->GetWorldFromContextObject(Action, EGetWorldErrorMode::LogAndReturnNull))
+    {
+        Action->RegisterWithGameInstance(World->GetGameInstance());
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Warning, TEXT("AsyncCreateTextureFromBuffer: Could not get world context for registration"));
+    }
+    
     return Action;
 }
 
@@ -260,6 +465,17 @@ UJUSYNCAsyncCreateMesh* UJUSYNCAsyncCreateMesh::AsyncCreateRealtimeMeshFromJUSYN
     UJUSYNCAsyncCreateMesh* Action = NewObject<UJUSYNCAsyncCreateMesh>();
     Action->MeshDataCopy = MeshData;
     Action->MeshComponentPtr = RealtimeMeshComponent;
+    
+    // CRITICAL: Register with game instance to prevent garbage collection
+    if (UWorld* World = GEngine->GetWorldFromContextObject(Action, EGetWorldErrorMode::LogAndReturnNull))
+    {
+        Action->RegisterWithGameInstance(World->GetGameInstance());
+    }
+    else
+    {
+        UE_LOG(LogJUSYNC, Warning, TEXT("AsyncCreateRealtimeMeshFromJUSYNC: Could not get world context for registration"));
+    }
+    
     return Action;
 }
 

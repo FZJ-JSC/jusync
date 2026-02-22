@@ -32,8 +32,9 @@ static std::unique_ptr<anari_usd_middleware::AnariUsdMiddleware> g_middleware;
 static std::unique_ptr<anari_usd_middleware::CollisionProcessor> g_collision_processor;
 
 // Global callback storage - maintains C callback function pointers
-static FileReceivedCallback_C g_file_callback = nullptr;
-static MessageReceivedCallback_C g_message_callback = nullptr;
+// Use atomic for thread-safe access from ZMQ callback threads
+static std::atomic<FileReceivedCallback_C> g_file_callback = nullptr;
+static std::atomic<MessageReceivedCallback_C> g_message_callback = nullptr;
 
 // Default collision complexity setting
 static int g_default_collision_complexity = COLLISION_COMPLEX;
@@ -76,18 +77,16 @@ int InitializeMiddleware_C(const char* endpoint) {
                         CFileData c_data = {};
 
                         // Safe string copying with bounds checking
+                        // Use snprintf for cross-platform safety with guaranteed null termination
 #ifdef _WIN32
-                        strncpy_s(c_data.filename, sizeof(c_data.filename), file_data.filename.c_str(), 255);
-                        strncpy_s(c_data.hash, sizeof(c_data.hash), file_data.hash.c_str(), 63);
-                        strncpy_s(c_data.file_type, sizeof(c_data.file_type), file_data.fileType.c_str(), 31);
+                        strncpy_s(c_data.filename, sizeof(c_data.filename), file_data.filename.c_str(), _TRUNCATE);
+                        strncpy_s(c_data.hash, sizeof(c_data.hash), file_data.hash.c_str(), _TRUNCATE);
+                        strncpy_s(c_data.file_type, sizeof(c_data.file_type), file_data.fileType.c_str(), _TRUNCATE);
 #else
-                        std::strncpy(c_data.filename, file_data.filename.c_str(), 255);
-                        std::strncpy(c_data.hash, file_data.hash.c_str(), 63);
-                        std::strncpy(c_data.file_type, file_data.fileType.c_str(), 31);
-                        // Ensure null termination
-                        c_data.filename[255] = '\0';
-                        c_data.hash[63] = '\0';
-                        c_data.file_type[31] = '\0';
+                        // Use snprintf for guaranteed null termination and bounds checking
+                        snprintf(c_data.filename, sizeof(c_data.filename), "%s", file_data.filename.c_str());
+                        snprintf(c_data.hash, sizeof(c_data.hash), "%s", file_data.hash.c_str());
+                        snprintf(c_data.file_type, sizeof(c_data.file_type), "%s", file_data.fileType.c_str());
 #endif
 
                         // Copy binary data safely
@@ -100,16 +99,28 @@ int InitializeMiddleware_C(const char* endpoint) {
                         }
 
                         // Call the callback
-                        g_file_callback(&c_data);
+                        FileReceivedCallback_C file_callback = g_file_callback.load(std::memory_order_acquire);
+                        if (file_callback) {
+                            file_callback(&c_data);
+                        }
+                        
+                        // ✅ CRITICAL FIX: Clean up allocated memory after callback
+                        // The callback should have copied any data it needs to keep
+                        if (c_data.data) {
+                            delete[] c_data.data;
+                            c_data.data = nullptr;
+                            c_data.data_size = 0;
+                        }
                     }
                 });
             }
 
             // Register message callback if available
-            if (g_message_callback) {
-                g_middleware->registerMessageCallback([](const std::string& message) {
-                    if (g_message_callback) {
-                        g_message_callback(message.c_str());
+            MessageReceivedCallback_C message_callback = g_message_callback.load(std::memory_order_acquire);
+            if (message_callback) {
+                g_middleware->registerMessageCallback([message_callback](const std::string& message) {
+                    if (message_callback) {
+                        message_callback(message.c_str());
                     }
                 });
             }
@@ -281,10 +292,10 @@ int RequestFileList_C(int32_t target_rank, char*** out_files, size_t* out_count,
             size_t len = files[i].length() + 1;
             (*out_files)[i] = new char[len];
 #ifdef _WIN32
-            strncpy_s((*out_files)[i], len, files[i].c_str(), len - 1);
+            strncpy_s((*out_files)[i], len, files[i].c_str(), _TRUNCATE);
 #else
-            std::strncpy((*out_files)[i], files[i].c_str(), len);
-            (*out_files)[i][len - 1] = '\0';
+            // Use snprintf for guaranteed null termination
+            snprintf((*out_files)[i], len, "%s", files[i].c_str());
 #endif
         }
         
@@ -327,8 +338,8 @@ int RequestFileListWithSizes_C(int32_t target_rank, char*** out_names, uint64_t*
 #ifdef _WIN32
             strncpy_s((*out_names)[i], len, files[i].name.c_str(), _TRUNCATE);
 #else
-            std::strncpy((*out_names)[i], files[i].name.c_str(), len);
-            (*out_names)[i][len - 1] = '\0';
+            // Use snprintf for guaranteed null termination
+            snprintf((*out_names)[i], len, "%s", files[i].name.c_str());
 #endif
             (*out_sizes)[i] = files[i].size;
         }
@@ -375,8 +386,8 @@ int RequestFileListWithSizesAndRanks_C(int32_t target_rank, char*** out_names, u
 #ifdef _WIN32
             strncpy_s((*out_names)[i], len, files[i].name.c_str(), _TRUNCATE);
 #else
-            std::strncpy((*out_names)[i], files[i].name.c_str(), len);
-            (*out_names)[i][len - 1] = '\0';
+            // Use snprintf for guaranteed null termination
+            snprintf((*out_names)[i], len, "%s", files[i].name.c_str());
 #endif
             (*out_sizes)[i] = files[i].size;
             (*out_ranks)[i] = files[i].source_rank;
@@ -477,10 +488,10 @@ int RequestFrame_C(int32_t frame_number, int32_t target_rank,
             
             // Copy filename
 #ifdef _WIN32
-            strncpy_s(c_file.filename, sizeof(c_file.filename), frameFiles[i].first.c_str(), 255);
+            strncpy_s(c_file.filename, sizeof(c_file.filename), frameFiles[i].first.c_str(), _TRUNCATE);
 #else
-            std::strncpy(c_file.filename, frameFiles[i].first.c_str(), 255);
-            c_file.filename[255] = '\0';
+            // Use snprintf for guaranteed null termination
+            snprintf(c_file.filename, sizeof(c_file.filename), "%s", frameFiles[i].first.c_str());
 #endif
             
             // Copy file data
@@ -588,13 +599,12 @@ static void ConvertMeshDataToCFormat(const anari_usd_middleware::UsdProcessor::M
 
     // Safe string copying with bounds checking
     #ifdef _WIN32
-    strncpy_s(dst.element_name, sizeof(dst.element_name), src.elementName.c_str(), 255);
-    strncpy_s(dst.type_name, sizeof(dst.type_name), src.typeName.c_str(), 127);
+    strncpy_s(dst.element_name, sizeof(dst.element_name), src.elementName.c_str(), _TRUNCATE);
+    strncpy_s(dst.type_name, sizeof(dst.type_name), src.typeName.c_str(), _TRUNCATE);
     #else
-    std::strncpy(dst.element_name, src.elementName.c_str(), 255);
-    std::strncpy(dst.type_name, src.typeName.c_str(), 127);
-    dst.element_name[255] = '\0';
-    dst.type_name[127] = '\0';
+    // Use snprintf for guaranteed null termination
+    snprintf(dst.element_name, sizeof(dst.element_name), "%s", src.elementName.c_str());
+    snprintf(dst.type_name, sizeof(dst.type_name), "%s", src.typeName.c_str());
     #endif
 
     // ========================================================================
@@ -1457,7 +1467,7 @@ void FreeFrameFiles_C(CFileData* files, size_t count) {
  * Only one file callback can be registered at a time
  */
 void RegisterUpdateCallback_C(FileReceivedCallback_C callback) {
-    g_file_callback = callback;
+    g_file_callback.store(callback, std::memory_order_release);
 }
 
 /**
@@ -1465,7 +1475,7 @@ void RegisterUpdateCallback_C(FileReceivedCallback_C callback) {
  * Only one message callback can be registered at a time
  */
 void RegisterMessageCallback_C(MessageReceivedCallback_C callback) {
-    g_message_callback = callback;
+    g_message_callback.store(callback, std::memory_order_release);
 }
 
 // ============================================================================
