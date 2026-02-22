@@ -4234,7 +4234,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial_Be
 		}
 		
 		FJUSYNCBenchmarkResult Result = CreateBenchmarkResultExtended(
-			TEXT("BatchSpawnRealtimeMeshesWithMaterial"),
+			CurrentBenchmarkTest,
 			TotalTimeMs,
 			TotalTriangleCount,
 			TotalVertexCount,
