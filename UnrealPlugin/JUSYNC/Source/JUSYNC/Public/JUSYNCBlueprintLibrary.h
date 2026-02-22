@@ -467,6 +467,12 @@ private:
 	static void SaveAllBenchmarkResultsToCSV(const FString& OutputDirectory);
 
 	/**
+	 * Save all benchmark results to JSON (more readable format)
+	 */
+	UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
+	static void SaveAllBenchmarkResultsToJSON(const FString& OutputDirectory);
+
+	/**
 	 * Clear all benchmark results
 	 */
 	UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
@@ -581,4 +587,25 @@ private:
 	// Benchmark helper functions
 	static void RecordBenchmarkResult(const FJUSYNCBenchmarkResult& Result);
 	static FJUSYNCBenchmarkResult CreateBenchmarkResult(const FString& TestName, float TotalTimeMs, int32 TriangleCount, int32 VertexCount, int64 RAMBefore, int64 RAMAfter, int32 ActorCount, int32 ErrorCount, int32 SplitMeshCount);
+	static FJUSYNCBenchmarkResult CreateBenchmarkResultExtended(
+		const FString& TestName,
+		float TotalTimeMs,
+		int32 TriangleCount,
+		int32 VertexCount,
+		int64 RAMBefore,
+		int64 RAMAfter,
+		int64 RAMPeak,
+		int64 RAMDuring,
+		int32 ActorCount,
+		int32 ErrorCount,
+		int32 SplitMeshCount,
+		float CPUUsagePercent,
+		int64 VRAMBefore,
+		int64 VRAMAfter,
+		int64 VRAMPeak,
+		int32 ActiveThreadCount,
+		float GPUUsagePercent,
+		int32 HitchCount = 0,
+		float AvgHitchDurationMs = 0.0f,
+		float MaxHitchDurationMs = 0.0f);
 };

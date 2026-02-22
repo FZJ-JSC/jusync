@@ -287,6 +287,18 @@ public:
     UFUNCTION(BlueprintPure, Category = "JUSYNC|Metrics")
     bool IsMetricsDisplayVisible() const;
 
+    // Hardware monitoring
+    float GetSystemRAMUsage_GB() const;
+    float GetVRAMUsage_GB() const;
+    float GetCPUUsage_Percent() const;
+    float GetGPUUsage_Percent() const;
+
+    // Metrics collection functions
+    void CollectMetrics();
+    
+    // Benchmark-specific metrics (don't reset accumulator)
+    int32 GetSplitMeshCount() const;
+
 private:
     // Helper functions for async processing
     struct FProcessedMeshData
@@ -370,16 +382,9 @@ private:
     
     FMetricsAccumulator MetricsAccumulator;
     
-    // Metrics collection functions
-    void CollectMetrics();
+    // Metrics collection functions (implementation details)
     void UpdateMetricsData();
     void SaveMetricsToHistory();
-    
-    // Hardware monitoring
-    float GetSystemRAMUsage_GB() const;
-    float GetVRAMUsage_GB() const;
-    float GetCPUUsage_Percent() const;
-    float GetGPUUsage_Percent() const;
     
     // Component tracking
     int32 CountRMCComponents() const;

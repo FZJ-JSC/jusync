@@ -314,6 +314,45 @@ struct JUSYNC_API FJUSYNCBenchmarkResult
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int32 SplitMeshCount;
 
+	// CPU Usage metrics (percentage)
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float CPUUsagePercent;
+
+	// GPU/VRAM metrics (bytes)
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int64 VRAMBeforeBytes;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int64 VRAMAfterBytes;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int64 VRAMPeakBytes;
+
+	// Detailed RAM metrics
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int64 RAMPeakBytes;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int64 RAMDuringBytes;
+
+	// Thread metrics
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int32 ActiveThreadCount;
+
+	// GPU utilization (percentage)
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float GPUUsagePercent;
+
+	// Hitch detection metrics (frame time spikes)
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int32 HitchCount;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float AvgHitchDurationMs;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float MaxHitchDurationMs;
+
 	FJUSYNCBenchmarkResult()
 	{
 		TestName = TEXT("");
@@ -323,12 +362,23 @@ struct JUSYNC_API FJUSYNCBenchmarkResult
 		VertexCount = 0;
 		RAMBeforeBytes = 0;
 		RAMAfterBytes = 0;
+		RAMPeakBytes = 0;
+		RAMDuringBytes = 0;
 		FPS = 0.0f;
 		FrameTimeMs = 0.0f;
 		ActorCount = 0;
 		ErrorCount = 0;
 		SuccessRate = 0.0f;
 		SplitMeshCount = 0;
+		CPUUsagePercent = 0.0f;
+		VRAMBeforeBytes = 0;
+		VRAMAfterBytes = 0;
+		VRAMPeakBytes = 0;
+		ActiveThreadCount = 0;
+		GPUUsagePercent = 0.0f;
+		HitchCount = 0;
+		AvgHitchDurationMs = 0.0f;
+		MaxHitchDurationMs = 0.0f;
 	}
 };
 
@@ -344,7 +394,7 @@ struct JUSYNC_API FJUSYNCBenchmarkConfig
 	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Benchmark")
 	bool bEnableBenchmarking = false;
 
-	// Output directory for CSV files
+	// Output directory for benchmark files
 	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Benchmark")
 	FString OutputDirectory;
 
@@ -352,11 +402,16 @@ struct JUSYNC_API FJUSYNCBenchmarkConfig
 	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Benchmark")
 	bool bAppendTimestamp = true;
 
+	// Output format (0 = CSV, 1 = JSON, 2 = Both)
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Benchmark")
+	int32 OutputFormat = 0;
+
 	FJUSYNCBenchmarkConfig()
 	{
 		bEnableBenchmarking = false;
 		OutputDirectory = TEXT("");
 		bAppendTimestamp = true;
+		OutputFormat = 0; // Default to CSV for backward compatibility
 	}
 };
 

@@ -62,7 +62,8 @@ public class JUSYNC : ModuleRules
             "kernel32.lib",
             "ws2_32.lib",
             "iphlpapi.lib",
-            "userenv.lib"
+            "userenv.lib",
+            "DXGI.lib"  // Added for GPU memory queries
         });
 
         string LibDir = Path.Combine(AnariUsdPath, "Lib", "Win64");
