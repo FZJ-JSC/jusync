@@ -15,6 +15,8 @@
 #include <atomic>
 #include <future>
 #include <vector>
+#include <execution>    // For parallel algorithms
+#include <numeric>      // For parallel reduce
 
 // Include TinyUSDZ with error handling
 #include "tinyusdz.hh"
@@ -1242,32 +1244,32 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             MIDDLEWARE_LOG_DEBUG("Extracting large mesh with %zu points", points.size());
         }
 
-        // Transform and validate points with optimized processing
+        // Start timing for performance measurement
+        auto vertexStartTime = std::chrono::high_resolution_clock::now();
+
+        // Transform and validate points with PARALLEL processing
         outMeshData.points.clear();
-        outMeshData.points.reserve(points.size());
+        outMeshData.points.resize(points.size());  // Pre-allocate exact size
         
         // Extract matrix components for faster access
         const float* m = &worldTransform[0][0];
         
-        // Process all points with minimal branching for better performance
-        for (const auto& pt : points) {
-            // Fast validation using bitwise operations
+        // Helper lambda for vertex transformation
+        auto transformVertex = [m](const tinyusdz::value::point3f& pt) -> glm::vec3 {
             const float x = static_cast<float>(pt.x);
             const float y = static_cast<float>(pt.y);
             const float z = static_cast<float>(pt.z);
             
-            // Check for NaN/Inf using integer representation (faster than std::isfinite)
+            // Fast NaN/Inf check using integer representation
             const int32_t* ix = reinterpret_cast<const int32_t*>(&x);
             const int32_t* iy = reinterpret_cast<const int32_t*>(&y);
             const int32_t* iz = reinterpret_cast<const int32_t*>(&z);
             
             // Check if any component is NaN or Inf (exponent bits all 1s)
-            if ((*ix & 0x7F800000) == 0x7F800000 || 
-                (*iy & 0x7F800000) == 0x7F800000 || 
+            if ((*ix & 0x7F800000) == 0x7F800000 ||
+                (*iy & 0x7F800000) == 0x7F800000 ||
                 (*iz & 0x7F800000) == 0x7F800000) {
-                MIDDLEWARE_LOG_WARNING("Non-finite vertex detected, using zero");
-                outMeshData.points.emplace_back(0.0f, 0.0f, 0.0f);
-                continue;
+                return glm::vec3(0.0f, 0.0f, 0.0f);
             }
 
             // Manual matrix multiplication - optimized
@@ -1280,14 +1282,47 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             const int32_t* ity = reinterpret_cast<const int32_t*>(&ty);
             const int32_t* itz = reinterpret_cast<const int32_t*>(&tz);
             
-            if ((*itx & 0x7F800000) == 0x7F800000 || 
-                (*ity & 0x7F800000) == 0x7F800000 || 
+            if ((*itx & 0x7F800000) == 0x7F800000 ||
+                (*ity & 0x7F800000) == 0x7F800000 ||
                 (*itz & 0x7F800000) == 0x7F800000) {
-                MIDDLEWARE_LOG_WARNING("Transform produced non-finite vertex, using original");
-                outMeshData.points.emplace_back(x, y, z);
-            } else {
-                outMeshData.points.emplace_back(tx, ty, tz);
+                return glm::vec3(x, y, z);
             }
+            
+            return glm::vec3(tx, ty, tz);
+        };
+        
+        // PARALLEL vertex processing using std::transform
+        std::transform(std::execution::par,
+                      points.begin(), points.end(),
+                      outMeshData.points.begin(),
+                      transformVertex);
+        
+        // Count non-finite vertices for logging
+        size_t nonFiniteCount = std::count_if(std::execution::par,
+                                            outMeshData.points.begin(),
+                                            outMeshData.points.end(),
+                                            [](const glm::vec3& v) {
+                                                const int32_t* ix = reinterpret_cast<const int32_t*>(&v.x);
+                                                const int32_t* iy = reinterpret_cast<const int32_t*>(&v.y);
+                                                const int32_t* iz = reinterpret_cast<const int32_t*>(&v.z);
+                                                return (*ix & 0x7F800000) == 0x7F800000 ||
+                                                       (*iy & 0x7F800000) == 0x7F800000 ||
+                                                       (*iz & 0x7F800000) == 0x7F800000;
+                                            });
+        
+        if (nonFiniteCount > 0) {
+            MIDDLEWARE_LOG_WARNING("%zu non-finite vertices detected and zeroed", nonFiniteCount);
+        }
+        
+        // Log performance metrics
+        auto vertexEndTime = std::chrono::high_resolution_clock::now();
+        auto vertexDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+            vertexEndTime - vertexStartTime).count();
+        
+        if (points.size() > 1000) {
+            MIDDLEWARE_LOG_DEBUG("Parallel vertex processing: %zu vertices in %lld µs (%.2f µs/vertex)",
+                               points.size(), vertexDuration,
+                               static_cast<float>(vertexDuration) / points.size());
         }
 
         if (outMeshData.points.empty()) {
@@ -1407,22 +1442,30 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
 
         outMeshData.indices = std::move(finalIndices);
 
-        // Extract normals with validation
+        // Extract normals with validation and PARALLEL processing
         auto normals = geomMesh->get_normals();
         if (!normals.empty()) {
             if (normals.size() != points.size()) {
                 MIDDLEWARE_LOG_WARNING("Normal count (%zu) doesn't match vertex count (%zu)",
                                      normals.size(), points.size());
             } else {
+                auto normalStartTime = std::chrono::high_resolution_clock::now();
+                
                 outMeshData.normals.clear();
-                outMeshData.normals.reserve(normals.size());
+                outMeshData.normals.resize(normals.size());  // Pre-allocate exact size
                 glm::mat3 normalMatrix = glm::mat3(worldTransform);
 
-                for (const auto& nrm : normals) {
-                    if (!std::isfinite(nrm.x) || !std::isfinite(nrm.y) || !std::isfinite(nrm.z)) {
-                        MIDDLEWARE_LOG_WARNING("Non-finite normal detected, using default");
-                        outMeshData.normals.push_back(glm::vec3(0.0f, 1.0f, 0.0f));
-                        continue;
+                // Helper lambda for normal transformation
+                auto transformNormal = [normalMatrix](const tinyusdz::value::normal3f& nrm) -> glm::vec3 {
+                    // Fast NaN/Inf check
+                    const int32_t* ix = reinterpret_cast<const int32_t*>(&nrm.x);
+                    const int32_t* iy = reinterpret_cast<const int32_t*>(&nrm.y);
+                    const int32_t* iz = reinterpret_cast<const int32_t*>(&nrm.z);
+                    
+                    if ((*ix & 0x7F800000) == 0x7F800000 ||
+                        (*iy & 0x7F800000) == 0x7F800000 ||
+                        (*iz & 0x7F800000) == 0x7F800000) {
+                        return glm::vec3(0.0f, 1.0f, 0.0f);  // Default up vector
                     }
 
                     glm::vec3 normalVec(static_cast<float>(nrm.x),
@@ -1430,15 +1473,41 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
                                       static_cast<float>(nrm.z));
                     glm::vec3 transformedNormal = normalMatrix * normalVec;
 
-                    // Validate and normalize
-                    float length = glm::length(transformedNormal);
-                    if (length > safety::EPSILON) {
-                        transformedNormal = transformedNormal / length;
-                    } else {
-                        transformedNormal = glm::vec3(0.0f, 1.0f, 0.0f); // Default up vector
+                    // Fast length calculation and normalization
+                    float lengthSquared = glm::dot(transformedNormal, transformedNormal);
+                    if (lengthSquared > safety::EPSILON * safety::EPSILON) {
+                        float invLength = 1.0f / std::sqrt(lengthSquared);
+                        return transformedNormal * invLength;
                     }
+                    
+                    return glm::vec3(0.0f, 1.0f, 0.0f);  // Default up vector
+                };
 
-                    outMeshData.normals.push_back(transformedNormal);
+                // PARALLEL normal processing
+                std::transform(std::execution::par,
+                             normals.begin(), normals.end(),
+                             outMeshData.normals.begin(),
+                             transformNormal);
+
+                // Count invalid normals for logging
+                size_t invalidNormalCount = std::count_if(std::execution::par,
+                                                        outMeshData.normals.begin(),
+                                                        outMeshData.normals.end(),
+                                                        [](const glm::vec3& n) {
+                                                            return n == glm::vec3(0.0f, 1.0f, 0.0f);
+                                                        });
+                
+                if (invalidNormalCount > 0) {
+                    MIDDLEWARE_LOG_DEBUG("%zu invalid normals replaced with default up vector", invalidNormalCount);
+                }
+                
+                auto normalEndTime = std::chrono::high_resolution_clock::now();
+                auto normalDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+                    normalEndTime - normalStartTime).count();
+                
+                if (normals.size() > 1000) {
+                    MIDDLEWARE_LOG_DEBUG("Parallel normal processing: %zu normals in %lld µs",
+                                       normals.size(), normalDuration);
                 }
             }
         }
@@ -1887,6 +1956,38 @@ void UsdProcessor::normalizeUVCoordinates(std::vector<glm::vec2>& uvs) {
     }
 }
 
+void UsdProcessor::normalizeUVCoordinatesParallel(std::vector<glm::vec2>& uvs) {
+    if (uvs.size() < 1000) {
+        // For small UV sets, sequential is faster due to parallel overhead
+        normalizeUVCoordinates(uvs);
+        return;
+    }
+    
+    auto startTime = std::chrono::high_resolution_clock::now();
+    
+    // PARALLEL UV normalization
+    std::for_each(std::execution::par, uvs.begin(), uvs.end(), [](glm::vec2& uv) {
+        // Fast NaN/Inf check using integer representation
+        const int32_t* ix = reinterpret_cast<const int32_t*>(&uv.x);
+        const int32_t* iy = reinterpret_cast<const int32_t*>(&uv.y);
+        
+        if ((*ix & 0x7F800000) == 0x7F800000 || (*iy & 0x7F800000) == 0x7F800000) {
+            uv = glm::vec2(0.0f, 0.0f);
+        } else {
+            // Clamp UV coordinates to reasonable range
+            uv.x = std::clamp(uv.x, -10.0f, 10.0f);
+            uv.y = std::clamp(uv.y, -10.0f, 10.0f);
+        }
+    });
+    
+    auto endTime = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime).count();
+    
+    if (uvs.size() > 10000) {
+        MIDDLEWARE_LOG_DEBUG("Parallel UV normalization: %zu UVs in %lld µs", uvs.size(), duration);
+    }
+}
+
 bool UsdProcessor::validateMeshIndices(std::vector<uint32_t>& indices, size_t vertexCount) {
     if (indices.empty()) {
         return true; // Empty indices are valid
@@ -1974,6 +2075,8 @@ void UsdProcessor::extractUVCoordinates(tinyusdz::GeomMesh* mesh, MeshData& mesh
     if (!mesh) return;
 
     try {
+        auto uvStartTime = std::chrono::high_resolution_clock::now();
+        
         // ✅ MODIFIED: Support multiple UV sets
         const std::vector<std::string> uvNames = {
             "primvars:st", "st",
@@ -1998,19 +2101,23 @@ void UsdProcessor::extractUVCoordinates(tinyusdz::GeomMesh* mesh, MeshData& mesh
 
                 if (primvar.get_value(&uvs)) {
                     std::vector<glm::vec2> uvChannel;
-                    uvChannel.reserve(uvs.size());
+                    uvChannel.resize(uvs.size());  // Pre-allocate exact size
 
-                    for (const auto& uv : uvs) {
-                        uvChannel.push_back(glm::vec2(uv.s, uv.t));
-                    }
+                    // PARALLEL UV extraction
+                    std::transform(std::execution::par,
+                                 uvs.begin(), uvs.end(),
+                                 uvChannel.begin(),
+                                 [](const tinyusdz::value::texcoord2f& uv) {
+                                     return glm::vec2(uv.s, uv.t);
+                                 });
 
-                    // Normalize and validate UVs
-                    normalizeUVCoordinates(uvChannel);
+                    // Normalize and validate UVs (parallel)
+                    normalizeUVCoordinatesParallel(uvChannel);
 
-                    meshData.uvSets.push_back(uvChannel);
+                    meshData.uvSets.push_back(std::move(uvChannel));  // Move to avoid copy
                     meshData.uvSetNames.push_back(name);
 
-                    MIDDLEWARE_LOG_INFO("Found UV set '%s' with %zu coordinates", name.c_str(), uvChannel.size());
+                    MIDDLEWARE_LOG_DEBUG("Found UV set '%s' with %zu coordinates", name.c_str(), uvs.size());
                 }
             }
         }
@@ -2018,7 +2125,13 @@ void UsdProcessor::extractUVCoordinates(tinyusdz::GeomMesh* mesh, MeshData& mesh
         // Backward compatibility: copy first UV set to uvs
         if (!meshData.uvSets.empty()) {
             meshData.uvs = meshData.uvSets[0];
-            MIDDLEWARE_LOG_DEBUG("Mesh '%s' has %zu UV channels", meshData.elementName.c_str(), meshData.uvSets.size());
+            
+            auto uvEndTime = std::chrono::high_resolution_clock::now();
+            auto uvDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+                uvEndTime - uvStartTime).count();
+            
+            MIDDLEWARE_LOG_DEBUG("Mesh '%s' has %zu UV channels processed in %lld µs",
+                               meshData.elementName.c_str(), meshData.uvSets.size(), uvDuration);
 
         } else {
             MIDDLEWARE_LOG_DEBUG("No UV coordinates found for mesh '%s'", meshData.elementName.c_str());

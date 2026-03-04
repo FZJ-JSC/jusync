@@ -434,10 +434,16 @@ private:
     bool checkMemoryLimit(size_t additionalBytes = 0) const;
 
     /**
-     * Normalize and validate UV coordinates
+     * Normalize and validate UV coordinates (sequential)
      * @param uvs Input/output UV coordinates
      */
     void normalizeUVCoordinates(std::vector<glm::vec2>& uvs);
+
+    /**
+     * Normalize and validate UV coordinates (parallel optimized)
+     * @param uvs Input/output UV coordinates
+     */
+    void normalizeUVCoordinatesParallel(std::vector<glm::vec2>& uvs);
 
     /**
      * Validate and fix mesh indices
