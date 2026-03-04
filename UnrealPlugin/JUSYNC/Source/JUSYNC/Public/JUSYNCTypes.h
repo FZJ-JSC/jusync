@@ -11,244 +11,244 @@ class URealtimeMeshComponent;
 USTRUCT(BlueprintType)
 struct JUSYNC_API FJUSYNCFileData
 {
-    GENERATED_BODY()
+	GENERATED_BODY()
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    FString Filename;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	FString Filename;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    TArray<uint8> Data;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	TArray<uint8> Data;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    FString Hash;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	FString Hash;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    FString FileType;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	FString FileType;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    int32 SourceRank;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	int32 SourceRank;
 
-    FJUSYNCFileData()
-    {
-        Filename = TEXT("");
-        Hash = TEXT("");
-        FileType = TEXT("");
-        SourceRank = -1;
-    }
+	FJUSYNCFileData()
+	{
+		Filename = TEXT("");
+		Hash = TEXT("");
+		FileType = TEXT("");
+		SourceRank = -1;
+	}
 
-    bool IsValid() const
-    {
-        return !Filename.IsEmpty() &&
-               Data.Num() > 0 &&
-               !Hash.IsEmpty() &&
-               !FileType.IsEmpty();
-    }
+	bool IsValid() const
+	{
+		return !Filename.IsEmpty() &&
+			Data.Num() > 0 &&
+			!Hash.IsEmpty() &&
+			!FileType.IsEmpty();
+	}
 };
 
 USTRUCT(BlueprintType)
 struct JUSYNC_API FJUSYNCMeshData
 {
-    GENERATED_BODY()
+	GENERATED_BODY()
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    FString ElementName;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	FString ElementName;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    FString TypeName;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	FString TypeName;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    TArray<FVector> Vertices;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	TArray<FVector> Vertices;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    TArray<int32> Triangles;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	TArray<int32> Triangles;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    TArray<FVector> Normals;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	TArray<FVector> Normals;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    TArray<FVector2D> UVs;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	TArray<FVector2D> UVs;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    TArray<FColor> VertexColors;  // ADD THIS LINE
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	TArray<FColor> VertexColors;  // ADD THIS LINE
 
-    // Update validation and helper functions
-    bool HasVertexColors() const {
-        return VertexColors.Num() > 0;
-    }
+	// Update validation and helper functions
+	bool HasVertexColors() const {
+		return VertexColors.Num() > 0;
+	}
 
-    FJUSYNCMeshData()
-    {
-        ElementName = TEXT("");
-        TypeName = TEXT("");
-    }
+	FJUSYNCMeshData()
+	{
+		ElementName = TEXT("");
+		TypeName = TEXT("");
+	}
 
-    bool IsValid() const
-    {
-        return !ElementName.IsEmpty() &&
-               Vertices.Num() > 0 &&
-               Triangles.Num() > 0 &&
-               (Triangles.Num() % 3 == 0);
-    }
+	bool IsValid() const
+	{
+		return !ElementName.IsEmpty() &&
+			Vertices.Num() > 0 &&
+			Triangles.Num() > 0 &&
+			(Triangles.Num() % 3 == 0);
+	}
 
-    int32 GetVertexCount() const { return Vertices.Num(); }
-    int32 GetTriangleCount() const { return Triangles.Num() / 3; }
+	int32 GetVertexCount() const { return Vertices.Num(); }
+	int32 GetTriangleCount() const { return Triangles.Num() / 3; }
 
-    bool HasNormals() const { return Normals.Num() > 0; }
-    bool HasUVs() const { return UVs.Num() > 0; }
+	bool HasNormals() const { return Normals.Num() > 0; }
+	bool HasUVs() const { return UVs.Num() > 0; }
 };
 
 // RealtimeMesh-specific vertex structure
 USTRUCT(BlueprintType)
 struct JUSYNC_API FJUSYNCRealtimeMeshVertex
 {
-    GENERATED_BODY()
+	GENERATED_BODY()
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    FVector Position;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	FVector Position;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    FVector Normal;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	FVector Normal;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    FVector2D UV;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	FVector2D UV;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    FColor Color;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	FColor Color;
 
-    FJUSYNCRealtimeMeshVertex()
-    {
-        Position = FVector::ZeroVector;
-        Normal = FVector::UpVector;
-        UV = FVector2D::ZeroVector;
-        Color = FColor::White;
-    }
+	FJUSYNCRealtimeMeshVertex()
+	{
+		Position = FVector::ZeroVector;
+		Normal = FVector::UpVector;
+		UV = FVector2D::ZeroVector;
+		Color = FColor::White;
+	}
 };
 
 // RealtimeMesh-optimized data structure
 USTRUCT(BlueprintType)
 struct JUSYNC_API FJUSYNCRealtimeMeshData
 {
-    GENERATED_BODY()
+	GENERATED_BODY()
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    FString ElementName;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	FString ElementName;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    TArray<FJUSYNCRealtimeMeshVertex> Vertices;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	TArray<FJUSYNCRealtimeMeshVertex> Vertices;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    TArray<int32> Triangles;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	TArray<int32> Triangles;
 
-    FJUSYNCRealtimeMeshData()
-    {
-        ElementName = TEXT("");
-    }
+	FJUSYNCRealtimeMeshData()
+	{
+		ElementName = TEXT("");
+	}
 
-    bool IsValid() const
-    {
-        return !ElementName.IsEmpty() &&
-               Vertices.Num() > 0 &&
-               Triangles.Num() > 0 &&
-               (Triangles.Num() % 3 == 0);
-    }
+	bool IsValid() const
+	{
+		return !ElementName.IsEmpty() &&
+			Vertices.Num() > 0 &&
+			Triangles.Num() > 0 &&
+			(Triangles.Num() % 3 == 0);
+	}
 
-    // Conversion methods
-    static FJUSYNCRealtimeMeshData FromStandardMesh(const FJUSYNCMeshData& StandardMesh);
-    FJUSYNCMeshData ToStandardMesh() const;
+	// Conversion methods
+	static FJUSYNCRealtimeMeshData FromStandardMesh(const FJUSYNCMeshData& StandardMesh);
+	FJUSYNCMeshData ToStandardMesh() const;
 };
 
 USTRUCT(BlueprintType)
 struct JUSYNC_API FJUSYNCTextureData
 {
-    GENERATED_BODY()
+	GENERATED_BODY()
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    int32 Width;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	int32 Width;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    int32 Height;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	int32 Height;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    int32 Channels;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	int32 Channels;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
-    TArray<uint8> Data;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	TArray<uint8> Data;
 
-    FJUSYNCTextureData()
-    {
-        Width = 0;
-        Height = 0;
-        Channels = 0;
-    }
+	FJUSYNCTextureData()
+	{
+		Width = 0;
+		Height = 0;
+		Channels = 0;
+	}
 
-    bool IsValid() const
-    {
-        return Width > 0 && Height > 0 && Channels > 0 &&
-               Data.Num() == (Width * Height * Channels);
-    }
+	bool IsValid() const
+	{
+		return Width > 0 && Height > 0 && Channels > 0 &&
+			Data.Num() == (Width * Height * Channels);
+	}
 
-    int32 GetExpectedDataSize() const
-    {
-        return Width * Height * Channels;
-    }
+	int32 GetExpectedDataSize() const
+	{
+		return Width * Height * Channels;
+	}
 };
 
 USTRUCT(BlueprintType)
 struct JUSYNC_API FJUSYNCWorkerStatus
 {
-    GENERATED_BODY()
+	GENERATED_BODY()
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Worker")
-    int32 Rank;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Worker")
+	int32 Rank;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Worker")
-    int32 Status;  // 0=offline, 1=idle, 2=busy, 3=error
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Worker")
+	int32 Status;  // 0=offline, 1=idle, 2=busy, 3=error
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Worker")
-    FString Hostname;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Worker")
+	FString Hostname;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Worker")
-    FString GpuInfo;
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Worker")
+	FString GpuInfo;
 
-    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Worker")
-    int64 LastHeartbeat;  // Unix timestamp
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Worker")
+	int64 LastHeartbeat;  // Unix timestamp
 
-    FJUSYNCWorkerStatus()
-    {
-        Rank = -1;
-        Status = 0;
-        Hostname = TEXT("");
-        GpuInfo = TEXT("");
-        LastHeartbeat = 0;
-    }
+	FJUSYNCWorkerStatus()
+	{
+		Rank = -1;
+		Status = 0;
+		Hostname = TEXT("");
+		GpuInfo = TEXT("");
+		LastHeartbeat = 0;
+	}
 
-    bool IsOnline() const { return Status > 0; }
-    bool IsIdle() const { return Status == 1; }
-    bool IsBusy() const { return Status == 2; }
-    bool HasError() const { return Status == 3; }
-    
-    FString GetStatusString() const
-    {
-        switch(Status)
-        {
-            case 0: return TEXT("Offline");
-            case 1: return TEXT("Idle");
-            case 2: return TEXT("Busy");
-            case 3: return TEXT("Error");
-            default: return TEXT("Unknown");
-        }
-    }
+	bool IsOnline() const { return Status > 0; }
+	bool IsIdle() const { return Status == 1; }
+	bool IsBusy() const { return Status == 2; }
+	bool HasError() const { return Status == 3; }
+
+	FString GetStatusString() const
+	{
+		switch (Status)
+		{
+		case 0: return TEXT("Offline");
+		case 1: return TEXT("Idle");
+		case 2: return TEXT("Busy");
+		case 3: return TEXT("Error");
+		default: return TEXT("Unknown");
+		}
+	}
 };
 
 UENUM(BlueprintType)
 enum class EJUSYNCExtension : uint8
 {
-    USD      UMETA(DisplayName = ".usda / .usd"),
-    PNG      UMETA(DisplayName = ".png"),
-    JSON     UMETA(DisplayName = ".json"),
-    TXT      UMETA(DisplayName = ".txt"),
-    BIN      UMETA(DisplayName = ".bin"),
-    ALL      UMETA(DisplayName = "All Files")
+	USD      UMETA(DisplayName = ".usda / .usd"),
+	PNG      UMETA(DisplayName = ".png"),
+	JSON     UMETA(DisplayName = ".json"),
+	TXT      UMETA(DisplayName = ".txt"),
+	BIN      UMETA(DisplayName = ".bin"),
+	ALL      UMETA(DisplayName = "All Files")
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCFileReceived, const FJUSYNCFileData&, FileData);
@@ -621,7 +621,7 @@ struct JUSYNC_API FJUSYNCMetricsData
 	FJUSYNCMetricsData()
 	{
 		Timestamp = FDateTime::Now();
-		
+
 		// Initialize all metrics to zero/default values
 		SystemRAM_Used_GB = 0.0f;
 		SystemRAM_Total_GB = 0.0f;
@@ -631,7 +631,7 @@ struct JUSYNC_API FJUSYNCMetricsData
 		TextureData_GB = 0.0f;
 		Cache_GB = 0.0f;
 		AvailableRAM_GB = 0.0f;
-		
+
 		TotalMeshesProcessed = 0;
 		SplitMeshes = 0;
 		AverageSplitTime_ms = 0.0f;
@@ -639,7 +639,7 @@ struct JUSYNC_API FJUSYNCMetricsData
 		SmallestMesh_Vertices = 0;
 		TotalChunksCreated = 0;
 		AverageChunksPerSplit = 0.0f;
-		
+
 		FrameTime_ms = 0.0f;
 		FPS = 0.0f;
 		MeshProcessingTime_ms = 0.0f;
@@ -648,7 +648,7 @@ struct JUSYNC_API FJUSYNCMetricsData
 		GPUUploadTime_ms = 0.0f;
 		AsyncTasksTime_ms = 0.0f;
 		IdleTime_ms = 0.0f;
-		
+
 		TotalRMCComponents = 0;
 		ActiveComponents = 0;
 		CulledComponents = 0;
@@ -656,7 +656,7 @@ struct JUSYNC_API FJUSYNCMetricsData
 		DrawCalls = 0;
 		TrianglesRendered_Millions = 0;
 		VerticesRendered_Millions = 0;
-		
+
 		StreamingBandwidth_MBps = 0.0f;
 		QueueLength = 0;
 		AverageLoadTime_ms = 0.0f;
@@ -664,7 +664,7 @@ struct JUSYNC_API FJUSYNCMetricsData
 		PrefetchedMeshes = 0;
 		EvictedMeshes = 0;
 		MemoryPressure = TEXT("Low");
-		
+
 		CurrentLODLevel = 0;
 		MaxLODLevel = 0;
 		TargetFPS = 60;
@@ -673,7 +673,7 @@ struct JUSYNC_API FJUSYNCMetricsData
 		TextureResolution = TEXT("N/A");
 		MeshDecimation_Percent = 0.0f;
 		VisualFidelity_Percent = 100.0f;
-		
+
 		TotalErrors = 0;
 		MemoryWarnings = 0;
 		SplitFailures = 0;
@@ -681,7 +681,7 @@ struct JUSYNC_API FJUSYNCMetricsData
 		SuccessRate_Percent = 100.0f;
 		LastErrorTime = TEXT("Never");
 		WarningLevel = TEXT("Low");
-		
+
 		CPUUsage_Percent = 0.0f;
 		GPUUsage_Percent = 0.0f;
 		ActiveCPUThreads = 0;
@@ -766,7 +766,7 @@ struct JUSYNC_API FJUSYNCMetricsConfig
 		bAutoExport = false;
 		ExportDirectory = TEXT("");
 		ExportInterval_Seconds = 60.0f;
-		
+
 		bCollectMemoryMetrics = true;
 		bCollectSplittingMetrics = true;
 		bCollectPerformanceMetrics = true;

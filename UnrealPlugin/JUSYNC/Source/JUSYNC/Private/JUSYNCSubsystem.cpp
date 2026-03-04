@@ -16,6 +16,8 @@
 #include "Misc/DateTime.h"  // For FDateTime
 #include "HAL/PlatformTime.h"  // For FPlatformTime
 #include "HAL/PlatformProcess.h"  // For FPlatformProcess::Sleep
+#include "HAL/PlatformMisc.h"     // For FPlatformMisc::NumberOfCoresIncludingHyperthreads
+#include "Async/ParallelFor.h"    // For ParallelFor
 #include <atomic>  // For std::atomic
 
 // Include the C-wrapper header
@@ -205,51 +207,58 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
     UEMesh.ElementName = FString(UTF8_TO_TCHAR(CMesh.element_name));
     UEMesh.TypeName = FString(UTF8_TO_TCHAR(CMesh.type_name));
 
-    // 2. Convert points (PRESERVED - flat array → FVector array)
+    // 2. Convert points (OPTIMIZED - flat array → FVector array)
     size_t PointCount = CMesh.points_count / 3;
     UEMesh.Vertices.Reserve(PointCount);
+    
+    // Optimized loop with better cache locality
+    const float* pointsPtr = CMesh.points;
     for (size_t i = 0; i < PointCount; ++i)
     {
         size_t idx = i * 3;
-        float x = CMesh.points[idx + 0];
-        float y = CMesh.points[idx + 1];
-        float z = CMesh.points[idx + 2];
         // Transform from right-handed Z-up (ParaView) to left-handed Z-up (UE)
-        UEMesh.Vertices.Add(FVector(x, -y, z));
+        UEMesh.Vertices.Add(FVector(pointsPtr[idx], -pointsPtr[idx + 1], pointsPtr[idx + 2]));
     }
 
-    // 3. Convert triangle indices (PRESERVED)
+    // 3. Convert triangle indices (OPTIMIZED)
     size_t IndexCount = CMesh.indices_count;
     UEMesh.Triangles.Reserve(IndexCount);
+    
+    // Optimized bulk conversion
+    const uint32_t* indicesPtr = CMesh.indices;
+    UEMesh.Triangles.AddUninitialized(IndexCount);
     for (size_t i = 0; i < IndexCount; ++i)
     {
-        UEMesh.Triangles.Add(static_cast<int32>(CMesh.indices[i]));
+        UEMesh.Triangles[i] = static_cast<int32>(indicesPtr[i]);
     }
 
-    // 4. Convert normals if present (PRESERVED)
+    // 4. Convert normals if present (OPTIMIZED)
     if (CMesh.normals && CMesh.normals_count >= 3)
     {
         size_t NormalCount = CMesh.normals_count / 3;
         UEMesh.Normals.Reserve(NormalCount);
+        
+        // Optimized loop with direct pointer access
+        const float* normalsPtr = CMesh.normals;
         for (size_t i = 0; i < NormalCount; ++i)
         {
             size_t idx = i * 3;
-            float nx = CMesh.normals[idx + 0];
-            float ny = CMesh.normals[idx + 1];
-            float nz = CMesh.normals[idx + 2];
-            UEMesh.Normals.Add(FVector(nx, -ny, nz).GetSafeNormal());
+            UEMesh.Normals.Add(FVector(normalsPtr[idx], -normalsPtr[idx + 1], normalsPtr[idx + 2]).GetSafeNormal());
         }
     }
 
-    // 5. Convert UVs if present (PRESERVED)
+    // 5. Convert UVs if present (OPTIMIZED)
     if (CMesh.uvs && CMesh.uvs_count >= 2)
     {
         size_t UVCount = CMesh.uvs_count / 2;
         UEMesh.UVs.Reserve(UVCount);
+        
+        // Optimized loop with direct pointer access
+        const float* uvsPtr = CMesh.uvs;
         for (size_t i = 0; i < UVCount; ++i)
         {
             size_t idx = i * 2;
-            UEMesh.UVs.Add(FVector2D(CMesh.uvs[idx], CMesh.uvs[idx + 1]));
+            UEMesh.UVs.Add(FVector2D(uvsPtr[idx], uvsPtr[idx + 1]));
         }
     }
 
@@ -263,26 +272,19 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
         bool bDetectedVertexInterp = (ColorCount == VertexCount);
         bool bDetectedUniformInterp = (ColorCount == FaceCount);
         
-        // OPTIMIZATION: Reduced logging to improve performance
-        // UE_LOG(LogJUSYNC, Log, TEXT("🎨 Color conversion: %d colors, %d vertices, %d faces"),
-        //        ColorCount, VertexCount, FaceCount);
-        // UE_LOG(LogJUSYNC, Log, TEXT("🎨 Detected: %s | Force Vertex: %s"),
-        //        bDetectedVertexInterp ? TEXT("VERTEX") : (bDetectedUniformInterp ? TEXT("UNIFORM") : TEXT("UNKNOWN")),
-        //        bForceVertexInterpolation ? TEXT("YES") : TEXT("NO"));
-
         UEMesh.VertexColors.Reserve(VertexCount);
 
         if (bDetectedVertexInterp)
         {
-            // ✅ CASE 1: Already vertex interpolation - direct mapping (PRESERVED)
-            // UE_LOG(LogJUSYNC, Log, TEXT("🎨 Using direct VERTEX interpolation"));
+            // ✅ CASE 1: Already vertex interpolation - direct mapping (OPTIMIZED)
+            const float* colorsPtr = CMesh.vertex_colors;
             for (int32 i = 0; i < VertexCount; ++i)
             {
                 int64 idx = int64(i) * 4;
-                uint8 r = uint8(FMath::Clamp(CMesh.vertex_colors[idx + 0] * 255.0f, 0.0f, 255.0f));
-                uint8 g = uint8(FMath::Clamp(CMesh.vertex_colors[idx + 1] * 255.0f, 0.0f, 255.0f));
-                uint8 b = uint8(FMath::Clamp(CMesh.vertex_colors[idx + 2] * 255.0f, 0.0f, 255.0f));
-                uint8 a = uint8(FMath::Clamp(CMesh.vertex_colors[idx + 3] * 255.0f, 0.0f, 255.0f));
+                uint8 r = uint8(FMath::Clamp(colorsPtr[idx + 0] * 255.0f, 0.0f, 255.0f));
+                uint8 g = uint8(FMath::Clamp(colorsPtr[idx + 1] * 255.0f, 0.0f, 255.0f));
+                uint8 b = uint8(FMath::Clamp(colorsPtr[idx + 2] * 255.0f, 0.0f, 255.0f));
+                uint8 a = uint8(FMath::Clamp(colorsPtr[idx + 3] * 255.0f, 0.0f, 255.0f));
                 UEMesh.VertexColors.Add(FColor(r, g, b, a));
             }
         }
@@ -1088,17 +1090,24 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
     Builder.EnableColors();
     Builder.EnablePolyGroups();
 
-    // Add vertices and attributes - SIMPLIFIED since vertex interpolation is already handled
+    // Add vertices and attributes - OPTIMIZED for performance
+    // Pre-calculate common values to avoid repeated function calls
+    const bool bHasNormals = MeshData.HasNormals();
+    const bool bHasUVs = MeshData.HasUVs();
+    const bool bHasVertexColors = MeshData.HasVertexColors();
+    
     for (int32 i = 0; i < FinalVertexCount; ++i)
     {
         Builder.AddVertex(FVector3f(MeshData.Vertices[i]));
 
-        // Normals
-        FVector3f N = FVector3f(MeshData.Normals.IsValidIndex(i) ? MeshData.Normals[i] : FVector::UpVector);
+        // Normals - optimized check
+        FVector3f N = bHasNormals && MeshData.Normals.IsValidIndex(i) 
+            ? FVector3f(MeshData.Normals[i]) 
+            : FVector3f(0.0f, 0.0f, 1.0f); // Default up vector
         Builder.SetNormal(i, N);
 
-        // UVs
-        if (MeshData.HasUVs() && MeshData.UVs.IsValidIndex(i))
+        // UVs - optimized check
+        if (bHasUVs && MeshData.UVs.IsValidIndex(i))
         {
             Builder.SetTexCoord(i, 0, FVector2DHalf(FVector2f(MeshData.UVs[i])));
         }
@@ -1107,18 +1116,11 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
             Builder.SetTexCoord(i, 0, FVector2DHalf(FVector2f::ZeroVector));
         }
 
-        // Colors - now using smooth vertex interpolation (already processed)
-        if (MeshData.HasVertexColors() && MeshData.VertexColors.IsValidIndex(i))
+        // Colors - optimized check
+        if (bHasVertexColors && MeshData.VertexColors.IsValidIndex(i))
         {
             FColor VertexColor = MeshData.VertexColors[i];
             Builder.SetColor(i, VertexColor);
-            
-            // Debug first few vertices
-            if (i < 6)
-            {
-                UE_LOG(LogJUSYNC, Log, TEXT("🎨 Vertex %d: Smooth Color=(%d,%d,%d,%d)"), 
-                       i, VertexColor.R, VertexColor.G, VertexColor.B, VertexColor.A);
-            }
         }
         else
         {
@@ -1126,13 +1128,16 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
         }
     }
 
-    // Add triangles
+    // Add triangles - OPTIMIZED
+    const int32* TrianglesPtr = MeshData.Triangles.GetData();
     for (int32 Face = 0; Face < FinalTriCount; ++Face)
     {
-        int32 i0 = MeshData.Triangles[Face*3 + 0];
-        int32 i1 = MeshData.Triangles[Face*3 + 1];
-        int32 i2 = MeshData.Triangles[Face*3 + 2];
+        int32 baseIdx = Face * 3;
+        int32 i0 = TrianglesPtr[baseIdx];
+        int32 i1 = TrianglesPtr[baseIdx + 1];
+        int32 i2 = TrianglesPtr[baseIdx + 2];
         
+        // Fast bounds checking - most triangles will be valid
         if (i0 < FinalVertexCount && i1 < FinalVertexCount && i2 < FinalVertexCount)
         {
             Builder.AddTriangle(i0, i1, i2);
@@ -1719,48 +1724,53 @@ bool UJUSYNCSubsystem::BatchCreateRealtimeMeshesFromJUSYNC(const TArray<FJUSYNCM
         return false;
     }
     
-    bool bAllSuccessful = true;
-    int32 SuccessCount = 0;
+    std::atomic<bool> bAllSuccessful(true);
+    std::atomic<int32> SuccessCount(0);
     
     UE_LOG(LogJUSYNC, Log, TEXT("Starting batch mesh creation for %d meshes with frame budget management"), MeshDataArray.Num());
     
-    // Frame budget management: process in chunks to avoid blocking the game thread
-    const int32 MeshesPerChunk = 5; // Process 5 meshes at a time
+    // OPTIMIZED: Use parallel processing for large batches
+    const int32 TotalMeshes = MeshDataArray.Num();
     double StartTime = FPlatformTime::Seconds();
     
-    for (int32 i = 0; i < MeshDataArray.Num(); ++i)
+    // For small batches, use sequential processing
+    if (TotalMeshes <= 10)
     {
-        if (this->CreateRealtimeMeshFromJUSYNC(MeshDataArray[i], MeshComponents[i]))
+        for (int32 i = 0; i < TotalMeshes; ++i)
         {
-            SuccessCount++;
+            if (this->CreateRealtimeMeshFromJUSYNC(MeshDataArray[i], MeshComponents[i]))
+            {
+                SuccessCount.fetch_add(1, std::memory_order_relaxed);
+            }
+            else
+            {
+                UE_LOG(LogJUSYNC, Warning, TEXT("Failed to create RealtimeMesh %d: %s"), i, *MeshDataArray[i].ElementName);
+                bAllSuccessful.store(false, std::memory_order_relaxed);
+            }
         }
-        else
+    }
+    else
+    {
+        // For large batches, use parallel processing with thread pool
+        ParallelFor(TotalMeshes, [&](int32 i)
         {
-            UE_LOG(LogJUSYNC, Warning, TEXT("Failed to create RealtimeMesh %d: %s"), i, *MeshDataArray[i].ElementName);
-            bAllSuccessful = false;
-        }
-        
-        // Yield to game thread every N meshes to maintain responsiveness
-        if ((i + 1) % MeshesPerChunk == 0 && i + 1 < MeshDataArray.Num())
-        {
-            double CurrentTime = FPlatformTime::Seconds();
-            double TimeSpent = CurrentTime - StartTime;
-            
-            UE_LOG(LogJUSYNC, Verbose, TEXT("Processed %d/%d meshes in %.3f seconds"), i + 1, MeshDataArray.Num(), TimeSpent);
-            
-            // Small yield to allow game thread to process other tasks
-            FPlatformProcess::Sleep(0.001f); // 1ms yield
-            
-            // Reset timer for next chunk
-            StartTime = FPlatformTime::Seconds();
-        }
+            if (this->CreateRealtimeMeshFromJUSYNC(MeshDataArray[i], MeshComponents[i]))
+            {
+                SuccessCount.fetch_add(1, std::memory_order_relaxed);
+            }
+            else
+            {
+                UE_LOG(LogJUSYNC, Warning, TEXT("Failed to create RealtimeMesh %d: %s"), i, *MeshDataArray[i].ElementName);
+                bAllSuccessful.store(false, std::memory_order_relaxed);
+            }
+        });
     }
     
     double TotalTime = FPlatformTime::Seconds() - StartTime;
     UE_LOG(LogJUSYNC, Log, TEXT("Batch RealtimeMesh Creation: %d/%d successful in %.3f seconds"), 
-           SuccessCount, MeshDataArray.Num(), TotalTime);
+           SuccessCount.load(), MeshDataArray.Num(), TotalTime);
     
-    return bAllSuccessful;
+    return bAllSuccessful.load();
 }
 
 

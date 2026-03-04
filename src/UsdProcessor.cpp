@@ -13,6 +13,8 @@
 #include <limits>
 #include <memory>
 #include <atomic>
+#include <future>
+#include <vector>
 
 // Include TinyUSDZ with error handling
 #include "tinyusdz.hh"
@@ -33,12 +35,89 @@ public:
     UsdProcessorImpl() {
         MIDDLEWARE_LOG_INFO("UsdProcessorImpl created with enhanced safety features");
         processingStartTime = std::chrono::steady_clock::now();
+        
+        // Pre-compile regex patterns for performance
+        try {
+            regexPatterns.nonePattern = std::regex("0: None");
+            regexPatterns.assetPattern = std::regex("asset:images/");
+            regexPatterns.texCoordPattern = std::regex("texCoord2f");
+        } catch (const std::regex_error& e) {
+            MIDDLEWARE_LOG_ERROR("Failed to compile regex patterns: %s", e.what());
+            // Fall back to runtime compilation if pre-compilation fails
+        }
     }
 
     ~UsdProcessorImpl() {
         MIDDLEWARE_LOG_INFO("UsdProcessorImpl destroyed");
     }
 
+    // Stream-based preprocessing for large files - OPTIMIZED VERSION
+    std::vector<uint8_t> preprocessUsdContentStreaming(const std::vector<uint8_t>& buffer) {
+        MIDDLEWARE_LOG_INFO("Streaming preprocessing of USD content, size: %zu", buffer.size());
+        
+        if (buffer.empty() || buffer.size() > safety::MAX_BUFFER_SIZE) {
+            return buffer;
+        }
+        
+        // For very large files, use chunked processing
+        const size_t CHUNK_SIZE = 64 * 1024; // 64KB chunks
+        std::vector<uint8_t> result;
+        result.reserve(buffer.size() * 1.1); // Reserve 10% extra
+        
+        const char* data = reinterpret_cast<const char*>(buffer.data());
+        size_t remaining = buffer.size();
+        size_t position = 0;
+        
+        // Pre-compile regex patterns once
+        if (regexPatterns.nonePattern.mark_count() == 0) {
+            regexPatterns.nonePattern = std::regex("0: None");
+            regexPatterns.assetPattern = std::regex("asset:images/");
+            regexPatterns.texCoordPattern = std::regex("texCoord2f");
+        }
+        
+        // Use faster string search/replace for common patterns
+        const std::string nonePatternStr = "0: None";
+        const std::string assetPatternStr = "asset:images/";
+        const std::string texCoordPatternStr = "texCoord2f";
+        const std::string noneReplacement = "0: []";
+        const std::string assetReplacement = "@./images/";
+        const std::string texCoordReplacement = "texCoord2f[]";
+        
+        while (remaining > 0) {
+            size_t chunkSize = std::min(CHUNK_SIZE, remaining);
+            std::string chunk(data + position, chunkSize);
+            
+            // Apply optimized replacements
+            size_t pos = 0;
+            while ((pos = chunk.find(nonePatternStr, pos)) != std::string::npos) {
+                chunk.replace(pos, nonePatternStr.length(), noneReplacement);
+                pos += noneReplacement.length();
+            }
+            
+            pos = 0;
+            while ((pos = chunk.find(assetPatternStr, pos)) != std::string::npos) {
+                chunk.replace(pos, assetPatternStr.length(), assetReplacement);
+                pos += assetReplacement.length();
+            }
+            
+            pos = 0;
+            while ((pos = chunk.find(texCoordPatternStr, pos)) != std::string::npos) {
+                chunk.replace(pos, texCoordPatternStr.length(), texCoordReplacement);
+                pos += texCoordReplacement.length();
+            }
+            
+            // Append processed chunk to result
+            result.insert(result.end(), chunk.begin(), chunk.end());
+            
+            position += chunkSize;
+            remaining -= chunkSize;
+        }
+        
+        MIDDLEWARE_LOG_INFO("Streaming preprocessing complete: %zu -> %zu bytes", 
+                          buffer.size(), result.size());
+        return result;
+    }
+    
     // Enhanced preprocessing with comprehensive validation
     std::vector<uint8_t> preprocessUsdContent(const std::vector<uint8_t>& buffer) {
         MIDDLEWARE_LOG_INFO("Preprocessing USD content of size %zu", buffer.size());
@@ -55,31 +134,82 @@ public:
             return buffer;
         }
 
+        // Check for large geometry early to avoid unnecessary processing
+        // Use streaming detection to avoid converting entire buffer to string
+        const char* data = reinterpret_cast<const char*>(buffer.data());
+        size_t dataSize = buffer.size();
+        
+        // Quick scan for geometry markers without full string conversion
+        bool hasLargeGeometry = false;
+        const char* searchPtr = data;
+        size_t remaining = dataSize;
+        const size_t scanLimit = std::min(dataSize, static_cast<size_t>(1024 * 1024)); // Scan first 1MB
+        
+        while (remaining > 0 && (dataSize - remaining) < scanLimit) {
+            // Look for geometry markers
+            if (strncmp(searchPtr, "int[] faceVertexIndices", 23) == 0 ||
+                strncmp(searchPtr, "point3f[] points", 16) == 0 ||
+                strncmp(searchPtr, "float3[] points", 15) == 0) {
+                hasLargeGeometry = true;
+                break;
+            }
+            searchPtr++;
+            remaining--;
+        }
+
+        if (hasLargeGeometry) {
+            MIDDLEWARE_LOG_INFO("Large geometry detected via streaming scan - preserving original USD data");
+            return buffer;  // Return original content without any modifications
+        }
+
+        // Use streaming processing for large files, regular processing for small files
+        const size_t STREAMING_THRESHOLD = 10 * 1024 * 1024; // 10MB
+        if (buffer.size() > STREAMING_THRESHOLD) {
+            MIDDLEWARE_LOG_INFO("Large file detected (%zu bytes), using streaming preprocessing", buffer.size());
+            return preprocessUsdContentStreaming(buffer);
+        }
+
         try {
-            // Convert buffer to string with size validation
+            // Convert buffer to string with size validation (only for small files)
             std::string fileContent;
             fileContent.assign(reinterpret_cast<const char*>(buffer.data()), buffer.size());
 
-            if (fileContent.find("int[] faceVertexIndices") != std::string::npos ||
-                fileContent.find("point3f[] points") != std::string::npos ||
-                fileContent.find("float3[] points") != std::string::npos) {
 
-                MIDDLEWARE_LOG_INFO("Large geometry detected - preserving original USD data for Unreal RealtimeMesh");
-                return buffer;  // Return original content without any modifications
+
+            // Apply optimized string replacements (faster than regex)
+            try {
+                // Use faster string search/replace for common patterns
+                const std::string nonePatternStr = "0: None";
+                const std::string assetPatternStr = "asset:images/";
+                const std::string texCoordPatternStr = "texCoord2f";
+                const std::string noneReplacement = "0: []";
+                const std::string assetReplacement = "@./images/";
+                const std::string texCoordReplacement = "texCoord2f[]";
+                
+                // Apply replacements using optimized algorithm
+                size_t pos = 0;
+                while ((pos = fileContent.find(nonePatternStr, pos)) != std::string::npos) {
+                    fileContent.replace(pos, nonePatternStr.length(), noneReplacement);
+                    pos += noneReplacement.length();
+                }
+                
+                pos = 0;
+                while ((pos = fileContent.find(assetPatternStr, pos)) != std::string::npos) {
+                    fileContent.replace(pos, assetPatternStr.length(), assetReplacement);
+                    pos += assetReplacement.length();
+                }
+                
+                pos = 0;
+                while ((pos = fileContent.find(texCoordPatternStr, pos)) != std::string::npos) {
+                    fileContent.replace(pos, texCoordPatternStr.length(), texCoordReplacement);
+                    pos += texCoordReplacement.length();
                 }
 
-            // Apply regex replacements with exception handling
-            try {
-                // Fix common USD format issues
-                fileContent = std::regex_replace(fileContent, std::regex("0: None"), "0: []");
-                fileContent = std::regex_replace(fileContent, std::regex("asset:images/"), "@./images/");
-                fileContent = std::regex_replace(fileContent, std::regex("texCoord2f"), "texCoord2f[]");
+                MIDDLEWARE_LOG_DEBUG("Applied optimized string replacements successfully");
 
-                MIDDLEWARE_LOG_DEBUG("Applied regex replacements successfully");
-
-            } catch (const std::regex_error& e) {
-                MIDDLEWARE_LOG_ERROR("Regex error during preprocessing: %s", e.what());
-                return buffer; // Return original on regex failure
+            } catch (const std::exception& e) {
+                MIDDLEWARE_LOG_ERROR("String replacement error during preprocessing: %s", e.what());
+                return buffer; // Return original on failure
             }
 
             // Safe line processing with bounds checking
@@ -165,6 +295,72 @@ public:
     }
 
 private:
+    // Pre-compiled regex patterns for performance
+    struct RegexPatterns {
+        std::regex nonePattern;
+        std::regex assetPattern;
+        std::regex texCoordPattern;
+        
+        RegexPatterns() = default;
+    };
+    
+    // Simple memory pool for vector allocations
+    class VectorMemoryPool {
+    private:
+        struct PooledVector {
+            std::vector<glm::vec3> points;
+            std::vector<uint32_t> indices;
+            std::vector<glm::vec3> normals;
+            std::vector<glm::vec2> uvs;
+            bool inUse = false;
+        };
+        
+        std::vector<PooledVector> pool;
+        size_t maxPoolSize = 10;
+        
+    public:
+        PooledVector* acquire() {
+            for (auto& vec : pool) {
+                if (!vec.inUse) {
+                    vec.inUse = true;
+                    // Clear vectors but keep capacity
+                    vec.points.clear();
+                    vec.indices.clear();
+                    vec.normals.clear();
+                    vec.uvs.clear();
+                    return &vec;
+                }
+            }
+            
+            // Create new pooled vector if pool is not full
+            if (pool.size() < maxPoolSize) {
+                pool.emplace_back();
+                pool.back().inUse = true;
+                // Pre-allocate reasonable capacities
+                pool.back().points.reserve(10000);
+                pool.back().indices.reserve(30000);
+                pool.back().normals.reserve(10000);
+                pool.back().uvs.reserve(10000);
+                return &pool.back();
+            }
+            
+            return nullptr; // Pool exhausted
+        }
+        
+        void release(PooledVector* vec) {
+            if (vec) {
+                vec->inUse = false;
+                // Keep memory allocated for reuse
+            }
+        }
+        
+        void clear() {
+            pool.clear();
+        }
+    };
+    
+    RegexPatterns regexPatterns;
+    VectorMemoryPool vectorPool;
     std::chrono::steady_clock::time_point processingStartTime;
     std::atomic<size_t> memoryLimitBytes{1024 * 1024 * 1024}; // 1GB default
 };
@@ -908,13 +1104,69 @@ bool UsdProcessor::ProcessPrim(void* prim,
             }
         }
 
-        // Process children recursively
-        for (const auto& child : usdPrim.children()) {
-            if (!ProcessPrim(const_cast<tinyusdz::Prim*>(&child),
-                            meshDataArray, worldTransform, depth + 1)) {
-                MIDDLEWARE_LOG_WARNING("Failed to process child prim: %s",
-                                     child.element_name().c_str());
-                // Continue processing other children
+        // Process children recursively - optimized parallel processing
+        const auto& children = usdPrim.children();
+        const size_t childCount = children.size();
+        
+        if (childCount > 1 && depth < 3) { // Limit parallelism depth to avoid overhead
+            // Use parallel processing only for significant workloads
+            // Threshold based on expected processing time
+            const size_t PARALLEL_THRESHOLD = 4; // Process at least 4 children in parallel
+            
+            if (childCount >= PARALLEL_THRESHOLD) {
+                // Use parallel processing with reduced thread creation overhead
+                std::vector<std::future<bool>> futures;
+                futures.reserve(childCount);
+                std::vector<std::vector<MeshData>> childResults(childCount);
+                
+                for (size_t i = 0; i < childCount; ++i) {
+                    futures.push_back(std::async(std::launch::async, [&, i]() {
+                        std::vector<MeshData> localMeshData;
+                        bool result = ProcessPrim(const_cast<tinyusdz::Prim*>(&children[i]),
+                                                 localMeshData, worldTransform, depth + 1);
+                        if (!result) {
+                            MIDDLEWARE_LOG_WARNING("Failed to process child prim: %s",
+                                                 children[i].element_name().c_str());
+                        }
+                        childResults[i] = std::move(localMeshData);
+                        return result;
+                    }));
+                }
+                
+                // Collect results efficiently
+                for (size_t i = 0; i < futures.size(); ++i) {
+                    try {
+                        futures[i].get(); // Wait for completion
+                        // Merge results with move semantics
+                        auto& result = childResults[i];
+                        if (!result.empty()) {
+                            meshDataArray.reserve(meshDataArray.size() + result.size());
+                            meshDataArray.insert(meshDataArray.end(),
+                                                std::make_move_iterator(result.begin()),
+                                                std::make_move_iterator(result.end()));
+                        }
+                    } catch (const std::exception& e) {
+                        MIDDLEWARE_LOG_ERROR("Exception processing child %zu: %s", i, e.what());
+                    }
+                }
+            } else {
+                // Sequential processing for small numbers
+                for (const auto& child : children) {
+                    if (!ProcessPrim(const_cast<tinyusdz::Prim*>(&child),
+                                    meshDataArray, worldTransform, depth + 1)) {
+                        MIDDLEWARE_LOG_WARNING("Failed to process child prim: %s",
+                                             child.element_name().c_str());
+                    }
+                }
+            }
+        } else {
+            // Sequential processing for small numbers or deep recursion
+            for (const auto& child : children) {
+                if (!ProcessPrim(const_cast<tinyusdz::Prim*>(&child),
+                                meshDataArray, worldTransform, depth + 1)) {
+                    MIDDLEWARE_LOG_WARNING("Failed to process child prim: %s",
+                                         child.element_name().c_str());
+                }
             }
         }
 
@@ -985,31 +1237,56 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             return false;
         }
 
-        MIDDLEWARE_LOG_DEBUG("Extracting mesh with %zu points", points.size());
+        // Performance optimization: Only log debug info for large meshes or in debug mode
+        if (points.size() > 10000) {
+            MIDDLEWARE_LOG_DEBUG("Extracting large mesh with %zu points", points.size());
+        }
 
-        // Transform and validate points
+        // Transform and validate points with optimized processing
         outMeshData.points.clear();
         outMeshData.points.reserve(points.size());
+        
+        // Extract matrix components for faster access
+        const float* m = &worldTransform[0][0];
+        
+        // Process all points with minimal branching for better performance
         for (const auto& pt : points) {
-            // Validate input point
-            if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z)) {
-                MIDDLEWARE_LOG_WARNING("Non-finite vertex detected, skipping");
+            // Fast validation using bitwise operations
+            const float x = static_cast<float>(pt.x);
+            const float y = static_cast<float>(pt.y);
+            const float z = static_cast<float>(pt.z);
+            
+            // Check for NaN/Inf using integer representation (faster than std::isfinite)
+            const int32_t* ix = reinterpret_cast<const int32_t*>(&x);
+            const int32_t* iy = reinterpret_cast<const int32_t*>(&y);
+            const int32_t* iz = reinterpret_cast<const int32_t*>(&z);
+            
+            // Check if any component is NaN or Inf (exponent bits all 1s)
+            if ((*ix & 0x7F800000) == 0x7F800000 || 
+                (*iy & 0x7F800000) == 0x7F800000 || 
+                (*iz & 0x7F800000) == 0x7F800000) {
+                MIDDLEWARE_LOG_WARNING("Non-finite vertex detected, using zero");
+                outMeshData.points.emplace_back(0.0f, 0.0f, 0.0f);
                 continue;
             }
 
-            glm::vec3 vertex(static_cast<float>(pt.x),
-                           static_cast<float>(pt.y),
-                           static_cast<float>(pt.z));
-            glm::vec4 transformedVertex = worldTransform * glm::vec4(vertex, 1.0f);
-
-            // Validate transformed vertex
-            if (!std::isfinite(transformedVertex.x) ||
-                !std::isfinite(transformedVertex.y) ||
-                !std::isfinite(transformedVertex.z)) {
+            // Manual matrix multiplication - optimized
+            const float tx = m[0] * x + m[4] * y + m[8] * z + m[12];
+            const float ty = m[1] * x + m[5] * y + m[9] * z + m[13];
+            const float tz = m[2] * x + m[6] * y + m[10] * z + m[14];
+            
+            // Fast validation of transformed vertex
+            const int32_t* itx = reinterpret_cast<const int32_t*>(&tx);
+            const int32_t* ity = reinterpret_cast<const int32_t*>(&ty);
+            const int32_t* itz = reinterpret_cast<const int32_t*>(&tz);
+            
+            if ((*itx & 0x7F800000) == 0x7F800000 || 
+                (*ity & 0x7F800000) == 0x7F800000 || 
+                (*itz & 0x7F800000) == 0x7F800000) {
                 MIDDLEWARE_LOG_WARNING("Transform produced non-finite vertex, using original");
-                outMeshData.points.push_back(vertex);
+                outMeshData.points.emplace_back(x, y, z);
             } else {
-                outMeshData.points.push_back(glm::vec3(transformedVertex));
+                outMeshData.points.emplace_back(tx, ty, tz);
             }
         }
 
@@ -1040,7 +1317,18 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             // Only triangulate for non-subdivision meshes
             MIDDLEWARE_LOG_DEBUG("Triangulating mesh (subdivScheme=none)");
 
+            // Pre-calculate total triangles for better memory allocation
+            size_t totalTriangles = 0;
+            for (int32_t count : faceVertexCounts) {
+                if (count >= 3 && count <= 100) {
+                    totalTriangles += (count - 2);
+                }
+            }
+            finalIndices.reserve(totalTriangles * 3);
+
             size_t indexOffset = 0;
+            const size_t vertexCount = outMeshData.points.size();
+            
             for (size_t faceIdx = 0; faceIdx < faceVertexCounts.size(); ++faceIdx) {
                 int32_t numVertsInFace = faceVertexCounts[faceIdx];
 
@@ -1061,20 +1349,30 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
                     break;
                 }
 
-                // Triangulate this face (fan triangulation)
-                for (int32_t triIdx = 0; triIdx < numVertsInFace - 2; ++triIdx) {
-                    uint32_t idx0 = static_cast<uint32_t>(faceVertexIndices[indexOffset]);
+                // Triangulate this face (fan triangulation) - OPTIMIZED VERSION
+                uint32_t baseIdx = static_cast<uint32_t>(faceVertexIndices[indexOffset]);
+                
+                // Check base index once
+                if (baseIdx >= vertexCount) {
+                    MIDDLEWARE_LOG_WARNING("Invalid base index in face, skipping face");
+                    indexOffset += numVertsInFace;
+                    continue;
+                }
+                
+                // Generate triangles using fan triangulation - optimized loop
+                const int32_t maxTriIdx = numVertsInFace - 2;
+                for (int32_t triIdx = 0; triIdx < maxTriIdx; ++triIdx) {
                     uint32_t idx1 = static_cast<uint32_t>(faceVertexIndices[indexOffset + triIdx + 1]);
                     uint32_t idx2 = static_cast<uint32_t>(faceVertexIndices[indexOffset + triIdx + 2]);
-
-                    if (idx0 >= outMeshData.points.size() ||
-                        idx1 >= outMeshData.points.size() ||
-                        idx2 >= outMeshData.points.size()) {
+                    
+                    // Fast bounds checking
+                    if (idx1 >= vertexCount || idx2 >= vertexCount) {
                         MIDDLEWARE_LOG_WARNING("Invalid triangle indices, skipping triangle");
                         continue;
                     }
-
-                    finalIndices.push_back(idx0);
+                    
+                    // Direct push_back for better cache locality
+                    finalIndices.push_back(baseIdx);
                     finalIndices.push_back(idx1);
                     finalIndices.push_back(idx2);
                 }
@@ -1086,8 +1384,10 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             MIDDLEWARE_LOG_DEBUG("Preserving original topology for subdivision (scheme=%s)", subdivScheme.c_str());
 
             finalIndices.reserve(faceVertexIndices.size());
+            const size_t vertexCount = outMeshData.points.size();
+            
             for (const auto& idx : faceVertexIndices) {
-                if (static_cast<size_t>(idx) >= outMeshData.points.size()) {
+                if (static_cast<size_t>(idx) >= vertexCount) {
                     MIDDLEWARE_LOG_WARNING("Invalid index %d, skipping", idx);
                     continue;
                 }

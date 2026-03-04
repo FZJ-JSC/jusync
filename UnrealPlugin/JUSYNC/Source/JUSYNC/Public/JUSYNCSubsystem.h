@@ -103,8 +103,8 @@ public:
         const FJUSYNCMeshData& MeshData,
         URealtimeMeshComponent* RealtimeMeshComponent
     );
-    
-    
+
+
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Mesh|Legacy", DisplayName = "Batch Create Realtime Meshes From JUSYNC (Legacy)")
     bool BatchCreateRealtimeMeshesFromJUSYNC(const TArray<FJUSYNCMeshData>& MeshDataArray, const TArray<URealtimeMeshComponent*>& MeshComponents);
 
@@ -228,7 +228,7 @@ public:
     bool RequestWorkerCountExcludingRank0(int32 TimeoutMs, int32& OutWorkerCount);
 
     // ========== PERFORMANCE METRICS FUNCTIONS ==========
-    
+
     // Metrics configuration
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Metrics")
     void ConfigureMetrics(const FJUSYNCMetricsConfig& NewConfig);
@@ -295,7 +295,7 @@ public:
 
     // Metrics collection functions
     void CollectMetrics();
-    
+
     // Benchmark-specific metrics (don't reset accumulator)
     int32 GetSplitMeshCount() const;
 
@@ -330,40 +330,40 @@ private:
 #endif
 
     mutable FCriticalSection MiddlewareMutex;
-    std::atomic<bool> bIsInitialized{false};
+    std::atomic<bool> bIsInitialized{ false };
 
     // Material caching
     TMap<FString, TSoftObjectPtr<UMaterialInterface>> MaterialCache;
     mutable FCriticalSection MaterialCacheMutex;
 
     // ========== PERFORMANCE METRICS PRIVATE MEMBERS ==========
-    
+
     // Metrics configuration and state
     FJUSYNCMetricsConfig MetricsConfig;
     FJUSYNCMetricsData CurrentMetrics;
     TArray<FJUSYNCMetricsData> MetricsHistory;
     mutable FCriticalSection MetricsMutex;
-    
+
     // Metrics collection state
-    std::atomic<bool> bMetricsCollectionActive{false};
+    std::atomic<bool> bMetricsCollectionActive{ false };
     FTimerHandle MetricsCollectionTimerHandle;
-    float LastCollectionTime{0.0f};
-    
+    float LastCollectionTime{ 0.0f };
+
     // Accumulated statistics for averaging
     struct FMetricsAccumulator
     {
-        int32 MeshSplitCount{0};
-        int32 MeshCreationCount{0};
-        int32 ErrorCount{0};
-        int32 MemoryWarningCount{0};
-        float TotalSplitTime_ms{0.0f};
-        float TotalCreationTime_ms{0.0f};
-        int32 TotalSplitVertices{0};
-        int32 TotalSplitTriangles{0};
-        int32 TotalCreatedVertices{0};
-        int32 TotalCreatedTriangles{0};
-        int32 TotalChunksCreated{0};
-        
+        int32 MeshSplitCount{ 0 };
+        int32 MeshCreationCount{ 0 };
+        int32 ErrorCount{ 0 };
+        int32 MemoryWarningCount{ 0 };
+        float TotalSplitTime_ms{ 0.0f };
+        float TotalCreationTime_ms{ 0.0f };
+        int32 TotalSplitVertices{ 0 };
+        int32 TotalSplitTriangles{ 0 };
+        int32 TotalCreatedVertices{ 0 };
+        int32 TotalCreatedTriangles{ 0 };
+        int32 TotalChunksCreated{ 0 };
+
         void Reset()
         {
             MeshSplitCount = 0;
@@ -379,22 +379,22 @@ private:
             TotalChunksCreated = 0;
         }
     };
-    
+
     FMetricsAccumulator MetricsAccumulator;
-    
+
     // Metrics collection functions (implementation details)
     void UpdateMetricsData();
     void SaveMetricsToHistory();
-    
+
     // Component tracking
     int32 CountRMCComponents() const;
     int32 CountActiveRMCComponents() const;
     int32 CountInstancedRMCComponents() const;
-    
+
     // Display management
-    bool bMetricsDisplayVisible{false};
+    bool bMetricsDisplayVisible{ false };
     TWeakObjectPtr<class UUserWidget> MetricsDisplayWidget;
-    
+
     void CreateMetricsDisplay();
     void DestroyMetricsDisplay();
     void UpdateMetricsDisplay();
