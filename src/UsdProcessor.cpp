@@ -1,6 +1,13 @@
 #include "UsdProcessor.h"
 #include "MiddlewareLogging.h"
 
+// GPU acceleration includes (optional - gracefully degrade if not available)
+#ifdef ENABLE_CUDA_ACCELERATION
+#include "GpuContext.h"
+#include "GpuKernels.h"
+#include "GpuValidation.h"
+#endif
+
 // Standard library includes with enhanced safety
 #include <algorithm>
 #include <fstream>
@@ -296,6 +303,270 @@ public:
         return true;
     }
 
+public:
+    // GPU acceleration methods (public for use from UsdProcessor methods)
+ #ifdef ENABLE_CUDA_ACCELERATION
+    /**
+     * Transform vertices with GPU acceleration and CPU fallback
+     * @param points Input points from TinyUSDZ
+     * @param transform World transformation matrix
+     * @param outPoints Output transformed points
+     */
+    void transformVerticesWithGpu(
+        const std::vector<tinyusdz::value::point3f>& points,
+        const glm::mat4& transform,
+        std::vector<glm::vec3>& outPoints)
+    {
+        if (points.empty()) {
+            return;
+        }
+
+        // Pre-allocate output
+        outPoints.resize(points.size());
+
+        // Try GPU if threshold met and available
+        bool gpuSuccess = false;
+        std::vector<glm::vec3> gpuResult;
+        
+ #ifdef ENABLE_CUDA_ACCELERATION
+        // Log GPU availability status for debugging
+        MIDDLEWARE_LOG_INFO("🔥 GPU Acceleration Check: vertices=%zu, threshold=10000, isAvailable=%d",
+                           points.size(), GpuContext::isAvailable() ? 1 : 0);
+        
+        if (GpuContext::isAvailable() && points.size() >= 10000) {
+            MIDDLEWARE_LOG_INFO("🚀 Attempting GPU vertex transformation for %zu vertices", points.size());
+            
+            // Convert input to glm::vec3 for GPU kernel
+            std::vector<glm::vec3> inputVertices(points.size());
+            for (size_t i = 0; i < points.size(); ++i) {
+                inputVertices[i] = glm::vec3(
+                    static_cast<float>(points[i].x),
+                    static_cast<float>(points[i].y),
+                    static_cast<float>(points[i].z)
+                );
+            }
+
+            // Try GPU transformation
+            if (GpuKernels::transformVertices(inputVertices, transform, gpuResult)) {
+                // Validate GPU results
+                if (GpuValidation::validateTransformVertices(gpuResult, inputVertices, transform)) {
+                    outPoints = std::move(gpuResult);
+                    gpuSuccess = true;
+                    MIDDLEWARE_LOG_INFO("GPU vertex transformation successful: %zu vertices", points.size());
+                } else {
+                    MIDDLEWARE_LOG_WARNING("GPU vertex validation failed, falling back to CPU");
+                }
+            } else {
+                MIDDLEWARE_LOG_DEBUG("GPU vertex transformation not available, using CPU");
+            }
+        }
+ #endif
+
+        // CPU fallback if GPU not used or failed
+        if (!gpuSuccess) {
+            const float* m = &transform[0][0];
+            
+            auto transformVertex = [m](const tinyusdz::value::point3f& pt) -> glm::vec3 {
+                const float x = static_cast<float>(pt.x);
+                const float y = static_cast<float>(pt.y);
+                const float z = static_cast<float>(pt.z);
+                
+                // Fast NaN/Inf check using integer representation
+                const int32_t* ix = reinterpret_cast<const int32_t*>(&x);
+                const int32_t* iy = reinterpret_cast<const int32_t*>(&y);
+                const int32_t* iz = reinterpret_cast<const int32_t*>(&z);
+                
+                // Check if any component is NaN or Inf (exponent bits all 1s)
+                if ((*ix & 0x7F800000) == 0x7F800000 ||
+                    (*iy & 0x7F800000) == 0x7F800000 ||
+                    (*iz & 0x7F800000) == 0x7F800000) {
+                    return glm::vec3(0.0f, 0.0f, 0.0f);
+                }
+
+                // Manual matrix multiplication - optimized
+                const float tx = m[0] * x + m[4] * y + m[8] * z + m[12];
+                const float ty = m[1] * x + m[5] * y + m[9] * z + m[13];
+                const float tz = m[2] * x + m[6] * y + m[10] * z + m[14];
+                
+                // Fast validation of transformed vertex
+                const int32_t* itx = reinterpret_cast<const int32_t*>(&tx);
+                const int32_t* ity = reinterpret_cast<const int32_t*>(&ty);
+                const int32_t* itz = reinterpret_cast<const int32_t*>(&tz);
+                
+                if ((*itx & 0x7F800000) == 0x7F800000 ||
+                    (*ity & 0x7F800000) == 0x7F800000 ||
+                    (*itz & 0x7F800000) == 0x7F800000) {
+                    return glm::vec3(x, y, z);
+                }
+                
+                return glm::vec3(tx, ty, tz);
+            };
+            
+            // PARALLEL vertex processing using std::transform
+            std::transform(std::execution::par,
+                          points.begin(), points.end(),
+                          outPoints.begin(),
+                          transformVertex);
+            
+            MIDDLEWARE_LOG_DEBUG("CPU vertex transformation complete: %zu vertices", points.size());
+        }
+    }
+
+    /**
+     * Transform normals with GPU acceleration and CPU fallback
+     * @param normals Input normals from TinyUSDZ
+     * @param normalMatrix 3x3 normal transformation matrix
+     * @param outNormals Output transformed normals
+     */
+    void transformNormalsWithGpu(
+        const std::vector<tinyusdz::value::normal3f>& normals,
+        const glm::mat3& normalMatrix,
+        std::vector<glm::vec3>& outNormals)
+    {
+        if (normals.empty()) {
+            return;
+        }
+
+        outNormals.resize(normals.size());
+        bool gpuSuccess = false;
+        std::vector<glm::vec3> gpuResult;
+
+ #ifdef ENABLE_CUDA_ACCELERATION
+        if (GpuContext::isAvailable() && normals.size() >= 10000) {
+            MIDDLEWARE_LOG_DEBUG("Attempting GPU normal transformation for %zu normals", normals.size());
+            
+            // Convert input
+            std::vector<glm::vec3> inputNormals(normals.size());
+            for (size_t i = 0; i < normals.size(); ++i) {
+                inputNormals[i] = glm::vec3(
+                    static_cast<float>(normals[i].x),
+                    static_cast<float>(normals[i].y),
+                    static_cast<float>(normals[i].z)
+                );
+            }
+
+            // Try GPU transformation
+            if (GpuKernels::transformNormals(inputNormals, normalMatrix, gpuResult)) {
+                if (GpuValidation::validateTransformNormals(gpuResult, inputNormals, normalMatrix)) {
+                    outNormals = std::move(gpuResult);
+                    gpuSuccess = true;
+                    MIDDLEWARE_LOG_INFO("GPU normal transformation successful: %zu normals", normals.size());
+                } else {
+                    MIDDLEWARE_LOG_WARNING("GPU normal validation failed, falling back to CPU");
+                }
+            }
+        }
+ #endif
+
+        // CPU fallback
+        if (!gpuSuccess) {
+            auto transformNormal = [normalMatrix](const tinyusdz::value::normal3f& nrm) -> glm::vec3 {
+                // Fast NaN/Inf check
+                const int32_t* ix = reinterpret_cast<const int32_t*>(&nrm.x);
+                const int32_t* iy = reinterpret_cast<const int32_t*>(&nrm.y);
+                const int32_t* iz = reinterpret_cast<const int32_t*>(&nrm.z);
+                
+                if ((*ix & 0x7F800000) == 0x7F800000 ||
+                    (*iy & 0x7F800000) == 0x7F800000 ||
+                    (*iz & 0x7F800000) == 0x7F800000) {
+                    return glm::vec3(0.0f, 1.0f, 0.0f);  // Default up vector
+                }
+
+                glm::vec3 normalVec(static_cast<float>(nrm.x),
+                                  static_cast<float>(nrm.y),
+                                  static_cast<float>(nrm.z));
+                glm::vec3 transformedNormal = normalMatrix * normalVec;
+
+                // Fast length calculation and normalization
+                float lengthSquared = glm::dot(transformedNormal, transformedNormal);
+                if (lengthSquared > safety::EPSILON * safety::EPSILON) {
+                    float invLength = 1.0f / std::sqrt(lengthSquared);
+                    return transformedNormal * invLength;
+                }
+                
+                return glm::vec3(0.0f, 1.0f, 0.0f);  // Default up vector
+            };
+
+            // PARALLEL normal processing
+            std::transform(std::execution::par,
+                          normals.begin(), normals.end(),
+                          outNormals.begin(),
+                          transformNormal);
+            
+            MIDDLEWARE_LOG_DEBUG("CPU normal transformation complete: %zu normals", normals.size());
+        }
+    }
+
+    /**
+     * Process UVs with GPU acceleration and CPU fallback
+     * @param uvs Input UV coordinates from TinyUSDZ
+     * @param outUVs Output processed UVs
+     */
+    void processUVsWithGpu(
+        const std::vector<tinyusdz::value::texcoord2f>& uvs,
+        std::vector<glm::vec2>& outUVs)
+    {
+        if (uvs.empty()) {
+            return;
+        }
+
+        outUVs.resize(uvs.size());
+        bool gpuSuccess = false;
+        std::vector<glm::vec2> gpuResult;
+
+ #ifdef ENABLE_CUDA_ACCELERATION
+        if (GpuContext::isAvailable() && uvs.size() >= 10000) {
+            MIDDLEWARE_LOG_DEBUG("Attempting GPU UV processing for %zu UVs", uvs.size());
+            
+            // Convert input
+            std::vector<glm::vec2> inputUVs(uvs.size());
+            for (size_t i = 0; i < uvs.size(); ++i) {
+                inputUVs[i] = glm::vec2(uvs[i].s, uvs[i].t);
+            }
+
+            // Try GPU processing
+            if (GpuKernels::processUVs(inputUVs, gpuResult)) {
+                if (GpuValidation::validateProcessUVs(gpuResult, inputUVs)) {
+                    outUVs = std::move(gpuResult);
+                    gpuSuccess = true;
+                    MIDDLEWARE_LOG_INFO("GPU UV processing successful: %zu UVs", uvs.size());
+                } else {
+                    MIDDLEWARE_LOG_WARNING("GPU UV validation failed, falling back to CPU");
+                }
+            }
+        }
+ #endif
+
+        // CPU fallback
+        if (!gpuSuccess) {
+            // PARALLEL UV extraction and processing
+            std::transform(std::execution::par,
+                          uvs.begin(), uvs.end(),
+                          outUVs.begin(),
+                          [](const tinyusdz::value::texcoord2f& uv) {
+                              return glm::vec2(uv.s, uv.t);
+                          });
+
+            // Normalize and validate UVs (parallel)
+            std::for_each(std::execution::par, outUVs.begin(), outUVs.end(), [](glm::vec2& uv) {
+                // Fast NaN/Inf check using integer representation
+                const int32_t* ix = reinterpret_cast<const int32_t*>(&uv.x);
+                const int32_t* iy = reinterpret_cast<const int32_t*>(&uv.y);
+                
+                if ((*ix & 0x7F800000) == 0x7F800000 || (*iy & 0x7F800000) == 0x7F800000) {
+                    uv = glm::vec2(0.0f, 0.0f);
+                } else {
+                    // Clamp UV coordinates to reasonable range
+                    uv.x = std::clamp(uv.x, -10.0f, 10.0f);
+                    uv.y = std::clamp(uv.y, -10.0f, 10.0f);
+                }
+            });
+            
+            MIDDLEWARE_LOG_DEBUG("CPU UV processing complete: %zu UVs", uvs.size());
+        }
+    }
+ #endif
+
 private:
     // Pre-compiled regex patterns for performance
     struct RegexPatterns {
@@ -450,6 +721,19 @@ bool UsdProcessor::MeshData::validateGeometry() const {
 UsdProcessor::UsdProcessor() : pImpl(std::make_unique<UsdProcessorImpl>()) {
     MIDDLEWARE_LOG_INFO("UsdProcessor created with enhanced safety features");
     stats.reset();
+    
+    // Initialize GPU context on startup
+#ifdef ENABLE_CUDA_ACCELERATION
+    MIDDLEWARE_LOG_INFO("🔥 Initializing GPU acceleration support...");
+    if (GpuContext::getInstance().initialize()) {
+        MIDDLEWARE_LOG_INFO("✅ GPU acceleration initialized successfully - Device: %s",
+                           GpuContext::getDeviceInfo().deviceName.c_str());
+    } else {
+        MIDDLEWARE_LOG_WARNING("⚠️ GPU acceleration not available - using CPU fallback");
+    }
+#else
+    MIDDLEWARE_LOG_INFO("ℹ️ GPU acceleration not compiled in - using CPU only");
+#endif
 }
 
 UsdProcessor::~UsdProcessor() {
@@ -1247,7 +1531,10 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         // Start timing for performance measurement
         auto vertexStartTime = std::chrono::high_resolution_clock::now();
 
-        // Transform and validate points with PARALLEL processing
+        // Transform and validate points with GPU acceleration and CPU fallback
+#ifdef ENABLE_CUDA_ACCELERATION
+        pImpl->transformVerticesWithGpu(points, worldTransform, outMeshData.points);
+#else
         outMeshData.points.clear();
         outMeshData.points.resize(points.size());  // Pre-allocate exact size
         
@@ -1296,6 +1583,7 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
                       points.begin(), points.end(),
                       outMeshData.points.begin(),
                       transformVertex);
+#endif
         
         // Count non-finite vertices for logging
         size_t nonFiniteCount = std::count_if(std::execution::par,

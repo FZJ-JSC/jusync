@@ -54,6 +54,13 @@ extern "C" {
  */
 int InitializeMiddleware_C(const char* endpoint) {
     try {
+        // Log DLL version info for debugging
+        #ifdef ENABLE_CUDA_ACCELERATION
+        MIDDLEWARE_LOG_INFO("🔥🔥🔥 GPU ACCELERATION ENABLED IN DLL 🔥🔥🔥");
+        #else
+        MIDDLEWARE_LOG_INFO("⚠️⚠️⚠️ GPU ACCELERATION NOT COMPILED IN DLL ⚠️⚠️⚠️");
+        #endif
+        
         // Create middleware instance if not already created
         if (!g_middleware) {
             g_middleware = std::make_unique<anari_usd_middleware::AnariUsdMiddleware>();

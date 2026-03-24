@@ -12,6 +12,13 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include "MiddlewareLogging.h"
 
+// Forward declare GPU components (optional includes)
+namespace anari_usd_middleware {
+    class GpuContext;
+    class GpuKernels;
+    class GpuValidation;
+}
+
 #ifndef ANARI_USD_MIDDLEWARE_API
 #ifdef _WIN32
 #define ANARI_USD_MIDDLEWARE_API __declspec(dllexport)

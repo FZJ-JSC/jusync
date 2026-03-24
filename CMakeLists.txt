@@ -1,6 +1,33 @@
 cmake_minimum_required(VERSION 3.16)
 cmake_policy(SET CMP0122 NEW)
-project(anari_usd_middleware VERSION 1.0.0 LANGUAGES CXX)
+
+# Check for CUDA support before declaring project
+option(ENABLE_CUDA "Enable CUDA GPU acceleration" OFF)
+
+if(ENABLE_CUDA)
+    # Modern CMake approach: check for CUDA compiler first
+    find_program(CUDA_NVCC_EXECUTABLE nvcc PATHS
+        $ENV{CUDA_PATH}/bin
+        $ENV{CUDA_TOOLKIT_ROOT_DIR}/bin
+        /usr/local/cuda/bin
+        /usr/bin
+    )
+    
+    if(CUDA_NVCC_EXECUTABLE)
+        message(STATUS "Found nvcc at: ${CUDA_NVCC_EXECUTABLE}")
+        project(anari_usd_middleware VERSION 1.0.0 LANGUAGES CXX CUDA)
+        set(CUDA_ARCHITECTURES "60;61;70;75;80;86" CACHE STRING "CUDA architectures to build for")
+        set(CUDA_FOUND TRUE)
+    else()
+        message(WARNING "CUDA requested but nvcc not found - GPU acceleration disabled")
+        project(anari_usd_middleware VERSION 1.0.0 LANGUAGES CXX)
+        set(ENABLE_CUDA OFF)
+        set(CUDA_FOUND FALSE)
+    endif()
+else()
+    project(anari_usd_middleware VERSION 1.0.0 LANGUAGES CXX)
+    set(CUDA_FOUND FALSE)
+endif()
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
@@ -96,7 +123,27 @@ add_library(${PROJECT_NAME} SHARED
     src/CollisionProcessor.cpp
     src/ParallelDownloadManager.cpp
     src/MemoryMonitor.cpp
+    src/GpuContext.cpp
+    src/GpuValidation.cpp
 )
+
+# Add CUDA source files if CUDA is enabled
+if(ENABLE_CUDA AND CUDA_FOUND)
+    # Add CUDA kernel implementation
+    target_sources(${PROJECT_NAME} PRIVATE
+        src/GpuKernels.cu
+    )
+    
+    # Add compile definition for CUDA support
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        ENABLE_CUDA_ACCELERATION
+    )
+    
+    message(STATUS "CUDA GPU acceleration: ENABLED")
+    message(STATUS "CUDA architectures: ${CUDA_ARCHITECTURES}")
+else()
+    message(STATUS "CUDA GPU acceleration: DISABLED (build with -DENABLE_CUDA=ON)")
+endif()
 
 # Add include directories
 target_include_directories(${PROJECT_NAME}
@@ -126,6 +173,16 @@ target_link_libraries(${PROJECT_NAME}
         tinyusdz::tinyusdz_static
         glm::glm
 )
+
+# Link CUDA runtime if enabled
+if(ENABLE_CUDA AND CUDA_FOUND)
+    # Modern CMake: CUDA runtime is automatically linked when CUDA language is enabled
+    # Just need to set the architecture flags
+    set(CMAKE_CUDA_ARCHITECTURES ${CUDA_ARCHITECTURES})
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 -lineinfo")
+    set(CMAKE_CUDA_FLAGS_RELEASE "-O3 -lineinfo")
+    set(CMAKE_CUDA_FLAGS_DEBUG "-G -lineinfo")
+endif()
 
 # Add platform-specific libraries
 if(WIN32)
@@ -434,6 +491,11 @@ message(STATUS "Options:")
 message(STATUS "  BUILD_TESTS: ${BUILD_TESTS}")
 message(STATUS "  BUILD_JUSYNC_Receiver_GUI: ${BUILD_JUSYNC_Receiver_GUI}")
 message(STATUS "  C-wrapper: ENABLED")
+message(STATUS "  ENABLE_CUDA: ${ENABLE_CUDA}")
+if(ENABLE_CUDA AND CUDA_FOUND)
+message(STATUS "  CUDA Version: ${CUDA_VERSION}")
+message(STATUS "  CUDA Architectures: ${CUDA_ARCHITECTURES}")
+endif()
 if(BUILD_TESTS)
 message(STATUS "")
 message(STATUS "Enhanced Test Tools:")

@@ -59,16 +59,43 @@
 #include <cstdio>
 #include <limits>
 
+// On Windows, use OutputDebugString so logs appear in Unreal Engine
+#ifdef _WIN32
+// Declare OutputDebugStringA without including windows.h to avoid conflicts
+extern "C" __declspec(dllimport) void __stdcall OutputDebugStringA(const char* lpOutputString);
+
+#define MIDDLEWARE_LOG_TO_OUTPUT(format, ...) do { \
+    char buf[1024]; \
+    snprintf(buf, sizeof(buf), format, ##__VA_ARGS__); \
+    OutputDebugStringA(buf); \
+    printf("%s", buf); \
+} while(0)
+
+#define MIDDLEWARE_LOG_INFO(format, ...) MIDDLEWARE_LOG_TO_OUTPUT("[INFO] " format "\n", ##__VA_ARGS__)
+#define MIDDLEWARE_LOG_WARNING(format, ...) MIDDLEWARE_LOG_TO_OUTPUT("[WARNING] " format "\n", ##__VA_ARGS__)
+#define MIDDLEWARE_LOG_ERROR(format, ...) MIDDLEWARE_LOG_TO_OUTPUT("[ERROR] " format "\n", ##__VA_ARGS__)
+
+#ifdef DISABLE_DEBUG_LOGGING
+    #define MIDDLEWARE_LOG_DEBUG(format, ...)
+    #define MIDDLEWARE_LOG_VERBOSE(format, ...)
+#else
+    #define MIDDLEWARE_LOG_DEBUG(format, ...) MIDDLEWARE_LOG_TO_OUTPUT("[DEBUG] " format "\n", ##__VA_ARGS__)
+    #define MIDDLEWARE_LOG_VERBOSE(format, ...) MIDDLEWARE_LOG_TO_OUTPUT("[VERBOSE] " format "\n", ##__VA_ARGS__)
+#endif
+
+#else
+// Non-Windows standard environment
 #define MIDDLEWARE_LOG_INFO(format, ...) printf("[INFO] " format "\n", ##__VA_ARGS__)
 #define MIDDLEWARE_LOG_WARNING(format, ...) fprintf(stderr, "[WARNING] " format "\n", ##__VA_ARGS__)
 #define MIDDLEWARE_LOG_ERROR(format, ...) fprintf(stderr, "[ERROR] " format "\n", ##__VA_ARGS__)
 
 #ifdef DISABLE_DEBUG_LOGGING
-    #define MIDDLEWARE_LOG_DEBUG(format, ...) 
-    #define MIDDLEWARE_LOG_VERBOSE(format, ...) 
+    #define MIDDLEWARE_LOG_DEBUG(format, ...)
+    #define MIDDLEWARE_LOG_VERBOSE(format, ...)
 #else
     #define MIDDLEWARE_LOG_DEBUG(format, ...) printf("[DEBUG] " format "\n", ##__VA_ARGS__)
     #define MIDDLEWARE_LOG_VERBOSE(format, ...) printf("[VERBOSE] " format "\n", ##__VA_ARGS__)
+#endif
 #endif
 
 // String conversion helpers (no-ops in standard C++)
