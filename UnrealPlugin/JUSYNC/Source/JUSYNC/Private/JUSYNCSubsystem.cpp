@@ -2571,17 +2571,38 @@ bool UJUSYNCSubsystem::RequestFileListWithSizes(int32 TargetRank, int32 TimeoutM
 {
     FScopeLock Lock(&MiddlewareMutex);
     
-    // For broadcast requests (target_rank = -1), ensure minimum timeout
+    // For broadcast requests (target_rank = -1), dynamically determine worker count
     int32 AdjustedTimeoutMs = TimeoutMs;
     if (TargetRank == -1) {
-        // Rank 0 has dual broker/worker role, needs more time
-        if (TimeoutMs < 15000) {
-            AdjustedTimeoutMs = 15000; // 15 seconds minimum for broadcast (16 workers including rank 0)
-            UE_LOG(LogJUSYNC, Warning, TEXT("Broadcast request detected: increasing timeout from %d ms to %d ms for 16 workers (including rank 0)"), 
-                   TimeoutMs, AdjustedTimeoutMs);
+        // Query total worker count from broker (includes rank 0)
+        int32 TotalWorkerCount = 1; // Default to single-rank mode
+        if (RequestTotalWorkerCount(2000, TotalWorkerCount)) {
+            UE_LOG(LogJUSYNC, Log, TEXT("Broadcast request: dynamically detected %d total workers (including rank 0)"), TotalWorkerCount);
+            
+            // Adjust timeout based on actual worker count
+            // Single-rank mode: 3 seconds is enough
+            // Multi-rank mode: 15 seconds for up to 16 workers
+            if (TotalWorkerCount == 1) {
+                if (TimeoutMs < 3000) {
+                    AdjustedTimeoutMs = 3000;
+                    UE_LOG(LogJUSYNC, Log, TEXT("Single-rank mode: using 3000 ms timeout for broadcast"));
+                } else {
+                    AdjustedTimeoutMs = TimeoutMs;
+                }
+                UE_LOG(LogJUSYNC, Log, TEXT("Single-rank mode: broadcast (-1) will be handled as direct request to rank 0"));
+            } else {
+                // Multi-rank mode
+                if (TimeoutMs < 15000) {
+                    AdjustedTimeoutMs = 15000;
+                    UE_LOG(LogJUSYNC, Warning, TEXT("Multi-rank mode: increasing timeout from %d ms to %d ms for %d workers"), 
+                           TimeoutMs, AdjustedTimeoutMs, TotalWorkerCount);
+                }
+                UE_LOG(LogJUSYNC, Log, TEXT("Broadcast expecting responses from %d workers (ranks 0 to %d)"), 
+                       TotalWorkerCount, TotalWorkerCount - 1);
+            }
+        } else {
+            UE_LOG(LogJUSYNC, Warning, TEXT("Failed to get worker count, using default single-rank mode"));
         }
-        // Additional debug for rank 0 inclusion
-        UE_LOG(LogJUSYNC, Log, TEXT("Broadcast expecting responses from 16 workers (ranks 0-15), rank 0 has dual broker/worker role"));
     }
     
     UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING FILE LIST WITH SIZES FROM BROKER ==="));
@@ -2648,17 +2669,38 @@ bool UJUSYNCSubsystem::RequestFileListWithSizesAndRanks(int32 TargetRank, int32 
 {
     FScopeLock Lock(&MiddlewareMutex);
     
-    // For broadcast requests (target_rank = -1), ensure minimum timeout
+    // For broadcast requests (target_rank = -1), dynamically determine worker count
     int32 AdjustedTimeoutMs = TimeoutMs;
     if (TargetRank == -1) {
-        // Rank 0 has dual broker/worker role, needs more time
-        if (TimeoutMs < 15000) {
-            AdjustedTimeoutMs = 15000; // 15 seconds minimum for broadcast (16 workers including rank 0)
-            UE_LOG(LogJUSYNC, Warning, TEXT("Broadcast request detected: increasing timeout from %d ms to %d ms for 16 workers (including rank 0)"), 
-                   TimeoutMs, AdjustedTimeoutMs);
+        // Query total worker count from broker (includes rank 0)
+        int32 TotalWorkerCount = 1; // Default to single-rank mode
+        if (RequestTotalWorkerCount(2000, TotalWorkerCount)) {
+            UE_LOG(LogJUSYNC, Log, TEXT("Broadcast request: dynamically detected %d total workers (including rank 0)"), TotalWorkerCount);
+            
+            // Adjust timeout based on actual worker count
+            // Single-rank mode: 3 seconds is enough
+            // Multi-rank mode: 15 seconds for up to 16 workers
+            if (TotalWorkerCount == 1) {
+                if (TimeoutMs < 3000) {
+                    AdjustedTimeoutMs = 3000;
+                    UE_LOG(LogJUSYNC, Log, TEXT("Single-rank mode: using 3000 ms timeout for broadcast"));
+                } else {
+                    AdjustedTimeoutMs = TimeoutMs;
+                }
+                UE_LOG(LogJUSYNC, Log, TEXT("Single-rank mode: broadcast (-1) will be handled as direct request to rank 0"));
+            } else {
+                // Multi-rank mode
+                if (TimeoutMs < 15000) {
+                    AdjustedTimeoutMs = 15000;
+                    UE_LOG(LogJUSYNC, Warning, TEXT("Multi-rank mode: increasing timeout from %d ms to %d ms for %d workers"), 
+                           TimeoutMs, AdjustedTimeoutMs, TotalWorkerCount);
+                }
+                UE_LOG(LogJUSYNC, Log, TEXT("Broadcast expecting responses from %d workers (ranks 0 to %d)"), 
+                       TotalWorkerCount, TotalWorkerCount - 1);
+            }
+        } else {
+            UE_LOG(LogJUSYNC, Warning, TEXT("Failed to get worker count, using default single-rank mode"));
         }
-        // Additional debug for rank 0 inclusion
-        UE_LOG(LogJUSYNC, Log, TEXT("Broadcast expecting responses from 16 workers (ranks 0-15), rank 0 has dual broker/worker role"));
     }
     
     UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING FILE LIST WITH SIZES AND RANKS FROM BROKER ==="));

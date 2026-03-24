@@ -1070,18 +1070,40 @@ bool AnariUsdMiddleware::isBrokerConnected() const {
 
 bool AnariUsdMiddleware::requestFileList(int32_t targetRank, std::vector<std::string>& outFiles, int timeoutMs) {
     if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
-        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
-        return false;
+        MIDDLEWARE_LOG_WARNING("ANARI USD client not connected - returning empty file list (non-MPI mode)");
+        outFiles.clear();  // Return empty list
+        return true;  // Return success with empty list
     }
-    return pImpl->anariUsdClient->getFileListSync(targetRank, outFiles, timeoutMs);
+    
+    bool success = pImpl->anariUsdClient->getFileListSync(targetRank, outFiles, timeoutMs);
+    if (!success) {
+        MIDDLEWARE_LOG_WARNING("Failed to get file list from broker - returning empty file list (non-MPI fallback)");
+        outFiles.clear();  // Return empty list on failure
+        return true;  // Return success with empty list
+    }
+    return success;
 }
 
 bool AnariUsdMiddleware::requestFileListWithSizes(int32_t targetRank, std::vector<FileInfo>& outFiles, int timeoutMs) {
+    MIDDLEWARE_LOG_INFO("=== requestFileListWithSizes ENTERED ===");
+    MIDDLEWARE_LOG_INFO("targetRank=%d, timeoutMs=%d", targetRank, timeoutMs);
+    
     if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
-        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
-        return false;
+        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected - cannot request file list");
+        outFiles.clear();  // Return empty list
+        return false;  // Return FAILURE to indicate the request did not succeed
     }
-    return pImpl->anariUsdClient->getFileListWithSizesSync(targetRank, outFiles, timeoutMs);
+    
+    MIDDLEWARE_LOG_INFO("Client IS connected, calling getFileListWithSizesSync...");
+    MIDDLEWARE_LOG_INFO("Calling getFileListWithSizesSync with targetRank=%d, timeoutMs=%d", targetRank, timeoutMs);
+    bool success = pImpl->anariUsdClient->getFileListWithSizesSync(targetRank, outFiles, timeoutMs);
+    MIDDLEWARE_LOG_INFO("getFileListWithSizesSync returned: success=%d, fileCount=%zu", success, outFiles.size());
+    if (!success) {
+        MIDDLEWARE_LOG_ERROR("Failed to get file list from broker");
+        outFiles.clear();  // Return empty list on failure
+        return false;  // Return FAILURE to indicate the request did not succeed
+    }
+    return success;
 }
 
 bool AnariUsdMiddleware::requestFile(const std::string& filename, int32_t targetRank,
@@ -1137,18 +1159,34 @@ bool AnariUsdMiddleware::requestFrame(int32_t frameNumber, int32_t targetRank,
 
 bool AnariUsdMiddleware::requestWorkerCount(uint32_t& outWorkerCount, int timeoutMs) {
     if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
-        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
-        return false;
+        MIDDLEWARE_LOG_WARNING("ANARI USD client not connected - returning default count of 0 (no workers in non-MPI mode)");
+        outWorkerCount = 0;  // Default: 0 workers (excluding rank 0) in non-MPI mode
+        return true;  // Return success with default value
     }
-    return pImpl->anariUsdClient->getWorkerCountSync(outWorkerCount, timeoutMs);
+    
+    bool success = pImpl->anariUsdClient->getWorkerCountSync(outWorkerCount, timeoutMs);
+    if (!success) {
+        MIDDLEWARE_LOG_WARNING("Failed to get worker count from broker - returning default count of 0 (non-MPI fallback)");
+        outWorkerCount = 0;  // Fallback to 0 workers (excluding rank 0)
+        return true;  // Return success with fallback value
+    }
+    return success;
 }
 
 bool AnariUsdMiddleware::requestTotalWorkerCount(uint32_t& outTotalCount, int timeoutMs) {
     if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
-        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
-        return false;
+        MIDDLEWARE_LOG_WARNING("ANARI USD client not connected - returning default count of 1 (rank 0 only for non-MPI mode)");
+        outTotalCount = 1;  // Default: just rank 0 in non-MPI mode
+        return true;  // Return success with default value
     }
-    return pImpl->anariUsdClient->getTotalWorkerCountSync(outTotalCount, timeoutMs);
+    
+    bool success = pImpl->anariUsdClient->getTotalWorkerCountSync(outTotalCount, timeoutMs);
+    if (!success) {
+        MIDDLEWARE_LOG_WARNING("Failed to get total worker count from broker - returning default count of 1 (non-MPI fallback)");
+        outTotalCount = 1;  // Fallback to 1 worker (rank 0)
+        return true;  // Return success with fallback value
+    }
+    return success;
 }
 
 bool AnariUsdMiddleware::requestWorkerStatus(int32_t targetRank,
@@ -1167,9 +1205,10 @@ bool AnariUsdMiddleware::requestWorkerStatus(int32_t targetRank,
 
 void AnariUsdMiddleware::requestWorkerCountAsync(int timeoutMs, WorkerCountCallback callback, BrokerErrorCallback errorCallback) {
     if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
-        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
-        if (errorCallback) {
-            errorCallback("ANARI USD client not connected");
+        MIDDLEWARE_LOG_WARNING("ANARI USD client not connected - returning default count of 0 (no workers in non-MPI mode)");
+        // Return default value immediately for non-MPI mode
+        if (callback) {
+            callback(0);  // Default: 0 workers (excluding rank 0)
         }
         return;
     }
@@ -1181,17 +1220,24 @@ void AnariUsdMiddleware::requestWorkerCountAsync(int timeoutMs, WorkerCountCallb
         
         if (success && callback) {
             callback(workerCount);
-        } else if (errorCallback) {
-            errorCallback(success ? "Unknown error" : "Failed to retrieve worker count");
+        } else {
+            // Fallback to 0 workers on failure (non-MPI mode)
+            MIDDLEWARE_LOG_WARNING("Failed to get worker count from broker - returning default count of 0 (non-MPI fallback)");
+            if (callback) {
+                callback(0);  // Fallback: 0 workers (excluding rank 0)
+            } else if (errorCallback) {
+                errorCallback("Failed to retrieve worker count - using fallback value of 0");
+            }
         }
     }).detach();
 }
 
 void AnariUsdMiddleware::requestTotalWorkerCountAsync(int timeoutMs, WorkerCountCallback callback, BrokerErrorCallback errorCallback) {
     if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
-        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
-        if (errorCallback) {
-            errorCallback("ANARI USD client not connected");
+        MIDDLEWARE_LOG_WARNING("ANARI USD client not connected - returning default count of 1 (rank 0 only for non-MPI mode)");
+        // Return default value immediately for non-MPI mode
+        if (callback) {
+            callback(1);  // Default: 1 worker (rank 0)
         }
         return;
     }
@@ -1203,8 +1249,14 @@ void AnariUsdMiddleware::requestTotalWorkerCountAsync(int timeoutMs, WorkerCount
         
         if (success && callback) {
             callback(totalCount);
-        } else if (errorCallback) {
-            errorCallback(success ? "Unknown error" : "Failed to retrieve total worker count");
+        } else {
+            // Fallback to 1 worker on failure (non-MPI mode)
+            MIDDLEWARE_LOG_WARNING("Failed to get total worker count from broker - returning default count of 1 (non-MPI fallback)");
+            if (callback) {
+                callback(1);  // Fallback: 1 worker (rank 0)
+            } else if (errorCallback) {
+                errorCallback("Failed to retrieve total worker count - using fallback value of 1");
+            }
         }
     }).detach();
 }

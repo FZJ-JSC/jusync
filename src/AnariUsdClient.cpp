@@ -249,6 +249,7 @@ bool AnariUsdClient::requestFileList(int32_t targetRank, FileListCallback callba
     try {
         // Create file list request
         ZmqFileRequest request;
+        request.magic = ANARI_USD_MAGIC;           // 0x55534446 ("USDF") - CRITICAL: Must be set!
         request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_LIST_FILES);
         request.request_id = generateRequestId();
         request.target_rank = targetRank;
@@ -257,12 +258,18 @@ bool AnariUsdClient::requestFileList(int32_t targetRank, FileListCallback callba
 
         MIDDLEWARE_LOG_INFO("Requesting file list from rank %d (request_id: %u)", 
                             targetRank, request.request_id);
+        
+        // DEBUG: Log request details
+        MIDDLEWARE_LOG_INFO("DEBUG: File list request - magic=0x%08x, type=%u, size=%zu bytes",
+                           request.magic, request.message_type, sizeof(request));
 
         // Send request
         if (!sendRequest(&request, sizeof(request), request.request_id)) {
             MIDDLEWARE_LOG_ERROR("Failed to send file list request");
             return false;
         }
+        
+        MIDDLEWARE_LOG_INFO("DEBUG: File list request sent successfully, waiting for response...");
 
         // Wait for response
         if (!waitForResponse(request.request_id, timeoutMs)) {
@@ -425,16 +432,44 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
     }
 
     try {
-        // Create file list request (same as requestFileList)
+        // For broadcast requests (targetRank == -1), we need to receive multiple responses
+        // For single rank requests, we just process one response
+        bool isBroadcast = (targetRank == -1);
+        
+        // CRITICAL FIX: Query total worker count BEFORE sending request
+        // In single-rank mode, convert broadcast to direct request to rank 0
+        uint32_t totalWorkers = 1; // Default to single-rank mode (non-MPI)
+        int32_t actualTargetRank = targetRank;
+        
+        if (isBroadcast) {
+            uint32_t workerCount = 0;
+            if (getTotalWorkerCountSync(workerCount, 2000)) {
+                totalWorkers = workerCount;
+                MIDDLEWARE_LOG_INFO("Dynamic worker count from broker: %u", totalWorkers);
+                
+                // SINGLE-RANK MODE FIX: If only rank 0 exists, convert broadcast to direct request
+                if (totalWorkers == 1) {
+                    MIDDLEWARE_LOG_INFO("Single-rank mode detected - converting broadcast (-1) to direct request to rank 0");
+                    actualTargetRank = 0; // Change target from -1 to 0
+                    isBroadcast = false;  // Disable broadcast mode
+                }
+            } else {
+                MIDDLEWARE_LOG_WARNING("Failed to get worker count from broker, using default single-rank mode");
+                // Keep original targetRank (could be -1 or specific rank)
+            }
+        }
+
+        // Create file list request with CORRECTED target rank
         ZmqFileRequest request;
+        request.magic = ANARI_USD_MAGIC;           // 0x55534446 ("USDF") - CRITICAL: Must be set!
         request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_LIST_FILES);
         request.request_id = generateRequestId();
-        request.target_rank = targetRank;
+        request.target_rank = actualTargetRank;    // Use corrected target rank
         request.chunk_size = 0; // Not applicable for file list
         request.setFilename(""); // No filename for list request
 
-        MIDDLEWARE_LOG_INFO("Requesting file list with sizes from rank %d (request_id: %u)", 
-                            targetRank, request.request_id);
+        MIDDLEWARE_LOG_INFO("Requesting file list with sizes from rank %d (request_id: %u, isBroadcast: %d)",
+                            actualTargetRank, request.request_id, isBroadcast ? 1 : 0);
 
         // Send request
         if (!sendRequest(&request, sizeof(request), request.request_id)) {
@@ -452,9 +487,6 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
         auto startTime = std::chrono::steady_clock::now();
         auto timeoutDuration = std::chrono::milliseconds(timeoutMs);
         
-        // For broadcast requests (targetRank == -1), we need to receive multiple responses
-        // For single rank requests, we just process one response
-        bool isBroadcast = (targetRank == -1);
         bool receivedAtLeastOneResponse = false;
         
         do {
@@ -635,19 +667,20 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
             return false;
         }
         
-        MIDDLEWARE_LOG_INFO("Accumulated %zu total files from %s", 
-                           allFileInfos.size(), 
+        MIDDLEWARE_LOG_INFO("Accumulated %zu total files from %s",
+                           allFileInfos.size(),
                            isBroadcast ? "multiple ranks (broadcast)" : "single rank");
         
-        // For broadcast: implement retry logic for missing ranks
+        // For broadcast: implement retry logic for missing ranks (MPI mode only)
+        // In single-rank mode (non-MPI), there's only rank 0, so no retry needed
         if (isBroadcast && allFileInfos.size() > 0) {
-            // Track which ranks responded
-            bool responded[16] = {false};
+            // Track which ranks responded - use dynamic size based on totalWorkers
+            std::vector<bool> responded(totalWorkers, false);
             int32_t maxRank = -1;
-            int32_t minRank = 16;
+            int32_t minRank = static_cast<int32_t>(totalWorkers);
             
             for (const auto& fileInfo : allFileInfos) {
-                if (fileInfo.source_rank >= 0 && fileInfo.source_rank < 16) {
+                if (fileInfo.source_rank >= 0 && fileInfo.source_rank < static_cast<int32_t>(totalWorkers)) {
                     responded[fileInfo.source_rank] = true;
                     if (fileInfo.source_rank > maxRank) maxRank = fileInfo.source_rank;
                     if (fileInfo.source_rank < minRank) minRank = fileInfo.source_rank;
@@ -656,24 +689,20 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
             
             // Count responded ranks
             int32_t respondedCount = 0;
-            for (int32_t rank = 0; rank < 16; ++rank) {
+            for (int32_t rank = 0; rank < static_cast<int32_t>(totalWorkers); ++rank) {
                 if (responded[rank]) respondedCount++;
             }
             
-            MIDDLEWARE_LOG_INFO("Broadcast response summary: %d/%d ranks responded (ranks %d-%d)", 
-                               respondedCount, 16, minRank, maxRank);
+            MIDDLEWARE_LOG_INFO("Broadcast response summary: %d/%d ranks responded (ranks %d-%d)",
+                               respondedCount, totalWorkers, minRank, maxRank);
             
-            // Log missing ranks for debugging
-            if (respondedCount < 16) {
-                MIDDLEWARE_LOG_INFO("Missing ranks:");
-                for (int32_t rank = 0; rank < 16; ++rank) {
-                    if (!responded[rank]) {
-                        MIDDLEWARE_LOG_INFO("  - Rank %d", rank);
-                    }
-                }
-                
-                // Implement retry logic for missing ranks
-                MIDDLEWARE_LOG_INFO("Retrying %d missing ranks with individual requests...", 16 - respondedCount);
+            // Only retry missing ranks if we're in multi-rank MPI mode
+            // In single-rank mode (totalWorkers == 1), don't retry
+            bool isSingleRankMode = (totalWorkers == 1);
+            
+            if (!isSingleRankMode && respondedCount < static_cast<int32_t>(totalWorkers)) {
+                MIDDLEWARE_LOG_INFO("Multi-rank mode detected - retrying %d missing ranks...",
+                                   totalWorkers - respondedCount);
                 
                 // Retry each missing rank
                 int32_t retryTimeout = timeoutMs / 3; // Shorter timeout for retries
@@ -682,7 +711,7 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
                 // Create a temporary vector for retry results
                 std::vector<FileInfo> retryResults = allFileInfos;
                 
-                for (int32_t rank = 0; rank < 16; ++rank) {
+                for (int32_t rank = 0; rank < static_cast<int32_t>(totalWorkers); ++rank) {
                     if (!responded[rank]) {
                         MIDDLEWARE_LOG_INFO("Retrying rank %d with %d ms timeout", rank, retryTimeout);
                         
@@ -698,6 +727,7 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
                         try {
                             // Create file list request
                             ZmqFileRequest request;
+                            request.magic = ANARI_USD_MAGIC;  // CRITICAL: Set magic number
                             request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_LIST_FILES);
                             request.request_id = generateRequestId();
                             request.target_rank = rank;
@@ -807,8 +837,9 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
                 
                 // Update allFileInfos with retry results
                 allFileInfos = retryResults;
-                MIDDLEWARE_LOG_INFO("After retries: %zu total files from %d ranks", 
-                                   allFileInfos.size(), respondedCount + (16 - respondedCount));
+                MIDDLEWARE_LOG_INFO("After retries: %zu total files", allFileInfos.size());
+            } else if (isSingleRankMode) {
+                MIDDLEWARE_LOG_INFO("Single-rank mode detected - no retry needed (only rank 0 exists)");
             }
         }
         
@@ -1228,6 +1259,11 @@ bool AnariUsdClient::sendRequest(const void* data, size_t size, uint32_t request
     try {
         std::lock_guard<std::recursive_mutex> lock(requestMutex);
         
+        // DEBUG: Log request details
+        const ZmqFileRequest* req = static_cast<const ZmqFileRequest*>(data);
+        MIDDLEWARE_LOG_INFO("DEBUG sendRequest: magic=0x%08x, type=%u, size=%zu, request_id=%u",
+                           req->magic, req->message_type, size, requestId);
+        
         // Send empty delimiter frame with SNDMORE flag (first frame of 2-frame message)
         // DEALER sends: [empty delimiter] + [data] (2 frames)
         // ROUTER receives: [identity] + [empty delimiter] + [data] (3 frames)
@@ -1240,6 +1276,8 @@ bool AnariUsdClient::sendRequest(const void* data, size_t size, uint32_t request
             return false;
         }
         
+        MIDDLEWARE_LOG_INFO("DEBUG sendRequest: Empty delimiter sent successfully");
+        
         // Send binary struct (second/last frame, no SNDMORE flag)
         zmq::message_t msg(size);
         memcpy(msg.data(), data, size);
@@ -1251,6 +1289,7 @@ bool AnariUsdClient::sendRequest(const void* data, size_t size, uint32_t request
             return false;
         }
 
+        MIDDLEWARE_LOG_INFO("DEBUG sendRequest: Request data sent successfully (%zu bytes)", size);
         connectionStats.totalRequestsSent.fetch_add(1);
         return true;
 
@@ -1488,7 +1527,7 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
     }
 
     try {
-        MIDDLEWARE_LOG_INFO("Requesting worker count using ANARI-USD binary protocol");
+        MIDDLEWARE_LOG_INFO("=== REQUESTING WORKER COUNT USING ANARI-USD BINARY PROTOCOL ===");
         
         // Create binary property request using ZmqFileRequest struct
         ZmqFileRequest request;
@@ -1496,11 +1535,28 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
         request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_GET_PROPERTY);  // 400
         request.request_id = generateRequestId();
         request.target_rank = -1;                  // Request from all ranks
-        request.setFilename("workerCount");        // Property name in filename field (NOT "total_workers")
+        request.setFilename("totalWorkerCount");   // Use totalWorkerCount (includes rank 0) not workerCount (excludes rank 0)
         request.chunk_size = 0;                    // Not applicable for property requests
         
-        MIDDLEWARE_LOG_INFO("Sending binary property request: magic=0x%08x, type=%u, request_id=%u, property='%s'",
-                           request.magic, request.message_type, request.request_id, request.getFilename().c_str());
+        MIDDLEWARE_LOG_INFO("DEBUG: Creating binary property request:");
+        MIDDLEWARE_LOG_INFO("  magic=0x%08x (ANARI_USD_MAGIC)", request.magic);
+        MIDDLEWARE_LOG_INFO("  message_type=%u (REQ_GET_PROPERTY)", request.message_type);
+        MIDDLEWARE_LOG_INFO("  request_id=%u", request.request_id);
+        MIDDLEWARE_LOG_INFO("  target_rank=%d (broadcast to all ranks)", request.target_rank);
+        
+        // CRITICAL DEBUG: Log the actual filename buffer content
+        std::string actualFilename = request.getFilename();
+        MIDDLEWARE_LOG_INFO("  property='%s' (length=%zu)", actualFilename.c_str(), actualFilename.length());
+        
+        // Also log raw buffer to check for null termination issues
+        MIDDLEWARE_LOG_INFO("  raw filename buffer (first 32 chars):");
+        for (int i = 0; i < 32 && i < 256; i++) {
+            char c = request.filename[i];
+            if (c == 0) break;
+            MIDDLEWARE_LOG_INFO("    [%d] = '%c' (0x%02x)", i, c, (unsigned char)c);
+        }
+        
+        MIDDLEWARE_LOG_INFO("  chunk_size=%u", request.chunk_size);
         
         std::lock_guard<std::recursive_mutex> lock(requestMutex);
         
@@ -1547,6 +1603,14 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
         // Parse binary property response
         const ZmqPropertyResponse* response = reinterpret_cast<const ZmqPropertyResponse*>(responseMsg.data());
         
+        MIDDLEWARE_LOG_INFO("DEBUG: Received binary property response:");
+        MIDDLEWARE_LOG_INFO("  responseSize=%zu bytes", responseSize);
+        MIDDLEWARE_LOG_INFO("  response->magic=0x%08x", response->magic);
+        MIDDLEWARE_LOG_INFO("  response->message_type=%u", response->message_type);
+        MIDDLEWARE_LOG_INFO("  response->request_id=%u", response->request_id);
+        MIDDLEWARE_LOG_INFO("  response->property_type=%d", response->property_type);
+        MIDDLEWARE_LOG_INFO("  response->int_value=%lld", response->int_value);
+        
         // Validate response
         if (!MessageUtils::isValidMagic(response->magic)) {
             MIDDLEWARE_LOG_ERROR("Invalid magic number in property response: 0x%08x", response->magic);
@@ -1566,7 +1630,7 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
 
         // Check property type
         if (response->property_type == -1) {
-            MIDDLEWARE_LOG_ERROR("Property request failed with error");
+            MIDDLEWARE_LOG_ERROR("Property request failed with error (property_type = -1)");
             return false;
         }
 
@@ -1578,6 +1642,7 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
         // Get worker count from int_value field
         uint32_t totalWorkers = static_cast<uint32_t>(response->int_value);
         
+        MIDDLEWARE_LOG_INFO("DEBUG: Parsed worker count: totalWorkers=%u", totalWorkers);
         MIDDLEWARE_LOG_INFO("Received property response: worker_count=%u, property_type=%d",
                            totalWorkers, response->property_type);
 
@@ -1811,11 +1876,14 @@ bool AnariUsdClient::getWorkerStatusSync(int32_t targetRank,
 }
 
 bool AnariUsdClient::getTotalWorkerCountSync(uint32_t& totalCount, int timeoutMs) {
+    MIDDLEWARE_LOG_INFO("=== getTotalWorkerCountSync ENTERED (timeout=%d ms) ===", timeoutMs);
+    
     // Use binary protocol instead of legacy string protocol
     std::promise<uint32_t> promise;
     std::future<uint32_t> future = promise.get_future();
     
     bool success = requestWorkerCount([&promise](uint32_t count) {
+        MIDDLEWARE_LOG_INFO("DEBUG: Worker count callback received: count=%u", count);
         promise.set_value(count);
     }, timeoutMs);
     
@@ -1832,7 +1900,7 @@ bool AnariUsdClient::getTotalWorkerCountSync(uint32_t& totalCount, int timeoutMs
     }
     
     totalCount = future.get();
-    MIDDLEWARE_LOG_INFO("Total worker count: %u", totalCount);
+    MIDDLEWARE_LOG_INFO("=== getTotalWorkerCountSync COMPLETE: totalCount=%u ===", totalCount);
     return true;
 }
 
