@@ -109,6 +109,30 @@ public:
      */
     double getAverageSpeed() const;
 
+    /**
+     * Streaming pipeline: Download files with RAM-aware parallelism
+     * Downloads files in parallel but processes them sequentially to control RAM usage
+     * @param files List of filenames to download
+     * @param targetRank Target worker rank (-1 for all)
+     * @param maxMemoryBytes Maximum memory to use for downloads (0 = unlimited)
+     * @param maxParallel Maximum parallel downloads (0 = unlimited)
+     * @param timeoutMs Timeout per file in milliseconds
+     * @param onFileReady Callback when each file is ready for processing
+     * @param onComplete Callback when all files are processed
+     */
+    void downloadWithStreaming(const std::vector<std::string>& files,
+                              int32_t targetRank = -1,
+                              uint64_t maxMemoryBytes = 0,
+                              size_t maxParallel = 0,
+                              int timeoutMs = 30000,
+                              std::function<void(const DownloadResult&)> onFileReady = nullptr,
+                              std::function<void()> onComplete = nullptr);
+
+    /**
+     * Get current memory usage from active downloads
+     */
+    uint64_t getCurrentMemoryUsage() const;
+
 private:
     struct DownloadTask {
         std::string filename;

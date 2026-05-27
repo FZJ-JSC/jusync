@@ -722,10 +722,26 @@ ANARI_USD_MIDDLEWARE_C_API int RequestWorkerCountExcludingRank0_C(
  * @param timeout_ms Timeout in milliseconds
  * @return 1 on success, 0 on failure
  */
-ANARI_USD_MIDDLEWARE_C_API int RequestWorkerListString_C(
-    uint32_t* out_worker_count,
-    unsigned char** out_data,
-    size_t* out_size,
+ ANARI_USD_MIDDLEWARE_C_API int RequestWorkerListString_C(
+     uint32_t* out_worker_count,
+     unsigned char** out_data,
+     size_t* out_size,
+     int timeout_ms);
+
+/**
+ * Callback type for worker list: receives count and parallel arrays
+ */
+typedef void (*WorkerListCallback_C)(uint32_t count, const int32_t* ranks, const char** hostnames, const char** ips);
+
+/**
+ * Request worker list string via callback (avoids C++ ABI issues)
+ *
+ * @param callback Callback to receive worker data
+ * @param timeout_ms Timeout in milliseconds
+ * @return 1 on success, 0 on failure
+ */
+ANARI_USD_MIDDLEWARE_C_API int RequestWorkerListStringCallback_C(
+    WorkerListCallback_C callback,
     int timeout_ms);
 
 /**

@@ -462,6 +462,14 @@ ANARI_USD_MIDDLEWARE_C_API void FreeBuffer_C(unsigned char* buffer);
  */
 ANARI_USD_MIDDLEWARE_C_API void FreeFileData_C(CFileData* file_data);
 
+/**
+ * Free frame files array allocated by RequestFrame_C
+ *
+ * @param files Pointer to frame files array to free
+ * @param count Number of files in array
+ */
+ANARI_USD_MIDDLEWARE_C_API void FreeFrameFiles_C(CFileData* files, size_t count);
+
 // ============================================================================
 // CALLBACK REGISTRATION FUNCTIONS
 // ============================================================================
@@ -841,6 +849,35 @@ typedef void (*ParallelDownloadErrorCallback_C)(const char* filename, const char
  * @param timeout_ms Timeout in milliseconds
  */
 ANARI_USD_MIDDLEWARE_C_API void RequestFilesParallelAsync_C(
+    const char** filenames,
+    size_t filename_count,
+    const int32_t* target_ranks,
+    ParallelFileReceivedCallback_C file_received_callback,
+    ParallelDownloadCompleteCallback_C completion_callback,
+    ParallelDownloadErrorCallback_C error_callback,
+    int timeout_ms);
+
+/**
+ * Version verification function - call this from Unreal to verify DLL is loaded correctly
+ * Returns: 1 if working, 0 if broken
+ */
+ANARI_USD_MIDDLEWARE_C_API int VerifyParallelDownloadDLL_C();
+
+/**
+ * Direct C API for parallel downloads (synchronous version)
+ * Downloads multiple files in parallel and returns results through callbacks
+ * This is a more direct wrapper that avoids C++ async complexities
+ * 
+ * @param filenames Array of filename strings
+ * @param filename_count Number of filenames
+ * @param target_ranks Array of target ranks (parallel to filenames)
+ * @param file_received_callback Called for each file received (can be NULL)
+ * @param completion_callback Called when all downloads complete (can be NULL)
+ * @param error_callback Called for each file that fails (can be NULL)
+ * @param timeout_ms Timeout in milliseconds
+ * @return 1 if download started successfully, 0 if failed
+ */
+ANARI_USD_MIDDLEWARE_C_API int RequestFilesParallelDirect_C(
     const char** filenames,
     size_t filename_count,
     const int32_t* target_ranks,

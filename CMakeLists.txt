@@ -56,7 +56,6 @@ message(STATUS "Building ZeroMQ as static library from source...")
 # Configure ZMQ build options for static linking
 set(BUILD_STATIC ON CACHE BOOL "Build static library" FORCE)
 set(BUILD_SHARED OFF CACHE BOOL "Build shared library" FORCE)
-set(BUILD_TESTS OFF CACHE BOOL "Build ZMQ tests" FORCE)
 set(WITH_LIBSODIUM OFF CACHE BOOL "Use libsodium" FORCE)
 set(ENABLE_CPACK OFF CACHE BOOL "Disable CPack" FORCE)
 set(ZMQ_BUILD_TESTS OFF CACHE BOOL "Disable ZMQ tests" FORCE)
@@ -64,7 +63,10 @@ set(WITH_PERF_TOOL OFF CACHE BOOL "Disable perf tools" FORCE)
 set(WITH_DOCS OFF CACHE BOOL "Disable docs" FORCE)
 
 # Add ZMQ subdirectory to build static library
+# ZMQ's CMakeLists.txt defines `option(BUILD_TESTS ...)` which creates a cache entry
+# that shadows our project-level option. Remove it so our option() below takes effect.
 add_subdirectory(external/zmq)
+unset(BUILD_TESTS CACHE)
 
 # Set static ZMQ target
 set(ZMQ_STATIC_TARGET libzmq-static)
@@ -164,6 +166,36 @@ target_include_directories(${PROJECT_NAME}
 add_subdirectory(external/tinyusdz external/tinyusdz_build)
 add_subdirectory(external/glm external/glm_build)
 
+# Workaround tinyusdz macro strictness on GCC >= 15 (template-dependent lookup in is_array)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
+    target_compile_options(tinyusdz_static PRIVATE -fpermissive)
+endif()
+
+# TBB - required for parallel processing (parallel_for, task_arena)
+find_package(TBB QUIET)
+if(TBB_FOUND)
+    message(STATUS "TBB: Found ${TBB_VERSION}")
+    set(TBB_LIB TBB::tbb)
+else()
+    message(STATUS "TBB: Not found - parallel processing will not use TBB")
+    set(TBB_LIB "")
+endif()
+
+# Workaround tinyusdz macro strictness on GCC >= 15 (template-dependent lookup in is_array)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
+    target_compile_options(tinyusdz_static PRIVATE -fpermissive)
+endif()
+
+# TBB - required for parallel processing (parallel_for, task_arena)
+find_package(TBB QUIET)
+if(TBB_FOUND)
+    message(STATUS "TBB: Found ${TBB_VERSION}")
+    set(TBB_LIB TBB::tbb)
+else()
+    message(STATUS "TBB: Not found - parallel processing will not use TBB")
+    set(TBB_LIB "")
+endif()
+
 # Link dependencies - STATIC ZMQ INSTEAD OF DYNAMIC
 target_link_libraries(${PROJECT_NAME}
     PRIVATE
@@ -172,6 +204,7 @@ target_link_libraries(${PROJECT_NAME}
         OpenSSL::Crypto
         tinyusdz::tinyusdz_static
         glm::glm
+        ${TBB_LIB}
 )
 
 # Link CUDA runtime if enabled
@@ -251,20 +284,22 @@ endif()
 # ------------------------------
 option(BUILD_TESTS "Build test and validation applications" ON)
 if(BUILD_TESTS)
-    # ANARI USD Client Test
-    add_executable(test_anari_usd_client
-        src/test_anari_usd_client.cpp
-    )
-    
-    target_link_libraries(test_anari_usd_client
-        PRIVATE
-            ${PROJECT_NAME}
-    )
-    
-    target_include_directories(test_anari_usd_client PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-    )
+    # ANARI USD Client Test (only if source exists)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/test_anari_usd_client.cpp")
+        add_executable(test_anari_usd_client
+            src/test_anari_usd_client.cpp
+        )
+        
+        target_link_libraries(test_anari_usd_client
+            PRIVATE
+                ${PROJECT_NAME}
+        )
+        
+        target_include_directories(test_anari_usd_client PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+        )
+    endif()
     
     # Enhanced USD Validation Tool with granular test modes
     add_executable(usd_validation_tool

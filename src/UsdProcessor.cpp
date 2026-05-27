@@ -22,7 +22,15 @@
 #include <atomic>
 #include <future>
 #include <vector>
-#include <execution>    // For parallel algorithms
+// <execution> header: available in libstdc++ (GCC) but NOT in libc++ (clang)
+// PAR_POLICY macro expands to "std::execution::par," on GCC, empty on clang
+#if defined(__clang__)
+// libc++ has no parallel execution policies - algorithms run sequentially
+#define PAR_POLICY
+#else
+#include <execution>
+#define PAR_POLICY std::execution::par,
+#endif
 #include <numeric>      // For parallel reduce
 
 // Include TinyUSDZ with error handling
@@ -403,7 +411,7 @@ public:
             };
             
             // PARALLEL vertex processing using std::transform
-            std::transform(std::execution::par,
+            std::transform(PAR_POLICY
                           points.begin(), points.end(),
                           outPoints.begin(),
                           transformVertex);
@@ -488,7 +496,7 @@ public:
             };
 
             // PARALLEL normal processing
-            std::transform(std::execution::par,
+            std::transform(PAR_POLICY
                           normals.begin(), normals.end(),
                           outNormals.begin(),
                           transformNormal);
@@ -540,7 +548,7 @@ public:
         // CPU fallback
         if (!gpuSuccess) {
             // PARALLEL UV extraction and processing
-            std::transform(std::execution::par,
+            std::transform(PAR_POLICY
                           uvs.begin(), uvs.end(),
                           outUVs.begin(),
                           [](const tinyusdz::value::texcoord2f& uv) {
@@ -548,7 +556,7 @@ public:
                           });
 
             // Normalize and validate UVs (parallel)
-            std::for_each(std::execution::par, outUVs.begin(), outUVs.end(), [](glm::vec2& uv) {
+            std::for_each(PAR_POLICY outUVs.begin(), outUVs.end(), [](glm::vec2& uv) {
                 // Fast NaN/Inf check using integer representation
                 const int32_t* ix = reinterpret_cast<const int32_t*>(&uv.x);
                 const int32_t* iy = reinterpret_cast<const int32_t*>(&uv.y);
@@ -1579,14 +1587,14 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         };
         
         // PARALLEL vertex processing using std::transform
-        std::transform(std::execution::par,
+        std::transform(PAR_POLICY
                       points.begin(), points.end(),
                       outMeshData.points.begin(),
                       transformVertex);
 #endif
         
         // Count non-finite vertices for logging
-        size_t nonFiniteCount = std::count_if(std::execution::par,
+        size_t nonFiniteCount = std::count_if(PAR_POLICY
                                             outMeshData.points.begin(),
                                             outMeshData.points.end(),
                                             [](const glm::vec3& v) {
@@ -1772,13 +1780,13 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
                 };
 
                 // PARALLEL normal processing
-                std::transform(std::execution::par,
+                std::transform(PAR_POLICY
                              normals.begin(), normals.end(),
                              outMeshData.normals.begin(),
                              transformNormal);
 
                 // Count invalid normals for logging
-                size_t invalidNormalCount = std::count_if(std::execution::par,
+                size_t invalidNormalCount = std::count_if(PAR_POLICY
                                                         outMeshData.normals.begin(),
                                                         outMeshData.normals.end(),
                                                         [](const glm::vec3& n) {
@@ -2254,7 +2262,7 @@ void UsdProcessor::normalizeUVCoordinatesParallel(std::vector<glm::vec2>& uvs) {
     auto startTime = std::chrono::high_resolution_clock::now();
     
     // PARALLEL UV normalization
-    std::for_each(std::execution::par, uvs.begin(), uvs.end(), [](glm::vec2& uv) {
+    std::for_each(PAR_POLICY uvs.begin(), uvs.end(), [](glm::vec2& uv) {
         // Fast NaN/Inf check using integer representation
         const int32_t* ix = reinterpret_cast<const int32_t*>(&uv.x);
         const int32_t* iy = reinterpret_cast<const int32_t*>(&uv.y);
@@ -2392,7 +2400,7 @@ void UsdProcessor::extractUVCoordinates(tinyusdz::GeomMesh* mesh, MeshData& mesh
                     uvChannel.resize(uvs.size());  // Pre-allocate exact size
 
                     // PARALLEL UV extraction
-                    std::transform(std::execution::par,
+                    std::transform(PAR_POLICY
                                  uvs.begin(), uvs.end(),
                                  uvChannel.begin(),
                                  [](const tinyusdz::value::texcoord2f& uv) {

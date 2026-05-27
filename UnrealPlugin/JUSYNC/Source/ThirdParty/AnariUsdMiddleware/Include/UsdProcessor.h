@@ -7,9 +7,17 @@
 #include <mutex>
 #include <shared_mutex>
 #include <functional>
+#include <limits>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include "MiddlewareLogging.h"
+
+// Forward declare GPU components (optional includes)
+namespace anari_usd_middleware {
+    class GpuContext;
+    class GpuKernels;
+    class GpuValidation;
+}
 
 #ifndef ANARI_USD_MIDDLEWARE_API
 #ifdef _WIN32
@@ -336,7 +344,7 @@ private:
 
     // Configuration
     std::atomic<int32_t> maxRecursionDepth{safety::MAX_RECURSION_DEPTH};
-    std::atomic<size_t> memoryLimitMB{1024};
+    std::atomic<size_t> memoryLimitMB{static_cast<size_t>(std::numeric_limits<int64_t>::max() / (1024 * 1024))}; // Essentially unlimited (4.6EB)
     std::atomic<bool> referenceResolutionEnabled{true};
 
     // Statistics - using the fixed version
@@ -433,10 +441,16 @@ private:
     bool checkMemoryLimit(size_t additionalBytes = 0) const;
 
     /**
-     * Normalize and validate UV coordinates
+     * Normalize and validate UV coordinates (sequential)
      * @param uvs Input/output UV coordinates
      */
     void normalizeUVCoordinates(std::vector<glm::vec2>& uvs);
+
+    /**
+     * Normalize and validate UV coordinates (parallel optimized)
+     * @param uvs Input/output UV coordinates
+     */
+    void normalizeUVCoordinatesParallel(std::vector<glm::vec2>& uvs);
 
     /**
      * Validate and fix mesh indices

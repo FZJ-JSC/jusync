@@ -212,6 +212,9 @@ public:
 
     /* status / stats */
     std::string getStatusInfo() const;
+    
+    /* internal access for C API */
+    class AnariUsdClient* getClient() const;
 
 private:
     class Impl;

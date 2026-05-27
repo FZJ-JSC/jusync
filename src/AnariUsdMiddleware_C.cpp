@@ -255,6 +255,43 @@ int RequestTotalWorkerCount_C(uint32_t* out_total_count, int timeout_ms) {
 }
 
 /**
+ * Request worker list via callback (avoids C++ ABI issues with std::vector<tuple>)
+ * Signature: int RequestWorkerListStringCallback_C(WorkerListCallback_C callback, int timeout_ms)
+ */
+int RequestWorkerListStringCallback_C(WorkerListCallback_C callback, int timeout_ms) {
+    if (!g_middleware || !callback) {
+        return 0;
+    }
+    
+    try {
+        std::vector<std::tuple<int32_t, std::string, std::string>> workerList;
+        bool success = g_middleware->requestWorkerListString(workerList, timeout_ms);
+        if (!success) {
+            return 0;
+        }
+        
+        // Convert to C arrays (stack-allocated for small lists, heap for large)
+        uint32_t count = static_cast<uint32_t>(workerList.size());
+        if (count > 1024) count = 1024; // Safety limit
+        
+        std::vector<int32_t> ranks(count);
+        std::vector<const char*> hostnames(count);
+        std::vector<const char*> ips(count);
+        
+        for (uint32_t i = 0; i < count; i++) {
+            ranks[i] = std::get<0>(workerList[i]);
+            hostnames[i] = std::get<1>(workerList[i]).c_str();
+            ips[i] = std::get<2>(workerList[i]).c_str();
+        }
+        
+        callback(count, ranks.data(), hostnames.data(), ips.data());
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
+/**
  * Request worker count EXCLUDING rank 0 (computational workers only)
  * Uses existing requestWorkerCount method
  * Signature: int RequestWorkerCountExcludingRank0_C(uint32_t* out_count, int timeout_ms)
@@ -1646,7 +1683,7 @@ void RequestFilesParallelAsync_C(
         char path[MAX_PATH];
         GetModuleFileNameA(hModule, path, MAX_PATH);
         char debugMsg[512];
-        sprintf_s(debugMsg, "=== JUSYNC DEBUG: DLL LOADED FROM: %s ===\n", path);
+        sprintf(debugMsg, "=== JUSYNC DEBUG: DLL LOADED FROM: %s ===\n", path);
         OutputDebugStringA(debugMsg);
         MIDDLEWARE_LOG_INFO("=== DLL LOADED FROM: %s ===", path);
     } else {
@@ -1657,7 +1694,7 @@ void RequestFilesParallelAsync_C(
     
     // Force log to middleware log AND debug output
     char countMsg[256];
-    sprintf_s(countMsg, "=== JUSYNC DEBUG: Filename count: %zu ===\n", filename_count);
+    sprintf(countMsg, "=== JUSYNC DEBUG: Filename count: %zu ===\n", filename_count);
     #ifdef _WIN32
     OutputDebugStringA(countMsg);
     #endif

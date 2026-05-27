@@ -9,6 +9,7 @@
 #include <chrono>
 #include <functional>
 #include <map>
+#include <limits>
 
 // Platform detection
 #if defined(_WIN32)
@@ -24,7 +25,7 @@
 
 // Safety constants
 namespace safety {
-    constexpr size_t MAX_BUFFER_SIZE = 100 * 1024 * 1024; // 100MB
+    constexpr size_t MAX_BUFFER_SIZE = static_cast<size_t>(std::numeric_limits<int64_t>::max() / 2); // Essentially unlimited (4.6EB)
     constexpr size_t MAX_STRING_SIZE = 10 * 1024 * 1024;  // 10MB
     constexpr double EPSILON = 1e-6;
 }
@@ -170,7 +171,7 @@ private:
 
     // Statistics and monitoring
     MessageStats messageStats;
-    std::atomic<size_t> maxMessageSize{10485760}; // 10MB default
+    std::atomic<size_t> maxMessageSize{static_cast<size_t>(std::numeric_limits<int64_t>::max() / 2)}; // Essentially unlimited (4.6EB)
     std::chrono::steady_clock::time_point lastHealthCheck;
 
     // Cross-platform library handles (if needed for future extensions)
