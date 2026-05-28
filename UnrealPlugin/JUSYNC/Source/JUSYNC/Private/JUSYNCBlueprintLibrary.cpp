@@ -921,7 +921,7 @@ int32 UJUSYNCBlueprintLibrary::ExtractRankFromFilename(const FString& Filename)
         {
             FString RankStr = Filename.Mid(RankStart + 2, RankEnd - (RankStart + 2));
             Rank = FCString::Atoi(*RankStr);
-            if (Rank >= 0 && Rank < 16)
+            if (Rank >= 0)
             {
                 UE_LOG(LogJUSYNC, Log, TEXT("Extracted rank %d using pattern _rX_ from: %s"), Rank, *Filename);
                 return Rank;
@@ -945,7 +945,7 @@ int32 UJUSYNCBlueprintLibrary::ExtractRankFromFilename(const FString& Filename)
         if (RankStr.IsNumeric())
         {
             Rank = FCString::Atoi(*RankStr);
-            if (Rank >= 0 && Rank < 16)
+            if (Rank >= 0)
             {
                 UE_LOG(LogJUSYNC, Log, TEXT("Extracted rank %d using pattern _X at end from: %s"), Rank, *Filename);
                 return Rank;
@@ -962,7 +962,7 @@ int32 UJUSYNCBlueprintLibrary::ExtractRankFromFilename(const FString& Filename)
         if (Parts[i].IsNumeric())
         {
             Rank = FCString::Atoi(*Parts[i]);
-            if (Rank >= 0 && Rank < 16)
+            if (Rank >= 0)
             {
                 UE_LOG(LogJUSYNC, Log, TEXT("Extracted rank %d using numeric part from: %s"), Rank, *Filename);
                 return Rank;
@@ -1860,6 +1860,36 @@ void UJUSYNCBlueprintLibrary::FilterFileListByExtensionsWithSizesAndRanks(const 
 
     UE_LOG(LogJUSYNC, Log, TEXT("FilterFileListByExtensionsWithSizesAndRanks: filtered %d files down to %d (allowed extensions: %s)"),
         FileList.Num(), OutFilteredFiles.Num(), *FString::Join(AllowedExtensions, TEXT(", ")));
+}
+
+void UJUSYNCBlueprintLibrary::ExtractGeometryClips(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<int32>& FileRanks,
+    TArray<FString>& OutFilteredFiles, TArray<int64>& OutFilteredSizes, TArray<int32>& OutFilteredRanks)
+{
+    OutFilteredFiles.Empty();
+    OutFilteredSizes.Empty();
+    OutFilteredRanks.Empty();
+
+    if (FileList.Num() != FileSizes.Num() || FileList.Num() != FileRanks.Num())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("ExtractGeometryClips: Arrays have different lengths (FileList: %d, FileSizes: %d, FileRanks: %d)"),
+            FileList.Num(), FileSizes.Num(), FileRanks.Num());
+        return;
+    }
+
+    for (int32 i = 0; i < FileList.Num(); ++i)
+    {
+        const FString& Filename = FileList[i];
+        // Only pass through per-rank geometry clip files (they live under "clips/" and are unique per rank)
+        if (Filename.StartsWith(TEXT("clips/"), ESearchCase::CaseSensitive))
+        {
+            OutFilteredFiles.Add(Filename);
+            OutFilteredSizes.Add(FileSizes[i]);
+            OutFilteredRanks.Add(FileRanks[i]);
+        }
+    }
+
+    UE_LOG(LogJUSYNC, Log, TEXT("ExtractGeometryClips: filtered %d files down to %d geometry clips"),
+        FileList.Num(), OutFilteredFiles.Num());
 }
 
 int32 UJUSYNCBlueprintLibrary::CalculateTimeoutFromFileSize(int64 FileSizeBytes, int32 BaseTimeoutMs, float BandwidthBytesPerSecond)
@@ -4555,31 +4585,17 @@ TArray<int32> UJUSYNCBlueprintLibrary::GetFallbackRanks(int32 TargetRank)
 {
     TArray<int32> Ranks;
 
-    // Add ranks from same "family" (e.g., r5, r15, r10 are related)
-    // Based on your log patterns, files exist on ranks 5, 10, 15
-    // Note: TargetRank is already added by the caller, so we don't add it here
+    // Try nearest ranks in increments based on the target rank
+    // This works for any number of workers, not just 16
+    const int32 FallbackOffsets[] = {1, 2, 3, 4, 5, -1, -2, -3, -4, -5, 0};
 
-    if (TargetRank == 5) {
-        Ranks.Add(10);
-        Ranks.Add(15);
-        Ranks.Add(0);  // Rank 0 might have files
-    }
-    else if (TargetRank == 10) {
-        Ranks.Add(5);
-        Ranks.Add(15);
-        Ranks.Add(0);
-    }
-    else if (TargetRank == 15) {
-        Ranks.Add(5);
-        Ranks.Add(10);
-        Ranks.Add(0);
-    }
-    else {
-        // For other ranks, try common ranks (excluding the target rank)
-        if (TargetRank != 5) Ranks.Add(5);
-        if (TargetRank != 10) Ranks.Add(10);
-        if (TargetRank != 15) Ranks.Add(15);
-        if (TargetRank != 0) Ranks.Add(0);
+    for (int32 Offset : FallbackOffsets)
+    {
+        int32 Candidate = TargetRank + Offset;
+        if (Candidate >= 0 && Candidate != TargetRank && !Ranks.Contains(Candidate))
+        {
+            Ranks.Add(Candidate);
+        }
     }
 
     return Ranks;

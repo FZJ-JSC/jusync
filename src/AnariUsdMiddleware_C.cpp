@@ -1735,16 +1735,24 @@ void RequestFilesParallelAsync_C(
         return;
     }
     
-    // Convert C arrays to C++ vectors
+    // Convert C arrays to C++ vectors with deduplication (unique filenames only)
+    // The same file filename from different ranks will only be requested once (from the first rank it appears)
+    std::map<std::string, int32_t> uniqueFiles;
     std::vector<std::string> filename_vec;
     std::vector<int32_t> target_ranks_vec;
-    
-    filename_vec.reserve(filename_count);
-    target_ranks_vec.reserve(filename_count);
-    
+
     for (size_t i = 0; i < filename_count; i++) {
-        filename_vec.push_back(filenames[i] ? filenames[i] : "");
-        target_ranks_vec.push_back(target_ranks[i]);
+        std::string fname = filenames[i] ? filenames[i] : "";
+        if (fname.empty()) continue;
+        if (uniqueFiles.find(fname) == uniqueFiles.end()) {
+            uniqueFiles[fname] = target_ranks[i];
+            filename_vec.push_back(fname);
+            target_ranks_vec.push_back(target_ranks[i]);
+        }
+    }
+    if (filename_vec.size() < filename_count) {
+        MIDDLEWARE_LOG_INFO("Parallel download deduplication: %zu → %zu files (removed %zu duplicates)",
+            filename_count, filename_vec.size(), filename_count - filename_vec.size());
     }
     
     // Convert C callbacks to C++ callbacks

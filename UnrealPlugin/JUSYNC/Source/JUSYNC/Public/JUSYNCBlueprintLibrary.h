@@ -334,6 +334,12 @@ public:
     static void FilterFileListByExtensionsWithSizesAndRanks(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<int32>& FileRanks,
         const TArray<FString>& AllowedExtensions, TArray<FString>& OutFilteredFiles, TArray<int64>& OutFilteredSizes, TArray<int32>& OutFilteredRanks);
 
+    // ========== GEOMETRY CLIP FILTER ==========
+    // Strips all shared files (manifests, materials, camera, textures) and only returns per-rank geometry clips under "clips/"
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Validation", DisplayName = "Extract Geometry Clips Only")
+    static void ExtractGeometryClips(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<int32>& FileRanks,
+        TArray<FString>& OutFilteredFiles, TArray<int64>& OutFilteredSizes, TArray<int32>& OutFilteredRanks);
+
     UFUNCTION(BlueprintPure, Category = "JUSYNC|Utilities", DisplayName = "Calculate Timeout From File Size")
     static int32 CalculateTimeoutFromFileSize(int64 FileSizeBytes, int32 BaseTimeoutMs = 1000, float BandwidthBytesPerSecond = 1000000.0f);
 
