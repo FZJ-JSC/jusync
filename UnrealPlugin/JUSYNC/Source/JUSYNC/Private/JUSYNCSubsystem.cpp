@@ -2509,7 +2509,7 @@ bool UJUSYNCSubsystem::IsBrokerConnected() const
 
 bool UJUSYNCSubsystem::RequestFileList(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles)
 {
-    FScopeLock Lock(&MiddlewareMutex);
+    // ✅ FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
     UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING FILE LIST FROM BROKER ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Target Rank: %d"), TargetRank);
@@ -2569,7 +2569,7 @@ bool UJUSYNCSubsystem::RequestFileList(int32 TargetRank, int32 TimeoutMs, TArray
 
 bool UJUSYNCSubsystem::RequestFileListWithSizes(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles, TArray<int64>& OutSizes)
 {
-    FScopeLock Lock(&MiddlewareMutex);
+    // ✅ FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
     // For broadcast requests (target_rank = -1), dynamically determine worker count
     int32 AdjustedTimeoutMs = TimeoutMs;
@@ -2667,7 +2667,7 @@ bool UJUSYNCSubsystem::RequestFileListWithSizes(int32 TargetRank, int32 TimeoutM
 
 bool UJUSYNCSubsystem::RequestFileListWithSizesAndRanks(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles, TArray<int64>& OutSizes, TArray<int32>& OutRanks)
 {
-    FScopeLock Lock(&MiddlewareMutex);
+    // ✅ FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
     // For broadcast requests (target_rank = -1), dynamically determine worker count
     int32 AdjustedTimeoutMs = TimeoutMs;
@@ -2769,7 +2769,7 @@ bool UJUSYNCSubsystem::RequestFileListWithSizesAndRanks(int32 TargetRank, int32 
 
 bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, int32 TimeoutMs, TArray<uint8>& OutData)
 {
-    FScopeLock Lock(&MiddlewareMutex);
+    // ✅ FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
     if (Filename.IsEmpty())
     {
@@ -2876,7 +2876,7 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
 
 bool UJUSYNCSubsystem::RequestFilesParallel(const TArray<FString>& Filenames, const TArray<int32>& TargetRanks, int32 TimeoutMs, TArray<FJUSYNCFileData>& OutFiles)
 {
-    FScopeLock Lock(&MiddlewareMutex);
+    // ✅ FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
     if (Filenames.Num() == 0)
     {
@@ -3087,7 +3087,7 @@ bool UJUSYNCSubsystem::RequestFilesParallel(const TArray<FString>& Filenames, co
 
 bool UJUSYNCSubsystem::RequestFrame(int32 FrameNumber, int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCFileData>& OutFiles)
 {
-    FScopeLock Lock(&MiddlewareMutex);
+    // ✅ FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
     UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING FRAME FROM BROKER ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Frame Number: %d"), FrameNumber);
@@ -3156,7 +3156,7 @@ bool UJUSYNCSubsystem::RequestFrame(int32 FrameNumber, int32 TargetRank, int32 T
 
 bool UJUSYNCSubsystem::RequestWorkerStatus(int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCWorkerStatus>& OutWorkerStatus)
 {
-    FScopeLock Lock(&MiddlewareMutex);
+    // ✅ FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
     UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING WORKER STATUS FROM BROKER ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Target Rank: %d"), TargetRank);
@@ -3210,7 +3210,7 @@ bool UJUSYNCSubsystem::RequestWorkerStatus(int32 TargetRank, int32 TimeoutMs, TA
 
 bool UJUSYNCSubsystem::RequestWorkerCount(int32 TimeoutMs, int32& OutWorkerCount)
 {
-    FScopeLock Lock(&MiddlewareMutex);
+    // ✅ FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
     UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING WORKER COUNT FROM BROKER ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Timeout: %d ms"), TimeoutMs);
@@ -3250,7 +3250,7 @@ bool UJUSYNCSubsystem::RequestWorkerCount(int32 TimeoutMs, int32& OutWorkerCount
 
 bool UJUSYNCSubsystem::RequestTotalWorkerCount(int32 TimeoutMs, int32& OutTotalCount)
 {
-    FScopeLock Lock(&MiddlewareMutex);
+    // ✅ FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
     UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING TOTAL WORKER COUNT (INCLUDING RANK 0) ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Timeout: %d ms"), TimeoutMs);
@@ -3292,7 +3292,7 @@ bool UJUSYNCSubsystem::RequestTotalWorkerCount(int32 TimeoutMs, int32& OutTotalC
 
 bool UJUSYNCSubsystem::RequestWorkerCountExcludingRank0(int32 TimeoutMs, int32& OutWorkerCount)
 {
-    FScopeLock Lock(&MiddlewareMutex);
+    // ✅ FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
     UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING WORKER COUNT (EXCLUDING RANK 0) ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Timeout: %d ms"), TimeoutMs);

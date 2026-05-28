@@ -36,7 +36,7 @@ class AnariUsdMiddleware::Impl {
 public:
     // Core components
     ZmqConnector zmqConnector;
-    std::unique_ptr<AnariUsdClient> anariUsdClient;  // ✅ NEW: ANARI USD DEALER client
+    std::shared_ptr<AnariUsdClient> anariUsdClient;  // ✅ FIX: shared_ptr for safe capture in async threads
     std::unique_ptr<UsdProcessor> usdProcessor;
     std::unique_ptr<CollisionProcessor> collisionProcessor;  // ✅ NEW: Collision processor
 
@@ -50,6 +50,9 @@ public:
     std::thread receiverThread;
     std::atomic<bool> running{false};
     std::atomic<bool> shutdownRequested{false};
+    // ✅ FIX: Track async background threads to prevent use-after-free on destruction
+    std::vector<std::thread> asyncThreads;
+    std::mutex asyncThreadsMutex;
 
     // Initialization
     std::mutex initMutex;
@@ -75,8 +78,20 @@ public:
 
     ~Impl() {
         MIDDLEWARE_LOG_INFO("AnariUsdMiddleware::Impl destroyed");
+        shutdownRequested.store(true);
         stopReceiving();
         zmqConnector.disconnect();
+        // ✅ FIX: Join tracked async threads with timeout, detach any remaining
+        {
+            std::lock_guard<std::mutex> lock(asyncThreadsMutex);
+            for (auto& t : asyncThreads) {
+                if (t.joinable()) {
+                    t.detach();
+                }
+            }
+            asyncThreads.clear();
+        }
+        MIDDLEWARE_LOG_INFO("AnariUsdMiddleware::Impl cleanup complete");
     }
 
     bool initialize(const char* endpoint) {
@@ -135,6 +150,18 @@ public:
         MIDDLEWARE_LOG_INFO("Shutting down AnariUsdMiddleware with collision support...");
         shutdownRequested.store(true);
         stopReceiving();
+
+        // ✅ FIX: Signal shutdown first, then detach tracked async threads (they check shutdownRequested)
+        {
+            std::lock_guard<std::mutex> athrLock(asyncThreadsMutex);
+            for (auto& t : asyncThreads) {
+                if (t.joinable()) {
+                    t.detach();
+                }
+            }
+            asyncThreads.clear();
+            MIDDLEWARE_LOG_INFO("Detached %d async threads during shutdown", asyncThreads.size());
+        }
 
         std::lock_guard<std::mutex> lock(initMutex);
         try {
@@ -1053,7 +1080,7 @@ bool AnariUsdMiddleware::GetGradientLineAsPNGBuffer(const std::vector<uint8_t>& 
 // ✅ NEW: ANARI USD DEALER client methods
 bool AnariUsdMiddleware::connectToBroker(const char* brokerEndpoint, int timeoutMs) {
     if (!pImpl->anariUsdClient) {
-        pImpl->anariUsdClient = std::make_unique<AnariUsdClient>();
+        pImpl->anariUsdClient = std::make_shared<AnariUsdClient>();
     }
     return pImpl->anariUsdClient->connect(brokerEndpoint, timeoutMs);
 }
@@ -1213,23 +1240,29 @@ void AnariUsdMiddleware::requestWorkerCountAsync(int timeoutMs, WorkerCountCallb
         return;
     }
     
-    // Launch async request on background thread
-    std::thread([this, timeoutMs, callback, errorCallback]() {
+    // ✅ FIX: Use shared_ptr for lifetime safety, track thread to prevent use-after-free
+    auto client = pImpl->anariUsdClient;
+    std::thread t([client, timeoutMs, callback, errorCallback]() {
+        if (!client || client->isShutdownRequested()) return;
         uint32_t workerCount = 0;
-        bool success = pImpl->anariUsdClient->getWorkerCountSync(workerCount, timeoutMs);
+        bool success = client->getWorkerCountSync(workerCount, timeoutMs);
         
         if (success && callback) {
             callback(workerCount);
         } else {
-            // Fallback to 0 workers on failure (non-MPI mode)
             MIDDLEWARE_LOG_WARNING("Failed to get worker count from broker - returning default count of 0 (non-MPI fallback)");
             if (callback) {
-                callback(0);  // Fallback: 0 workers (excluding rank 0)
+                callback(0);
             } else if (errorCallback) {
                 errorCallback("Failed to retrieve worker count - using fallback value of 0");
             }
         }
-    }).detach();
+    });
+    // Track thread for safe shutdown
+    {
+        std::lock_guard<std::mutex> lock(pImpl->asyncThreadsMutex);
+        pImpl->asyncThreads.push_back(std::move(t));
+    }
 }
 
 void AnariUsdMiddleware::requestTotalWorkerCountAsync(int timeoutMs, WorkerCountCallback callback, BrokerErrorCallback errorCallback) {
@@ -1242,23 +1275,28 @@ void AnariUsdMiddleware::requestTotalWorkerCountAsync(int timeoutMs, WorkerCount
         return;
     }
     
-    // Launch async request on background thread
-    std::thread([this, timeoutMs, callback, errorCallback]() {
+    // ✅ FIX: Use shared_ptr for lifetime safety, track thread to prevent use-after-free
+    auto client = pImpl->anariUsdClient;
+    std::thread t([client, timeoutMs, callback, errorCallback]() {
+        if (!client || client->isShutdownRequested()) return;
         uint32_t totalCount = 0;
-        bool success = pImpl->anariUsdClient->getTotalWorkerCountSync(totalCount, timeoutMs);
+        bool success = client->getTotalWorkerCountSync(totalCount, timeoutMs);
         
         if (success && callback) {
             callback(totalCount);
         } else {
-            // Fallback to 1 worker on failure (non-MPI mode)
             MIDDLEWARE_LOG_WARNING("Failed to get total worker count from broker - returning default count of 1 (non-MPI fallback)");
             if (callback) {
-                callback(1);  // Fallback: 1 worker (rank 0)
+                callback(1);
             } else if (errorCallback) {
                 errorCallback("Failed to retrieve total worker count - using fallback value of 1");
             }
         }
-    }).detach();
+    });
+    {
+        std::lock_guard<std::mutex> lock(pImpl->asyncThreadsMutex);
+        pImpl->asyncThreads.push_back(std::move(t));
+    }
 }
 
 void AnariUsdMiddleware::requestWorkerStatusAsync(int32_t targetRank, int timeoutMs, WorkerStatusCallback callback, BrokerErrorCallback errorCallback) {
@@ -1270,17 +1308,23 @@ void AnariUsdMiddleware::requestWorkerStatusAsync(int32_t targetRank, int timeou
         return;
     }
     
-    // Launch async request on background thread
-    std::thread([this, targetRank, timeoutMs, callback, errorCallback]() {
+    // ✅ FIX: Use shared_ptr for lifetime safety, track thread to prevent use-after-free
+    auto client = pImpl->anariUsdClient;
+    std::thread t([client, targetRank, timeoutMs, callback, errorCallback]() {
+        if (!client || client->isShutdownRequested()) return;
         std::vector<std::tuple<int32_t, uint32_t, std::string, std::string, uint64_t>> workerStatus;
-        bool success = pImpl->anariUsdClient->getWorkerStatusSync(targetRank, workerStatus, timeoutMs);
+        bool success = client->getWorkerStatusSync(targetRank, workerStatus, timeoutMs);
         
         if (success && callback) {
             callback(workerStatus);
         } else if (errorCallback) {
             errorCallback(success ? "Unknown error" : "Failed to retrieve worker status");
         }
-    }).detach();
+    });
+    {
+        std::lock_guard<std::mutex> lock(pImpl->asyncThreadsMutex);
+        pImpl->asyncThreads.push_back(std::move(t));
+    }
 }
 
 void AnariUsdMiddleware::requestFileListAsync(int32_t targetRank, int timeoutMs, FileListCallback callback, BrokerErrorCallback errorCallback) {
@@ -1292,17 +1336,23 @@ void AnariUsdMiddleware::requestFileListAsync(int32_t targetRank, int timeoutMs,
         return;
     }
     
-    // Launch async request on background thread
-    std::thread([this, targetRank, timeoutMs, callback, errorCallback]() {
+    // ✅ FIX: Use shared_ptr for lifetime safety, track thread to prevent use-after-free
+    auto client = pImpl->anariUsdClient;
+    std::thread t([client, targetRank, timeoutMs, callback, errorCallback]() {
+        if (!client || client->isShutdownRequested()) return;
         std::vector<std::string> files;
-        bool success = pImpl->anariUsdClient->getFileListSync(targetRank, files, timeoutMs);
+        bool success = client->getFileListSync(targetRank, files, timeoutMs);
         
         if (success && callback) {
             callback(files);
         } else if (errorCallback) {
             errorCallback(success ? "Unknown error" : "Failed to retrieve file list");
         }
-    }).detach();
+    });
+    {
+        std::lock_guard<std::mutex> lock(pImpl->asyncThreadsMutex);
+        pImpl->asyncThreads.push_back(std::move(t));
+    }
 }
 
 void AnariUsdMiddleware::requestFileListWithSizesAsync(int32_t targetRank, int timeoutMs, FileListWithSizesCallback callback, BrokerErrorCallback errorCallback) {
@@ -1314,17 +1364,23 @@ void AnariUsdMiddleware::requestFileListWithSizesAsync(int32_t targetRank, int t
         return;
     }
     
-    // Launch async request on background thread
-    std::thread([this, targetRank, timeoutMs, callback, errorCallback]() {
+    // ✅ FIX: Use shared_ptr for lifetime safety, track thread to prevent use-after-free
+    auto client = pImpl->anariUsdClient;
+    std::thread t([client, targetRank, timeoutMs, callback, errorCallback]() {
+        if (!client || client->isShutdownRequested()) return;
         std::vector<FileInfo> files;
-        bool success = pImpl->anariUsdClient->getFileListWithSizesSync(targetRank, files, timeoutMs);
+        bool success = client->getFileListWithSizesSync(targetRank, files, timeoutMs);
         
         if (success && callback) {
             callback(files);
         } else if (errorCallback) {
             errorCallback(success ? "Unknown error" : "Failed to retrieve file list");
         }
-    }).detach();
+    });
+    {
+        std::lock_guard<std::mutex> lock(pImpl->asyncThreadsMutex);
+        pImpl->asyncThreads.push_back(std::move(t));
+    }
 }
 
 void AnariUsdMiddleware::requestFilesParallelAsync(
@@ -1388,10 +1444,15 @@ void AnariUsdMiddleware::requestFilesParallelAsync(
         return;
     }
     
-    // Launch async request on background thread
-    std::thread([this, filenames, targetRanks, timeoutMs, fileReceivedCallback, completionCallback, errorCallback]() {
+    // ✅ FIX: Use shared_ptr for lifetime safety, track thread to prevent use-after-free
+    auto client = pImpl->anariUsdClient;
+    std::thread t([client, filenames, targetRanks, timeoutMs, fileReceivedCallback, completionCallback, errorCallback]() {
         try {
-            bool success = pImpl->anariUsdClient->requestFilesParallel(
+             if (!client || client->isShutdownRequested()) {
+                if (errorCallback) errorCallback("", "Middleware shutting down");
+                return;
+            }
+            bool success = client->requestFilesParallel(
                 filenames,
                 targetRanks,
                 fileReceivedCallback,
@@ -1413,7 +1474,11 @@ void AnariUsdMiddleware::requestFilesParallelAsync(
                 errorCallback("", "Unknown exception in parallel download");
             }
         }
-    }).detach();
+    });
+    {
+        std::lock_guard<std::mutex> lock(pImpl->asyncThreadsMutex);
+        pImpl->asyncThreads.push_back(std::move(t));
+    }
 }
 
 bool AnariUsdMiddleware::requestWorkerListString(std::vector<std::tuple<int32_t, std::string, std::string>>& outWorkers, int timeoutMs) {

@@ -169,6 +169,7 @@ private:
     
     // Worker thread
     std::thread pollThread_;
+    std::thread streamingThread_;
     std::atomic<bool> running_{false};
     
     // Private methods

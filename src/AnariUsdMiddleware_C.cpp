@@ -359,8 +359,6 @@ int RequestFileListWithSizes_C(int32_t target_rank, char*** out_names, uint64_t*
         return 0;
     }
     
-    std::lock_guard<std::mutex> lock(g_middleware_mutex);
-    
     try {
         std::vector<anari_usd_middleware::FileInfo> files;
         if (!g_middleware->requestFileListWithSizes(target_rank, files, timeout_ms)) {
@@ -404,8 +402,6 @@ int RequestFileListWithSizesAndRanks_C(int32_t target_rank, char*** out_names, u
     if (!g_middleware || !out_names || !out_sizes || !out_ranks || !out_count) {
         return 0;
     }
-    
-    std::lock_guard<std::mutex> lock(g_middleware_mutex);
     
     try {
         std::vector<anari_usd_middleware::FileInfo> files;
@@ -451,12 +447,10 @@ int RequestFileListWithSizesAndRanks_C(int32_t target_rank, char*** out_names, u
  * Request a specific file from a rank
  */
 int RequestFile_C(const char* filename, int32_t target_rank,
-                  unsigned char** out_data, size_t* out_size, int timeout_ms) {
+                   unsigned char** out_data, size_t* out_size, int timeout_ms) {
     if (!g_middleware || !filename || !out_data || !out_size) {
         return 0;
     }
-    
-    std::lock_guard<std::mutex> lock(g_middleware_mutex);
     
     try {
         std::vector<uint8_t> fileData;
@@ -1541,8 +1535,12 @@ void RequestTotalWorkerCountAsync_C(
         return;
     }
     
-    // Launch async request on background thread
+    // Launch async request on background thread - with null check for safe shutdown
     std::thread([callback, error_callback, timeout_ms]() {
+        if (!g_middleware) {
+            if (error_callback) error_callback("Middleware shut down");
+            return;
+        }
         uint32_t total_count = 0;
         bool success = g_middleware->requestTotalWorkerCount(total_count, timeout_ms);
         
@@ -1569,8 +1567,12 @@ void RequestWorkerCountAsync_C(
         return;
     }
     
-    // Launch async request on background thread
+    // Launch async request on background thread - with null check for safe shutdown
     std::thread([callback, error_callback, timeout_ms]() {
+        if (!g_middleware) {
+            if (error_callback) error_callback("Middleware shut down");
+            return;
+        }
         uint32_t worker_count = 0;
         bool success = g_middleware->requestWorkerCount(worker_count, timeout_ms);
         
@@ -1598,8 +1600,12 @@ void RequestWorkerStatusAsync_C(
         return;
     }
     
-    // Launch async request on background thread
+    // Launch async request on background thread - with null check for safe shutdown
     std::thread([target_rank, callback, error_callback, timeout_ms]() {
+        if (!g_middleware) {
+            if (error_callback) error_callback("Middleware shut down");
+            return;
+        }
         std::vector<std::tuple<int32_t, uint32_t, std::string, std::string, uint64_t>> worker_status;
         bool success = g_middleware->requestWorkerStatus(target_rank, worker_status, timeout_ms);
         
@@ -1636,8 +1642,12 @@ void RequestFileListAsync_C(
         return;
     }
     
-    // Launch async request on background thread
+    // Launch async request on background thread - with null check for safe shutdown
     std::thread([target_rank, callback, error_callback, timeout_ms]() {
+        if (!g_middleware) {
+            if (error_callback) error_callback("Middleware shut down");
+            return;
+        }
         std::vector<std::string> files;
         bool success = g_middleware->requestFileList(target_rank, files, timeout_ms);
         

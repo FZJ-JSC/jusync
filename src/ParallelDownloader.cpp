@@ -20,6 +20,10 @@ ParallelDownloader::ParallelDownloader(std::shared_ptr<AnariUsdClient> client)
 ParallelDownloader::~ParallelDownloader() {
     cancelAll();
     stopPollThread();
+    // ✅ FIX: Join streaming thread for safe shutdown
+    if (streamingThread_.joinable()) {
+        streamingThread_.join();
+    }
     MIDDLEWARE_LOG_INFO("ParallelDownloader destroyed");
 }
 
@@ -56,7 +60,8 @@ ParallelDownloader::downloadFiles(const std::vector<std::string>& files,
     }
     
     // Create tasks
-    std::vector<std::unique_ptr<DownloadTask>> tasks;
+    // ✅ FIX: Use shared_ptr vector instead of raw unique_ptr vector to prevent dangling references
+    std::shared_ptr<std::vector<std::unique_ptr<DownloadTask>>> tasks = std::make_shared<std::vector<std::unique_ptr<DownloadTask>>>();
     std::vector<std::future<DownloadResult>> futures;
     
     for (const auto& file : files) {
@@ -67,7 +72,7 @@ ParallelDownloader::downloadFiles(const std::vector<std::string>& files,
         task->startTime = std::chrono::steady_clock::now();
         
         futures.push_back(task->promise.get_future());
-        tasks.push_back(std::move(task));
+        tasks->push_back(std::move(task));
     }
     
     // Start downloads with limited parallelism
@@ -78,17 +83,17 @@ ParallelDownloader::downloadFiles(const std::vector<std::string>& files,
     while (completed < files.size()) {
         // Start new downloads if we have capacity
         while (started - completed < actualMaxParallel && started < files.size()) {
-            auto& task = tasks[started];
+            auto& task = (*tasks)[started];
             
             uint32_t requestId = client_->requestFileAsync(
                 task->filename,
                 task->targetRank,
-                [this, started, &tasks](const std::string& filename,
+                [this, started, tasks](const std::string& filename,
                                        const std::vector<uint8_t>& chunk,
                                        uint64_t offset,
                                        uint64_t totalSize) {
                     // Store chunk data
-                    auto& task = tasks[started];
+                    auto& task = (*tasks)[started];
                     if (task->result.data.size() < offset + chunk.size()) {
                         task->result.data.resize(offset + chunk.size());
                     }
@@ -106,8 +111,8 @@ ParallelDownloader::downloadFiles(const std::vector<std::string>& files,
                                          task->totalSize, activeDownloads_.load());
                     }
                 },
-                [this, started, &tasks](const std::string& filename, uint64_t totalSize) {
-                    auto& task = tasks[started];
+                [this, started, tasks](const std::string& filename, uint64_t totalSize) {
+                    auto& task = (*tasks)[started];
                     task->completed = true;
                     task->result.success = true;
                     task->result.size = totalSize;
@@ -134,8 +139,8 @@ ParallelDownloader::downloadFiles(const std::vector<std::string>& files,
                     MIDDLEWARE_LOG_DEBUG("File download completed: %s (%llu bytes)",
                                         filename.c_str(), totalSize);
                 },
-                [this, started, &tasks](const std::string& error) {
-                    auto& task = tasks[started];
+                [this, started, tasks](const std::string& error) {
+                    auto& task = (*tasks)[started];
                     task->completed = true;
                     task->result.success = false;
                     task->result.error = error;
@@ -181,7 +186,7 @@ ParallelDownloader::downloadFiles(const std::vector<std::string>& files,
         
         // Check for completed tasks
         for (size_t i = 0; i < started; i++) {
-            if (tasks[i]->completed) {
+            if ((*tasks)[i]->completed) {
                 completed++;
             }
         }
@@ -223,10 +228,16 @@ void ParallelDownloader::downloadFilesAsync(const std::vector<std::string>& file
         startPollThread();
     }
     
-    // Start downloads in background thread
-    std::thread([this, files, targetRank, maxParallel, timeoutMs]() {
+    // Start downloads in background thread - tracked for safe shutdown
+    std::thread downloadThread([this, files, targetRank, maxParallel, timeoutMs]() {
         downloadFiles(files, targetRank, maxParallel, timeoutMs);
-    }).detach();
+    });
+    
+    // If there's an existing download worker, join it first
+    if (streamingThread_.joinable()) {
+        streamingThread_.detach(); // Let old worker finish on its own
+    }
+    streamingThread_ = std::move(downloadThread);
 }
 
 void ParallelDownloader::cancelAll() {
@@ -580,8 +591,8 @@ void ParallelDownloader::downloadWithStreaming(const std::vector<std::string>& f
         }
     });
     
-    // Detach thread - it will clean up itself
-    streamingThread.detach();
+    // ✅ FIX: Track streaming thread for safe shutdown instead of .detach()
+    streamingThread_ = std::move(streamingThread);
 }
 
 } // namespace anari_usd_middleware

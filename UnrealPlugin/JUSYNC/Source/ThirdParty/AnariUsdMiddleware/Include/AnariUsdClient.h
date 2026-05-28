@@ -12,6 +12,9 @@
 #include <chrono>
 #include <functional>
 #include <map>
+#include <queue>
+#include <condition_variable>
+#include <thread>
 
 // Platform detection
 #if defined(_WIN32)
@@ -117,6 +120,7 @@ public:
     void disconnect(int gracefulTimeoutMs = 1000);
     bool isConnected() const;
     ConnectionStatus getConnectionStatus() const;
+    bool isShutdownRequested() const { return shutdownRequested.load(); }
 
     // File request methods
     bool requestFileList(int32_t targetRank, FileListCallback callback, int timeoutMs = 10000);
@@ -227,9 +231,29 @@ private:
     mutable std::mutex connectionMutex;
     mutable std::recursive_mutex requestMutex;
 
+    // Serialize ALL recv operations on the ZMQ DEALER socket.
+    // ZMQ is NOT safe for concurrent recv on the same socket.
+    mutable std::mutex recvMutex;
+
     // Request tracking
     std::atomic<uint32_t> nextRequestId{1};
     std::map<uint32_t, bool> pendingRequests;
+
+    // Out-of-order response queue for multi-threaded safety.
+    // A dedicated dispatcher thread continuously pulls frames from the ZMQ
+    // socket and enqueues them here.  Request threads never call recv() —
+    // they only dequeue from this queue, making the receive path truly async.
+    mutable std::mutex responseQueueMutex;
+    std::condition_variable responseQueueCv;
+    std::queue<std::shared_ptr<std::pair<std::vector<uint8_t>, /*delimiterFrame*/ std::vector<uint8_t>/*dataFrame*/>>> responseQueue;
+
+    // Dispatcher thread — owns ALL ZMQ recv operations.
+    std::thread dispatchThread;
+    std::atomic<bool> dispatcherActive{false};
+private:
+    // Dedicated background dispatcher: continuously polls the ZMQ socket
+    // and enqueues every incoming frame pair into responseQueue.
+    void dispatcherThread();
 
     // Statistics and monitoring
     ConnectionStats connectionStats;
@@ -238,6 +262,26 @@ private:
 
     // Default chunk size for file requests
     static constexpr uint32_t DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024; // 4MB
+
+private:
+    // Extract request_id from a data frame (first 4 bytes = magic, next 4 = type, next 4 = request_id)
+    uint32_t extractRequestId(const uint8_t* data, size_t dataSize) const;
+
+    // Enqueue a frame pair into the response queue and wake waiters.
+    // Only called by the dispatcher thread.
+    void enqueueResponseFrame(const std::vector<uint8_t>& delimiter,
+                              const std::vector<uint8_t>& data);
+
+    // Wait for a matching message pair for the given request_id.
+    // Blocks until a matching frame arrives or timeout expires.
+    bool waitForMatchingFrames(uint32_t requestId, int timeoutMs,
+                               std::vector<uint8_t>& outDelimiter,
+                               std::vector<uint8_t>& outData);
+
+    // Attempt to dequeue a matching message (non-blocking).
+    bool tryDequeueMatching(uint32_t requestId,
+                            std::vector<uint8_t>& outDelimiter,
+                            std::vector<uint8_t>& outData);
 };
 
 } // namespace anari_usd_middleware

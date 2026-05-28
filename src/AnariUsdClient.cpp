@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <thread>
 #include <future>
+#include <queue>
 #include "../../external/nlohmann/single_include/nlohmann/json.hpp"
 
 #ifdef _WIN32
@@ -104,6 +105,10 @@ bool AnariUsdClient::connect(const char* brokerEndpoint, int timeoutMs) {
 
         // Mark as connected
         connectionStatus.store(ConnectionStatus::Connected);
+
+        // Start background dispatcher thread
+        dispatcherActive.store(true);
+        dispatchThread = std::thread(&AnariUsdClient::dispatcherThread, this);
 
         MIDDLEWARE_LOG_INFO("AnariUsdClient connected successfully");
         return true;
@@ -271,99 +276,64 @@ bool AnariUsdClient::requestFileList(int32_t targetRank, FileListCallback callba
         
         MIDDLEWARE_LOG_INFO("DEBUG: File list request sent successfully, waiting for response...");
 
-        // Wait for response
-        if (!waitForResponse(request.request_id, timeoutMs)) {
+        // Receive file list response — FILTER BY request_id
+        uint32_t myRequestId = request.request_id;
+        size_t headerSize = sizeof(ZmqFileChunk);
+
+        // Receive chunk header + JSON
+        std::vector<uint8_t> dummyDelim1, dataFrame1;
+        if (!waitForMatchingFrames(myRequestId, timeoutMs, dummyDelim1, dataFrame1)) {
             MIDDLEWARE_LOG_ERROR("Timeout waiting for file list response");
             return false;
         }
 
-        // Receive file list response as combined ZmqFileChunk + JSON data (single message)
-        // HPC broker sends: ZmqFileChunk header (292 bytes) + JSON data combined in single message
-        size_t headerSize = sizeof(ZmqFileChunk);
-        
-        // Receive the entire combined message (header + JSON) in one ZeroMQ message
-        // We need to receive without knowing the exact size first
-        
-        // Receive empty delimiter frame (zero-length)
-        zmq::message_t emptyDelimiter;
-        auto delimResult = zmqSocket->recv(emptyDelimiter, zmq::recv_flags::none);
-        if (!delimResult) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive empty delimiter");
+        if (dataFrame1.size() < headerSize) {
+            MIDDLEWARE_LOG_ERROR("File list response too small: %zu bytes (expected at least %zu)",
+                                dataFrame1.size(), headerSize);
             return false;
-        }
-        if (delimResult.value() != 0) {
-            MIDDLEWARE_LOG_WARNING("Empty delimiter frame has non-zero size: %zu", delimResult.value());
         }
 
-        // Receive the combined header+data ZeroMQ message
-        zmq::message_t msg;
-        auto result = zmqSocket->recv(msg, zmq::recv_flags::none);
-        
-        if (!result) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive file list response");
-            return false;
-        }
-        
-        size_t totalSize = result.value();
-        MIDDLEWARE_LOG_INFO("Received file list response: %zu bytes total", totalSize);
-        
-        // Check minimum size (header)
-        if (totalSize < headerSize) {
-            MIDDLEWARE_LOG_ERROR("File list response too small: %zu bytes (expected at least %zu)", 
-                                totalSize, headerSize);
-            return false;
-        }
-        
-        // Parse header from first part of message
-        const uint8_t* msgData = static_cast<const uint8_t*>(msg.data());
-        const ZmqFileChunk* chunk = reinterpret_cast<const ZmqFileChunk*>(msgData);
-        
-        // Validate response
+        const uint8_t* chunkData = dataFrame1.data();
+        const ZmqFileChunk* chunk = reinterpret_cast<const ZmqFileChunk*>(chunkData);
+
         if (!MessageUtils::isValidMagic(chunk->magic)) {
             MIDDLEWARE_LOG_ERROR("Invalid magic number in file list response");
             return false;
         }
 
         if (chunk->message_type != static_cast<uint32_t>(ZmqMessageType::RESP_FILE_CHUNK)) {
-            MIDDLEWARE_LOG_ERROR("Unexpected message type in file list response: %u (expected RESP_FILE_CHUNK=201)", 
+            MIDDLEWARE_LOG_ERROR("Unexpected message type in file list response: %u (expected RESP_FILE_CHUNK=201)",
                                 chunk->message_type);
             return false;
         }
 
-        // Check if this is a file list response (filename should be "filelist.json")
         std::string filename = chunk->getFilename();
         if (filename != "filelist.json") {
             MIDDLEWARE_LOG_WARNING("File list response has unexpected filename: %s", filename.c_str());
         }
 
-        MIDDLEWARE_LOG_INFO("Received file list chunk header: %llu bytes from rank %d, chunk size: %u", 
+        MIDDLEWARE_LOG_INFO("Received file list chunk header: %llu bytes from rank %d, chunk size: %u",
                             chunk->file_size, chunk->source_rank, chunk->chunk_size);
-        
-        // Extract JSON data from remaining part of message
+
         std::vector<uint8_t> jsonData;
         if (chunk->chunk_size > 0) {
-            // Check if we have enough data
             size_t expectedTotalSize = headerSize + chunk->chunk_size;
-            if (totalSize < expectedTotalSize) {
-                MIDDLEWARE_LOG_ERROR("Incomplete file list response: got %zu bytes, expected %zu", 
-                                    totalSize, expectedTotalSize);
+            if (dataFrame1.size() < expectedTotalSize) {
+                MIDDLEWARE_LOG_ERROR("Incomplete file list response: got %zu bytes, expected %zu",
+                                    dataFrame1.size(), expectedTotalSize);
                 return false;
             }
-            
-            // Copy JSON data from message
-            jsonData.assign(msgData + headerSize, msgData + headerSize + chunk->chunk_size);
+            jsonData.assign(chunkData + headerSize, chunkData + headerSize + chunk->chunk_size);
             MIDDLEWARE_LOG_INFO("Extracted JSON data: %zu bytes", jsonData.size());
         } else {
             MIDDLEWARE_LOG_WARNING("File list response has zero chunk size");
         }
 
-        // Parse JSON
         std::vector<std::string> files;
         try {
             std::string jsonStr(reinterpret_cast<const char*>(jsonData.data()), jsonData.size());
             auto json = json::parse(jsonStr);
-            
-            // Check JSON structure: {"rank": X, "files": [{"name": "...", "size": N, "mime": "..."}, ...]}
+
             if (json.contains("files") && json["files"].is_array()) {
                 for (const auto& fileObj : json["files"]) {
                     if (fileObj.contains("name") && fileObj["name"].is_string()) {
@@ -374,36 +344,23 @@ bool AnariUsdClient::requestFileList(int32_t targetRank, FileListCallback callba
                     }
                 }
             }
-            
+
             MIDDLEWARE_LOG_INFO("Parsed %zu files from JSON file list", files.size());
         } catch (const std::exception& e) {
             MIDDLEWARE_LOG_ERROR("Failed to parse file list JSON: %s", e.what());
             return false;
         }
 
-        // Receive empty delimiter for complete message
-        zmq::message_t emptyDelimiter2;
-        auto delimResult2 = zmqSocket->recv(emptyDelimiter2, zmq::recv_flags::none);
-        if (!delimResult2) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive empty delimiter for complete message");
-            return false;
-        }
-        if (delimResult2.value() != 0) {
-            MIDDLEWARE_LOG_WARNING("Empty delimiter frame has non-zero size: %zu", delimResult2.value());
-        }
-
-        // Receive ZmqFileComplete header
-        zmq::message_t completeMsg;
-        auto completeResult = zmqSocket->recv(completeMsg, zmq::recv_flags::none);
-        if (!completeResult || completeResult.value() != sizeof(ZmqFileComplete)) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive file complete message");
-            return false;
-        }
-        const ZmqFileComplete* complete = reinterpret_cast<const ZmqFileComplete*>(completeMsg.data());
-
-        if (complete->message_type != static_cast<uint32_t>(ZmqMessageType::RESP_FILE_COMPLETE)) {
-            MIDDLEWARE_LOG_WARNING("Expected RESP_FILE_COMPLETE after file list, got: %u",
-                                  complete->message_type);
+        // Receive completion message — also filtered by request_id
+        std::vector<uint8_t> dummyDelim2, dataFrame2;
+        if (!waitForMatchingFrames(myRequestId, timeoutMs, dummyDelim2, dataFrame2)) {
+            MIDDLEWARE_LOG_ERROR("Timeout waiting for file list completion");
+        } else if (dataFrame2.size() >= sizeof(ZmqFileComplete)) {
+            const ZmqFileComplete* complete = reinterpret_cast<const ZmqFileComplete*>(dataFrame2.data());
+            if (complete->message_type != static_cast<uint32_t>(ZmqMessageType::RESP_FILE_COMPLETE)) {
+                MIDDLEWARE_LOG_WARNING("Expected RESP_FILE_COMPLETE after file list, got: %u",
+                                      complete->message_type);
+            }
         }
 
         // Trigger callback
@@ -477,127 +434,79 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
             return false;
         }
 
-        // Wait for initial response
-        if (!waitForResponse(request.request_id, timeoutMs)) {
-            MIDDLEWARE_LOG_ERROR("Timeout waiting for file list response");
-            return false;
-        }
-
         std::vector<FileInfo> allFileInfos;
         auto startTime = std::chrono::steady_clock::now();
         auto timeoutDuration = std::chrono::milliseconds(timeoutMs);
-        
+        uint32_t broadcastRequestId = request.request_id;
         bool receivedAtLeastOneResponse = false;
-        
+
         do {
-            // Check if we've exceeded timeout
             auto currentTime = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(currentTime - startTime);
             if (elapsed >= timeoutDuration) {
                 MIDDLEWARE_LOG_INFO("Timeout reached after %lld ms", elapsed.count());
                 break;
             }
-            
-            // Check if there's more data available with remaining timeout
+
             int remainingTimeout = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(timeoutDuration - elapsed).count());
-            if (remainingTimeout <= 0) {
-                break;
-            }
-            
-            // Set socket to non-blocking for poll
-            zmqSocket->set(zmq::sockopt::rcvtimeo, remainingTimeout);
-            
-            // Receive empty delimiter frame (zero-length)
-            zmq::message_t emptyDelimiter;
-            auto delimResult = zmqSocket->recv(emptyDelimiter, zmq::recv_flags::none);
-            if (!delimResult) {
-                // No more data available
-                break;
-            }
-            if (delimResult.value() != 0) {
-                MIDDLEWARE_LOG_WARNING("Empty delimiter frame has non-zero size: %zu", delimResult.value());
+            if (remainingTimeout <= 0) break;
+
+            // Receive chunk header (filtered by request_id)
+            std::vector<uint8_t> dummyDelim1, dataFrame1;
+            if (!waitForMatchingFrames(broadcastRequestId, remainingTimeout, dummyDelim1, dataFrame1)) {
+                break; // timeout or shutdown
             }
 
-            // Receive the combined header+data ZeroMQ message
-            zmq::message_t msg;
-            auto result = zmqSocket->recv(msg, zmq::recv_flags::none);
-            
-            if (!result) {
-                // No more data
-                break;
-            }
-            
-            size_t totalSize = result.value();
-            MIDDLEWARE_LOG_INFO("Received file list response: %zu bytes total", totalSize);
-            
+            size_t totalSize = dataFrame1.size();
             size_t headerSize = sizeof(ZmqFileChunk);
-            // Check minimum size (header)
+
             if (totalSize < headerSize) {
-                MIDDLEWARE_LOG_ERROR("File list response too small: %zu bytes (expected at least %zu)", 
+                MIDDLEWARE_LOG_ERROR("File list response too small: %zu bytes (expected at least %zu)",
                                     totalSize, headerSize);
-                continue; // Skip this malformed response
+                continue;
             }
-            
-            // Parse header from first part of message
-            const uint8_t* msgData = static_cast<const uint8_t*>(msg.data());
-            const ZmqFileChunk* chunk = reinterpret_cast<const ZmqFileChunk*>(msgData);
-            
-            // Validate response
+
+            const uint8_t* chunkData = dataFrame1.data();
+            const ZmqFileChunk* chunk = reinterpret_cast<const ZmqFileChunk*>(chunkData);
+
             if (!MessageUtils::isValidMagic(chunk->magic)) {
                 MIDDLEWARE_LOG_ERROR("Invalid magic number in file list response");
                 continue;
             }
 
             if (chunk->message_type != static_cast<uint32_t>(ZmqMessageType::RESP_FILE_CHUNK)) {
-                MIDDLEWARE_LOG_ERROR("Unexpected message type in file list response: %u (expected RESP_FILE_CHUNK=201)", 
+                MIDDLEWARE_LOG_ERROR("Unexpected message type in file list response: %u (expected RESP_FILE_CHUNK=201)",
                                     chunk->message_type);
                 continue;
             }
 
-            // Check if this is a file list response (filename should be "filelist.json")
             std::string filename = chunk->getFilename();
             if (filename != "filelist.json") {
                 MIDDLEWARE_LOG_WARNING("File list response has unexpected filename: %s", filename.c_str());
             }
 
-            MIDDLEWARE_LOG_INFO("Received file list chunk header: %llu bytes from rank %d, chunk size: %u", 
+            MIDDLEWARE_LOG_INFO("Received file list chunk header: %llu bytes from rank %d, chunk size: %u",
                                 chunk->file_size, chunk->source_rank, chunk->chunk_size);
-            
-            // Extract JSON data from remaining part of message
+
             std::vector<uint8_t> jsonData;
             if (chunk->chunk_size > 0) {
-                // Check if we have enough data
                 size_t expectedTotalSize = headerSize + chunk->chunk_size;
                 if (totalSize < expectedTotalSize) {
-                    MIDDLEWARE_LOG_ERROR("Incomplete file list response: got %zu bytes, expected %zu", 
+                    MIDDLEWARE_LOG_ERROR("Incomplete file list response: got %zu bytes, expected %zu",
                                         totalSize, expectedTotalSize);
                     continue;
                 }
-                
-                // Copy JSON data from message
-                jsonData.assign(msgData + headerSize, msgData + headerSize + chunk->chunk_size);
+                jsonData.assign(chunkData + headerSize, chunkData + headerSize + chunk->chunk_size);
                 MIDDLEWARE_LOG_INFO("Extracted JSON data: %zu bytes", jsonData.size());
             } else {
                 MIDDLEWARE_LOG_WARNING("File list response has zero chunk size");
             }
 
-            // Parse JSON into FileInfo vector with source rank
             try {
                 std::string jsonStr(reinterpret_cast<const char*>(jsonData.data()), jsonData.size());
                 auto json = json::parse(jsonStr);
-                
-                // Check JSON structure: {"rank": X, "files": [{"name": "...", "size": N, "mime": "..."}, ...]}
-                // Note: JSON may contain "rank" field, but we use chunk->source_rank which is more reliable
                 int32_t jsonRank = chunk->source_rank;
-                if (json.contains("rank") && json["rank"].is_number()) {
-                    // Use JSON rank if available, but chunk->source_rank should be authoritative
-                    int32_t jsonRankValue = json["rank"].get<int32_t>();
-                    if (jsonRankValue != chunk->source_rank) {
-                        MIDDLEWARE_LOG_WARNING("JSON rank (%d) doesn't match chunk source_rank (%d), using chunk value", 
-                                              jsonRankValue, chunk->source_rank);
-                    }
-                }
-                
+
                 if (json.contains("files") && json["files"].is_array()) {
                     for (const auto& fileObj : json["files"]) {
                         if (fileObj.contains("name") && fileObj["name"].is_string()) {
@@ -607,60 +516,39 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
                                 if (fileObj.contains("size") && fileObj["size"].is_number()) {
                                     fsize = fileObj["size"].get<uint64_t>();
                                 }
-                                // Store file with source rank
                                 allFileInfos.push_back({fname, fsize, jsonRank});
                             }
                         }
                     }
                 }
-                
-                MIDDLEWARE_LOG_INFO("Parsed %zu files with sizes from rank %d", allFileInfos.size() - (allFileInfos.size() - jsonData.size()), jsonRank);
+                MIDDLEWARE_LOG_INFO("Parsed files from rank %d", jsonRank);
             } catch (const std::exception& e) {
                 MIDDLEWARE_LOG_ERROR("Failed to parse file list JSON: %s", e.what());
                 continue;
             }
 
-            // Receive empty delimiter for complete message
-            zmq::message_t emptyDelimiter2;
-            auto delimResult2 = zmqSocket->recv(emptyDelimiter2, zmq::recv_flags::none);
-            if (!delimResult2) {
-                MIDDLEWARE_LOG_ERROR("Failed to receive empty delimiter for complete message");
-                continue;
-            }
-            if (delimResult2.value() != 0) {
-                MIDDLEWARE_LOG_WARNING("Empty delimiter frame has non-zero size: %zu", delimResult2.value());
+            // Receive completion message (filtered by request_id)
+            std::vector<uint8_t> dummyDelim2, dataFrame2;
+            if (!waitForMatchingFrames(broadcastRequestId, remainingTimeout, dummyDelim2, dataFrame2)) {
+                MIDDLEWARE_LOG_WARNING("Timeout waiting for completion from rank %d", chunk->source_rank);
+            } else if (dataFrame2.size() >= sizeof(ZmqFileComplete)) {
+                const ZmqFileComplete* complete = reinterpret_cast<const ZmqFileComplete*>(dataFrame2.data());
+                if (complete->message_type != static_cast<uint32_t>(ZmqMessageType::RESP_FILE_COMPLETE)) {
+                    MIDDLEWARE_LOG_WARNING("Expected RESP_FILE_COMPLETE after file list, got: %u",
+                                          complete->message_type);
+                }
             }
 
-            // Receive ZmqFileComplete header
-            zmq::message_t completeMsg;
-            auto completeResult = zmqSocket->recv(completeMsg, zmq::recv_flags::none);
-            if (!completeResult || completeResult.value() != sizeof(ZmqFileComplete)) {
-                MIDDLEWARE_LOG_ERROR("Failed to receive file complete message");
-                continue;
-            }
-            const ZmqFileComplete* complete = reinterpret_cast<const ZmqFileComplete*>(completeMsg.data());
-
-            if (complete->message_type != static_cast<uint32_t>(ZmqMessageType::RESP_FILE_COMPLETE)) {
-                MIDDLEWARE_LOG_WARNING("Expected RESP_FILE_COMPLETE after file list, got: %u",
-                                      complete->message_type);
-            }
-            
             receivedAtLeastOneResponse = true;
             connectionStats.totalResponsesReceived.fetch_add(1);
-            
-            // If not broadcast, we're done after first response
+
             if (!isBroadcast) {
                 break;
             }
-            
-            // For broadcast, continue receiving until timeout
-            // Reset socket timeout for next poll
-            zmqSocket->set(zmq::sockopt::rcvtimeo, -1);
-            
+
+            // Try next rank — short timeout to avoid blocking on stragglers
+            // Use a small per-rank timeout so 100 ranks don't take forever
         } while (isBroadcast);
-        
-        // Reset socket to default blocking mode
-        zmqSocket->set(zmq::sockopt::rcvtimeo, -1);
         
         if (!receivedAtLeastOneResponse) {
             MIDDLEWARE_LOG_ERROR("No valid file list responses received");
@@ -743,56 +631,42 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
                                 continue;
                             }
                             
-                            // Wait for response
-                            if (!waitForResponse(request.request_id, retryTimeout)) {
+                            uint32_t retryRequestId = request.request_id;
+
+                            // Receive chunk header (filtered by request_id)
+                            std::vector<uint8_t> dummyDelim1, dataFrame1;
+                            if (!waitForMatchingFrames(retryRequestId, retryTimeout, dummyDelim1, dataFrame1)) {
                                 MIDDLEWARE_LOG_WARNING("Retry timeout for rank %d after %d ms", rank, retryTimeout);
                                 continue;
                             }
-                            
-                            // Receive the response
-                            zmq::message_t emptyDelimiter;
-                            auto delimResult = zmqSocket->recv(emptyDelimiter, zmq::recv_flags::none);
-                            if (!delimResult) {
-                                MIDDLEWARE_LOG_ERROR("Retry failed to receive delimiter for rank %d", rank);
-                                continue;
-                            }
-                            
-                            zmq::message_t msg;
-                            auto recvResult = zmqSocket->recv(msg, zmq::recv_flags::none);
-                            if (!recvResult) {
-                                MIDDLEWARE_LOG_ERROR("Retry failed to receive message for rank %d", rank);
-                                continue;
-                            }
-                            
-                            size_t totalSize = recvResult.value();
-                            if (totalSize < sizeof(ZmqFileChunk)) {
+
+                            size_t totalSize = dataFrame1.size();
+                            size_t headerSize = sizeof(ZmqFileChunk);
+                            if (totalSize < headerSize) {
                                 MIDDLEWARE_LOG_ERROR("Retry response too small from rank %d: %zu bytes", rank, totalSize);
                                 continue;
                             }
-                            
-                            // Parse the response
-                            const uint8_t* msgData = static_cast<const uint8_t*>(msg.data());
+
+                            const uint8_t* msgData = dataFrame1.data();
                             const ZmqFileChunk* chunk = reinterpret_cast<const ZmqFileChunk*>(msgData);
-                            
+
                             if (!MessageUtils::isValidMagic(chunk->magic)) {
                                 MIDDLEWARE_LOG_ERROR("Retry invalid magic from rank %d", rank);
                                 continue;
                             }
-                            
+
                             if (chunk->message_type != static_cast<uint32_t>(ZmqMessageType::RESP_FILE_CHUNK)) {
                                 MIDDLEWARE_LOG_ERROR("Retry wrong message type from rank %d: %u", rank, chunk->message_type);
                                 continue;
                             }
-                            
-                            // Extract JSON data
-                            size_t headerSize = sizeof(ZmqFileChunk);
+
                             if (chunk->chunk_size > 0 && totalSize >= headerSize + chunk->chunk_size) {
                                 std::vector<uint8_t> jsonData(msgData + headerSize, msgData + headerSize + chunk->chunk_size);
-                                
+
                                 try {
                                     std::string jsonStr(reinterpret_cast<const char*>(jsonData.data()), jsonData.size());
                                     auto json = json::parse(jsonStr);
-                                    
+
                                     if (json.contains("files") && json["files"].is_array()) {
                                         for (const auto& fileObj : json["files"]) {
                                             if (fileObj.contains("name") && fileObj["name"].is_string()) {
@@ -811,13 +685,11 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
                                     MIDDLEWARE_LOG_ERROR("Retry JSON parse error from rank %d: %s", rank, e.what());
                                 }
                             }
-                            
-                            // Clean up remaining message parts
-                            zmq::message_t emptyDelimiter2;
-                            zmqSocket->recv(emptyDelimiter2, zmq::recv_flags::none);
-                            zmq::message_t completeMsg;
-                            zmqSocket->recv(completeMsg, zmq::recv_flags::none);
-                            
+
+                            // Clean up remaining completion message
+                            std::vector<uint8_t> dummyDelim2, dataFrame2;
+                            waitForMatchingFrames(retryRequestId, std::min(retryTimeout / 3, 2000), dummyDelim2, dataFrame2);
+
                             MIDDLEWARE_LOG_INFO("Retry successful for rank %d: got %zu files", rank, rankFiles.size());
                             
                         } catch (const std::exception& e) {
@@ -881,12 +753,13 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
         return false;
     }
 
-    // Lock to prevent multiple concurrent file requests
-    std::lock_guard<std::recursive_mutex> lock(requestMutex);
+    // ✅ FIX: Removed outer requestMutex lock - sendRequest() handles its own locking
+    // Holding lock during blocking recv loop serialized ALL network I/O and caused hangs
 
     try {
         // Create file request
         ZmqFileRequest request;
+        request.magic = ANARI_USD_MAGIC;
         request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_GET_FILE);
         request.request_id = generateRequestId();
         request.target_rank = targetRank;
@@ -902,80 +775,57 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
             return false;
         }
 
-        // Receive file in chunks
+        // Receive file in chunks — FILTER BY request_id to avoid cross-talk
         bool fileComplete = false;
         uint64_t totalSize = 0;
+        uint32_t myRequestId = request.request_id;
 
         while (!fileComplete && !shutdownRequested.load()) {
-            // Poll for message
-            zmq::pollitem_t items[] = {{ zmqSocket->handle(), 0, ZMQ_POLLIN, 0 }};
-            int pollResult = zmq::poll(items, 1, std::chrono::milliseconds(timeoutMs));
-
-            if (pollResult <= 0) {
-                MIDDLEWARE_LOG_ERROR("Timeout waiting for file chunk");
+            // Receive delimiter + data frames, filtered by request_id
+            std::vector<uint8_t> dummyDelim, dataFrame;
+            if (!waitForMatchingFrames(myRequestId, timeoutMs, dummyDelim, dataFrame)) {
+                MIDDLEWARE_LOG_ERROR("Timeout waiting for file chunk (request_id %u)", myRequestId);
                 if (errorCallback) {
                     errorCallback("Timeout waiting for file chunk");
                 }
                 return false;
             }
 
-            // Receive empty delimiter frame (zero-length)
-            zmq::message_t emptyDelimiter;
-            auto delimResult = zmqSocket->recv(emptyDelimiter, zmq::recv_flags::none);
-            if (!delimResult) {
-                MIDDLEWARE_LOG_ERROR("Failed to receive empty delimiter");
-                return false;
-            }
-            if (delimResult.value() != 0) {
-                MIDDLEWARE_LOG_WARNING("Empty delimiter frame has non-zero size: %zu", delimResult.value());
+            if (dataFrame.size() < 8) {
+                MIDDLEWARE_LOG_ERROR("Data frame too small: %zu bytes", dataFrame.size());
+                continue; // skip malformed, try next
             }
 
-            // Receive combined header+data frame
-            zmq::message_t combined;
-            auto combResult = zmqSocket->recv(combined, zmq::recv_flags::none);
-            if (!combResult) {
-                MIDDLEWARE_LOG_ERROR("Failed to receive combined header+data");
-                return false;
-            }
-            size_t combinedSize = combResult.value();
-            if (combinedSize < 8) { // need at least magic + message_type
-                MIDDLEWARE_LOG_ERROR("Combined message too small: %zu bytes", combinedSize);
-                return false;
-            }
-
-            const uint8_t* combinedData = static_cast<const uint8_t*>(combined.data());
-            // Parse magic and message type
+            const uint8_t* combinedData = dataFrame.data();
             uint32_t magic = *reinterpret_cast<const uint32_t*>(combinedData);
+            uint32_t messageType = *reinterpret_cast<const uint32_t*>(combinedData + 4);
+            size_t combinedSize = dataFrame.size();
+
             if (!MessageUtils::isValidMagic(magic)) {
                 MIDDLEWARE_LOG_ERROR("Invalid magic number in response: 0x%08X", magic);
-                return false;
+                continue; // skip, try next
             }
-            uint32_t messageType = *reinterpret_cast<const uint32_t*>(combinedData + 4);
 
-            // Handle based on message type
             switch (static_cast<ZmqMessageType>(messageType)) {
                 case ZmqMessageType::RESP_FILE_CHUNK: {
                     if (combinedSize < sizeof(ZmqFileChunk)) {
                         MIDDLEWARE_LOG_ERROR("File chunk response too small: %zu bytes (expected %zu)",
                                             combinedSize, sizeof(ZmqFileChunk));
-                        return false;
+                        break;
                     }
                     const ZmqFileChunk* chunk = reinterpret_cast<const ZmqFileChunk*>(combinedData);
                     size_t dataSize = combinedSize - sizeof(ZmqFileChunk);
                     if (dataSize != chunk->chunk_size) {
                         MIDDLEWARE_LOG_WARNING("Chunk size mismatch: header %u, data %zu",
                                               chunk->chunk_size, dataSize);
-                        // proceed anyway
                     }
 
-                    // Extract chunk data
                     std::vector<uint8_t> chunkData;
                     if (dataSize > 0) {
                         chunkData.assign(combinedData + sizeof(ZmqFileChunk),
                                          combinedData + sizeof(ZmqFileChunk) + dataSize);
                     }
 
-                    // Trigger chunk callback
                     if (chunkCallback) {
                         chunkCallback(chunk->getFilename(), chunkData, chunk->chunk_offset, chunk->file_size);
                     }
@@ -989,7 +839,7 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
                     if (combinedSize < sizeof(ZmqFileComplete)) {
                         MIDDLEWARE_LOG_ERROR("File complete response too small: %zu bytes (expected %zu)",
                                             combinedSize, sizeof(ZmqFileComplete));
-                        return false;
+                        break;
                     }
                     const ZmqFileComplete* complete = reinterpret_cast<const ZmqFileComplete*>(combinedData);
 
@@ -1015,7 +865,7 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
                     if (combinedSize < sizeof(ZmqErrorResponse)) {
                         MIDDLEWARE_LOG_ERROR("Error response too small: %zu bytes (expected %zu)",
                                             combinedSize, sizeof(ZmqErrorResponse));
-                        return false;
+                        break;
                     }
                     const ZmqErrorResponse* error = reinterpret_cast<const ZmqErrorResponse*>(combinedData);
 
@@ -1056,8 +906,8 @@ bool AnariUsdClient::requestFrame(int32_t frameNumber, int32_t targetRank,
         return false;
     }
 
-    // Lock to prevent multiple concurrent frame requests
-    std::lock_guard<std::recursive_mutex> lock(requestMutex);
+    // ✅ FIX: Removed outer requestMutex lock - sendRequest() handles its own locking
+    // Holding lock during blocking recv loop serialized ALL network I/O and caused hangs
 
     try {
         // Create frame request
@@ -1097,13 +947,16 @@ bool AnariUsdClient::requestFrame(int32_t frameNumber, int32_t targetRank,
                 return false;
             }
 
-            // Receive message type
+            // Receive message type (serialized via recvMutex)
             uint32_t messageType;
             zmq::message_t msgType;
-            auto res = zmqSocket->recv(msgType, zmq::recv_flags::none);
-            if (!res || res.value() != sizeof(messageType)) {
-                MIDDLEWARE_LOG_ERROR("Failed to receive message type");
-                return false;
+            {
+                std::lock_guard<std::mutex> recvLock(recvMutex);
+                auto res = zmqSocket->recv(msgType, zmq::recv_flags::none);
+                if (!res || res.value() != sizeof(messageType)) {
+                    MIDDLEWARE_LOG_ERROR("Failed to receive message type");
+                    return false;
+                }
             }
             messageType = *static_cast<uint32_t*>(msgType.data());
 
@@ -1305,11 +1158,12 @@ bool AnariUsdClient::receiveResponse(void* buffer, size_t size, int timeoutMs) {
     if (!waitForResponse(0, timeoutMs)) { // Use 0 as requestId since we already waited
         return false;
     }
-    
+
     try {
+        std::lock_guard<std::mutex> recvLock(recvMutex);
         zmq::message_t msg;
         auto result = zmqSocket->recv(msg, zmq::recv_flags::none);
-        
+
         if (!result || result.value() != size) {
             MIDDLEWARE_LOG_ERROR("Failed to receive response (expected %zu bytes, got %zu)",
                                 size, result ? result.value() : 0);
@@ -1410,30 +1264,32 @@ bool AnariUsdClient::requestWorkerListString(std::vector<std::tuple<int32_t, std
         // Send GET_WORKERS string using HPC broker protocol
         // DEALER sends: [empty delimiter] + "GET_WORKERS" (2 frames)
         // ROUTER receives: [identity] + [empty delimiter] + "GET_WORKERS" (3 frames)
-        // ZeroMQ automatically adds identity frame for DEALER→ROUTER communication
-        std::lock_guard<std::recursive_mutex> lock(requestMutex);
-        
-        // Send empty delimiter frame with SNDMORE flag
-        zmq::message_t emptyFrame(0);
-        auto result = zmqSocket->send(emptyFrame, zmq::send_flags::sndmore);
-        if (!result) {
-            MIDDLEWARE_LOG_ERROR("Failed to send empty delimiter frame");
-            connectionStats.failedRequests.fetch_add(1);
-            return false;
-        }
-        
-        // Send "GET_WORKERS" string (broker accepts any string)
-        zmq::message_t requestMsg(strlen("GET_WORKERS"));
-        memcpy(requestMsg.data(), "GET_WORKERS", strlen("GET_WORKERS"));
-        result = zmqSocket->send(requestMsg, zmq::send_flags::none);
-        
-        if (!result || result.value() != strlen("GET_WORKERS")) {
-            MIDDLEWARE_LOG_ERROR("Failed to send GET_WORKERS request");
-            connectionStats.failedRequests.fetch_add(1);
-            return false;
-        }
+        // ✅ FIX: Lock only for send, release before blocking receive
+        {
+            std::lock_guard<std::recursive_mutex> lock(requestMutex);
 
-        connectionStats.totalRequestsSent.fetch_add(1);
+            // Send empty delimiter frame with SNDMORE flag
+            zmq::message_t emptyFrame(0);
+            auto result = zmqSocket->send(emptyFrame, zmq::send_flags::sndmore);
+            if (!result) {
+                MIDDLEWARE_LOG_ERROR("Failed to send empty delimiter frame");
+                connectionStats.failedRequests.fetch_add(1);
+                return false;
+            }
+
+            // Send "GET_WORKERS" string (broker accepts any string)
+            zmq::message_t requestMsg(strlen("GET_WORKERS"));
+            memcpy(requestMsg.data(), "GET_WORKERS", strlen("GET_WORKERS"));
+            result = zmqSocket->send(requestMsg, zmq::send_flags::none);
+
+            if (!result || result.value() != strlen("GET_WORKERS")) {
+                MIDDLEWARE_LOG_ERROR("Failed to send GET_WORKERS request");
+                connectionStats.failedRequests.fetch_add(1);
+                return false;
+            }
+
+            connectionStats.totalRequestsSent.fetch_add(1);
+        } // ✅ Lock released here before blocking receive
 
         // Wait for response with cancellation support
         if (!waitForResponse(0, timeoutMs)) {
@@ -1441,21 +1297,21 @@ bool AnariUsdClient::requestWorkerListString(std::vector<std::tuple<int32_t, std
             return false;
         }
 
-        // Receive response (2 frames: empty delimiter + data)
-        // First frame: empty delimiter (should be 0 bytes)
-        zmq::message_t delimiterMsg;
-        auto delimResult = zmqSocket->recv(delimiterMsg, zmq::recv_flags::none);
-        if (!delimResult) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive delimiter frame");
-            return false;
-        }
-        
-        // Second frame: string response
-        zmq::message_t responseMsg;
-        auto recvResult = zmqSocket->recv(responseMsg, zmq::recv_flags::none);
-        if (!recvResult) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive worker list response");
-            return false;
+        // Receive response (2 frames: serialized via recvMutex)
+        zmq::message_t delimiterMsg, responseMsg;
+        {
+            std::lock_guard<std::mutex> recvLock(recvMutex);
+            auto delimResult = zmqSocket->recv(delimiterMsg, zmq::recv_flags::none);
+            if (!delimResult) {
+                MIDDLEWARE_LOG_ERROR("Failed to receive delimiter frame");
+                return false;
+            }
+
+            auto recvResult = zmqSocket->recv(responseMsg, zmq::recv_flags::none);
+            if (!recvResult) {
+                MIDDLEWARE_LOG_ERROR("Failed to receive worker list response");
+                return false;
+            }
         }
 
         // Parse response: "WORKER_LIST|rank1:hostname1:ip1;rank2:hostname2:ip2;..."
@@ -1558,8 +1414,8 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
         
         MIDDLEWARE_LOG_INFO("  chunk_size=%u", request.chunk_size);
         
-        std::lock_guard<std::recursive_mutex> lock(requestMutex);
-        
+        // ✅ FIX: Removed outer requestMutex lock - sendRequest() handles its own locking
+
         // Send binary struct (276 bytes) using existing sendRequest method
         if (!sendRequest(&request, sizeof(request), request.request_id)) {
             MIDDLEWARE_LOG_ERROR("Failed to send binary property request");
@@ -1568,32 +1424,16 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
 
         connectionStats.totalRequestsSent.fetch_add(1);
 
-        // Wait for response with cancellation support
-        // Use the actual request_id, not 0
-        if (!waitForResponse(request.request_id, timeoutMs)) {
+        // Receive binary property response (filtered by request_id)
+        std::vector<uint8_t> dummyDelim, dataFrame;
+        uint32_t workerCountRequestId = request.request_id;
+        if (!waitForMatchingFrames(workerCountRequestId, timeoutMs, dummyDelim, dataFrame)) {
             MIDDLEWARE_LOG_ERROR("Timeout waiting for property response");
             return false;
         }
 
-        // Receive binary property response (2 frames: empty delimiter + data)
-        // First frame: empty delimiter (should be 0 bytes)
-        zmq::message_t delimiterMsg;
-        auto delimResult = zmqSocket->recv(delimiterMsg, zmq::recv_flags::none);
-        if (!delimResult) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive delimiter frame");
-            return false;
-        }
-        
-        // Second frame: binary property response
-        zmq::message_t responseMsg;
-        auto recvResult = zmqSocket->recv(responseMsg, zmq::recv_flags::none);
-        if (!recvResult) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive property response");
-            return false;
-        }
-
         // Validate response size
-        size_t responseSize = recvResult.value();
+        size_t responseSize = dataFrame.size();
         if (responseSize < sizeof(ZmqPropertyResponse)) {
             MIDDLEWARE_LOG_ERROR("Property response too small: %zu bytes (expected at least %zu)",
                                 responseSize, sizeof(ZmqPropertyResponse));
@@ -1601,7 +1441,7 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
         }
 
         // Parse binary property response
-        const ZmqPropertyResponse* response = reinterpret_cast<const ZmqPropertyResponse*>(responseMsg.data());
+        const ZmqPropertyResponse* response = reinterpret_cast<const ZmqPropertyResponse*>(dataFrame.data());
         
         MIDDLEWARE_LOG_INFO("DEBUG: Received binary property response:");
         MIDDLEWARE_LOG_INFO("  responseSize=%zu bytes", responseSize);
@@ -1688,11 +1528,11 @@ bool AnariUsdClient::requestWorkerStatus(int32_t targetRank, WorkerStatusCallbac
         request.setFilename("workerList");
         request.chunk_size = 0;
 
-        MIDDLEWARE_LOG_INFO("Requesting worker status for rank %d using 'workerList' property (request_id: %u)", 
+        MIDDLEWARE_LOG_INFO("Requesting worker status for rank %d using 'workerList' property (request_id: %u)",
                             targetRank, request.request_id);
 
-        std::lock_guard<std::recursive_mutex> lock(requestMutex);
-        
+        // ✅ FIX: Removed outer requestMutex lock - sendRequest() handles its own locking
+
         // Send request
         if (!sendRequest(&request, sizeof(request), request.request_id)) {
             MIDDLEWARE_LOG_ERROR("Failed to send worker status property request");
@@ -1701,31 +1541,16 @@ bool AnariUsdClient::requestWorkerStatus(int32_t targetRank, WorkerStatusCallbac
 
         connectionStats.totalRequestsSent.fetch_add(1);
 
-        // Wait for response
-        if (!waitForResponse(request.request_id, timeoutMs)) {
+        // Receive property response (filtered by request_id)
+        std::vector<uint8_t> dummyDelim, dataFrame;
+        uint32_t workerStatusRequestId = request.request_id;
+        if (!waitForMatchingFrames(workerStatusRequestId, timeoutMs, dummyDelim, dataFrame)) {
             MIDDLEWARE_LOG_ERROR("Timeout waiting for worker status property response");
             return false;
         }
 
-        // Receive property response (2 frames: empty delimiter + data)
-        // First frame: empty delimiter (should be 0 bytes)
-        zmq::message_t delimiterMsg;
-        auto delimResult = zmqSocket->recv(delimiterMsg, zmq::recv_flags::none);
-        if (!delimResult) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive delimiter frame");
-            return false;
-        }
-        
-        // Second frame: binary property response
-        zmq::message_t responseMsg;
-        auto recvResult = zmqSocket->recv(responseMsg, zmq::recv_flags::none);
-        if (!recvResult) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive property response");
-            return false;
-        }
-
         // Validate response size
-        size_t responseSize = recvResult.value();
+        size_t responseSize = dataFrame.size();
         if (responseSize < sizeof(ZmqPropertyResponse)) {
             MIDDLEWARE_LOG_ERROR("Property response too small: %zu bytes (expected at least %zu)",
                                 responseSize, sizeof(ZmqPropertyResponse));
@@ -1733,7 +1558,7 @@ bool AnariUsdClient::requestWorkerStatus(int32_t targetRank, WorkerStatusCallbac
         }
 
         // Parse property response
-        const ZmqPropertyResponse* response = reinterpret_cast<const ZmqPropertyResponse*>(responseMsg.data());
+        const ZmqPropertyResponse* response = reinterpret_cast<const ZmqPropertyResponse*>(dataFrame.data());
         
         // Validate response
         if (!MessageUtils::isValidMagic(response->magic)) {
@@ -2107,7 +1932,191 @@ bool AnariUsdClient::requestFilesParallel(
     return true;
 }
 
+// ============================================================================
+// Request-ID matching receive helpers
+// ============================================================================
+
+uint32_t AnariUsdClient::extractRequestId(const uint8_t* data, size_t dataSize) const {
+    if (!data || dataSize < 12) return 0; // need magic(4) + type(4) + request_id(4)
+    uint32_t magic = *reinterpret_cast<const uint32_t*>(data);
+    if (magic != ANARI_USD_MAGIC) return 0;
+    uint32_t msgType = *reinterpret_cast<const uint32_t*>(data + 4);
+    if (msgType < 200) return 0;
+    return *reinterpret_cast<const uint32_t*>(data + 8);
+}
+
+// ---------------------------------------------------------------------------
+// Dispatcher thread: owns ALL ZMQ recv. Pulls frame pairs from the socket
+// and enqueues them.  Request threads never call recv().
+// ---------------------------------------------------------------------------
+
+void AnariUsdClient::dispatcherThread() {
+    MIDDLEWARE_LOG_INFO("Dispatcher thread started");
+
+    zmq::pollitem_t items[] = {{ zmqSocket->handle(), 0, ZMQ_POLLIN, 0 }};
+
+    while (dispatcherActive.load()) {
+        try {
+            // Poll with 100ms timeout so we wake up promptly on activity but
+            // also check dispatcherActive periodically.
+            int pollResult = zmq::poll(items, 1, std::chrono::milliseconds(100));
+            if (pollResult <= 0) continue;
+
+            // Poll said data available — receive the complete pair under recvMutex
+            zmq::message_t delimMsg, dataMsg;
+
+            {
+                std::lock_guard<std::mutex> recvLock(recvMutex);
+                auto dRes = zmqSocket->recv(delimMsg, zmq::recv_flags::none);
+                if (!dRes) continue;
+
+                auto dataRes = zmqSocket->recv(dataMsg, zmq::recv_flags::none);
+                if (!dataRes) continue;
+            }
+
+            // Copy out of ZMQ messages
+            std::vector<uint8_t> delimiterFrame(delimMsg.size());
+            if (delimMsg.size()) {
+                std::memcpy(delimiterFrame.data(), delimMsg.data(), delimMsg.size());
+            }
+            std::vector<uint8_t> dataFrame(dataMsg.size());
+            if (dataMsg.size()) {
+                std::memcpy(dataFrame.data(), dataMsg.data(), dataMsg.size());
+            }
+
+            enqueueResponseFrame(delimiterFrame, dataFrame);
+
+        } catch (const zmq::error_t& e) {
+            if (e.num() != EINVAL) { // EINVAL = context terminated on purpose
+                MIDDLEWARE_LOG_WARNING("Dispatcher ZMQ error: %s (errno: %d)",
+                                       e.what(), e.num());
+            }
+        } catch (...) {
+            MIDDLEWARE_LOG_WARNING("Dispatcher unknown error");
+        }
+    }
+
+    MIDDLEWARE_LOG_INFO("Dispatcher thread stopped");
+}
+
+// ---------------------------------------------------------------------------
+// enqueueResponseFrame — called ONLY by dispatcher thread
+// ---------------------------------------------------------------------------
+
+void AnariUsdClient::enqueueResponseFrame(const std::vector<uint8_t>& delimiter,
+                                           const std::vector<uint8_t>& data) {
+    auto entry = std::make_shared<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>>(
+        std::move(const_cast<std::vector<uint8_t>&>(delimiter)),
+        std::move(const_cast<std::vector<uint8_t>&>(data)));
+
+    {
+        std::lock_guard<std::mutex> lock(responseQueueMutex);
+        responseQueue.push(std::move(entry));
+        if (responseQueue.size() > 500) {
+            responseQueue.pop(); // Safety cap
+        }
+    }
+    responseQueueCv.notify_one(); // Wake one waiting thread
+}
+
+// ---------------------------------------------------------------------------
+// tryDequeueMatching — non-blocking dequeue attempt
+// ---------------------------------------------------------------------------
+
+bool AnariUsdClient::tryDequeueMatching(uint32_t requestId,
+                                        std::vector<uint8_t>& outDelimiter,
+                                        std::vector<uint8_t>& outData) {
+    std::lock_guard<std::mutex> lock(responseQueueMutex);
+    std::vector<std::shared_ptr<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>>> stash;
+    std::shared_ptr<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> match;
+    while (!responseQueue.empty()) {
+        auto entry = responseQueue.front();
+        responseQueue.pop();
+        uint32_t msgId = extractRequestId(entry->second.data(), entry->second.size());
+        if (msgId == requestId) {
+            match = std::move(entry);
+            break;
+        }
+        stash.push_back(std::move(entry));
+    }
+    if (match) {
+        outDelimiter = std::move(match->first);
+        outData = std::move(match->second);
+    }
+    for (auto& s : stash) {
+        responseQueue.push(std::move(s));
+    }
+    return !!match;
+}
+
+// ---------------------------------------------------------------------------
+// waitForMatchingFrames — blocks on condition_variable until matching frame
+// arrives or timeout expires.  Game threads NEVER call recv().
+// ---------------------------------------------------------------------------
+
+bool AnariUsdClient::waitForMatchingFrames(uint32_t requestId, int timeoutMs,
+                                            std::vector<uint8_t>& outDelimiter,
+                                            std::vector<uint8_t>& outData) {
+    // Fast path: frame already in queue
+    if (tryDequeueMatching(requestId, outDelimiter, outData)) return true;
+
+    // Slow path: wait on condition_variable
+    auto deadline = std::chrono::steady_clock::now()
+                    + std::chrono::milliseconds(timeoutMs);
+
+    std::unique_lock<std::mutex> lock(responseQueueMutex);
+    while (true) {
+        if (shutdownRequested.load() ||
+            connectionStatus.load() != ConnectionStatus::Connected) {
+            return false;
+        }
+
+        // Search queue for match
+        std::vector<std::shared_ptr<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>>> stash;
+        std::shared_ptr<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> match;
+        while (!responseQueue.empty()) {
+            auto entry = responseQueue.front();
+            responseQueue.pop();
+            uint32_t msgId = extractRequestId(entry->second.data(), entry->second.size());
+            if (msgId == requestId) {
+                match = std::move(entry);
+                break;
+            }
+            stash.push_back(std::move(entry));
+        }
+        if (match) {
+            outDelimiter = std::move(match->first);
+            outData = std::move(match->second);
+            for (auto& s : stash) responseQueue.push(std::move(s));
+            return true;
+        }
+        for (auto& s : stash) responseQueue.push(std::move(s));
+
+        // Wait on condition_variable with deadline
+        if (responseQueueCv.wait_until(lock, deadline) == std::cv_status::timeout) {
+            auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                MIDDLEWARE_LOG_WARNING("Timeout %d ms waiting for request_id %u",
+                                       timeoutMs, requestId);
+                return false;
+            }
+        }
+        // Notify fired — loop back and check queue
+    }
+}
+
+// ============================================================================
+// Cleanup
+// ============================================================================
+
 void AnariUsdClient::cleanup() {
+    // Stop dispatcher thread first — it owns all ZMQ receive
+    dispatcherActive.store(false);
+    responseQueueCv.notify_all();
+    if (dispatchThread.joinable()) {
+        dispatchThread.join();
+    }
+
     if (zmqSocket) {
         try {
             zmqSocket->close();
