@@ -157,6 +157,62 @@ struct JUSYNC_API FJUSYNCRealtimeMeshData
 	FJUSYNCMeshData ToStandardMesh() const;
 };
 
+// Point cloud data for USD GeomPoints primitives
+USTRUCT(BlueprintType)
+struct JUSYNC_API FJUSYNCPointCloudData
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	FString ElementName;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	FString TypeName;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	TArray<FVector> Positions;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	TArray<FColor> Colors;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	TArray<float> Widths;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	FVector BoundingBoxMin;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	FVector BoundingBoxMax;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	int32 PointCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	bool bHasColors = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	bool bHasNormals = false;
+
+	FJUSYNCPointCloudData()
+	{
+		ElementName = TEXT("");
+		TypeName = TEXT("GeomPoints");
+		BoundingBoxMin = FVector::ZeroVector;
+		BoundingBoxMax = FVector::ZeroVector;
+	}
+
+	bool IsValid() const
+	{
+		return !ElementName.IsEmpty() && PointCount > 0 && Positions.Num() > 0;
+	}
+
+	bool HasColors() const { return bHasColors && Colors.Num() > 0; }
+	bool HasNormals() const { return bHasNormals; }
+	bool HasWidths() const { return Widths.Num() > 0; }
+
+	int32 GetPointCount() const { return PointCount; }
+};
+
 USTRUCT(BlueprintType)
 struct JUSYNC_API FJUSYNCTextureData
 {
@@ -257,6 +313,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FJUSYNCProcessingProgress, float, P
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FJUSYNCError, const FString&, ErrorType, const FString&, ErrorMessage);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCWorkerStatusReceived, const TArray<FJUSYNCWorkerStatus>&, WorkerStatus);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCWorkerCountReceived, int32, WorkerCount);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCPointCloudReceived, const TArray<FJUSYNCPointCloudData>&, PointCloudData);
 
 // ========== BENCHMARKING STRUCTURES ==========
 

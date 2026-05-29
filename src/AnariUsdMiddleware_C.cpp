@@ -1956,4 +1956,209 @@ ANARI_USD_MIDDLEWARE_C_API int RequestFilesParallelDirect_C(
     }
 }
 
+// ============================================================================
+// POINT CLOUD EXTRACTION
+// ============================================================================
+
+/**
+ * Convert a UsdProcessor::PointCloudData to CPointCloudData format
+ */
+static void ConvertPointCloudDataToCFormat(const anari_usd_middleware::UsdProcessor::PointCloudData& src,
+                                           CPointCloudData& dst) {
+    // Initialize
+    memset(&dst, 0, sizeof(CPointCloudData));
+
+    #ifdef _WIN32
+    strncpy_s(dst.element_name, sizeof(dst.element_name), src.elementName.c_str(), _TRUNCATE);
+    strncpy_s(dst.type_name, sizeof(dst.type_name), src.typeName.c_str(), _TRUNCATE);
+    #else
+    snprintf(dst.element_name, sizeof(dst.element_name), "%s", src.elementName.c_str());
+    snprintf(dst.type_name, sizeof(dst.type_name), "%s", src.typeName.c_str());
+    #endif
+
+    dst.points_count = src.positions.size();
+
+    // Positions
+    if (dst.points_count > 0) {
+        dst.positions = new float[dst.points_count * 3];
+        for (size_t i = 0; i < dst.points_count; ++i) {
+            dst.positions[i * 3 + 0] = src.positions[i].x;
+            dst.positions[i * 3 + 1] = src.positions[i].y;
+            dst.positions[i * 3 + 2] = src.positions[i].z;
+        }
+    }
+
+    // Colors
+    if (!src.vertex_colors.empty()) {
+        dst.has_colors = 1;
+        dst.colors = new float[src.vertex_colors.size() * 4];
+        for (size_t i = 0; i < src.vertex_colors.size(); ++i) {
+            dst.colors[i * 4 + 0] = src.vertex_colors[i].r;
+            dst.colors[i * 4 + 1] = src.vertex_colors[i].g;
+            dst.colors[i * 4 + 2] = src.vertex_colors[i].b;
+            dst.colors[i * 4 + 3] = src.vertex_colors[i].a;
+        }
+        dst.points_count = std::max(dst.points_count, src.vertex_colors.size());
+    }
+
+    // Normals
+    if (!src.normals.empty()) {
+        dst.has_normals = 1;
+        dst.normals = new float[src.normals.size() * 3];
+        for (size_t i = 0; i < src.normals.size(); ++i) {
+            dst.normals[i * 3 + 0] = src.normals[i].x;
+            dst.normals[i * 3 + 1] = src.normals[i].y;
+            dst.normals[i * 3 + 2] = src.normals[i].z;
+        }
+    }
+
+    // Widths
+    if (!src.widths.empty()) {
+        dst.has_widths = 1;
+        dst.widths = new float[src.widths.size()];
+        std::memcpy(dst.widths, src.widths.data(), src.widths.size() * sizeof(float));
+    }
+
+    // Bounding box
+    for (int i = 0; i < 3; ++i) {
+        dst.bounding_box_min[i] = 0.0f;
+        dst.bounding_box_max[i] = 0.0f;
+    }
+    if (dst.points_count > 0) {
+        for (size_t i = 0; i < dst.points_count; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                dst.bounding_box_min[j] = fminf(dst.bounding_box_min[j], dst.positions[i * 3 + j]);
+                dst.bounding_box_max[j] = fmaxf(dst.bounding_box_max[j], dst.positions[i * 3 + j]);
+            }
+        }
+    }
+}
+
+/**
+ * Extract point cloud data from a USD buffer
+ */
+int ProcessPointCloudFromUSD_C(const unsigned char* buffer,
+                               size_t buffer_size,
+                               const char* filename,
+                               CPointCloudData** out_clouds,
+                               size_t* out_count) {
+    if (!buffer || !filename || !out_clouds || !out_count) {
+        return 0;
+    }
+
+    try {
+        std::vector<uint8_t> std_buffer(buffer, buffer + buffer_size);
+        std::string std_filename(filename);
+
+        anari_usd_middleware::UsdProcessor processor;
+        std::vector<anari_usd_middleware::UsdProcessor::PointCloudData> pc_data;
+
+        // Load USD with point cloud extraction
+        std::vector<anari_usd_middleware::UsdProcessor::MeshData> dummyMeshes;
+        bool result = processor.LoadUSDBuffer(std_buffer, std_filename, dummyMeshes, &pc_data);
+
+        if (!result || pc_data.empty()) {
+            // Try to see if there were any meshes but no point clouds
+            if (result && !dummyMeshes.empty() && pc_data.empty()) {
+                *out_count = 0;
+                *out_clouds = nullptr;
+                return 1; // Success but no point clouds
+            }
+            *out_count = 0;
+            *out_clouds = nullptr;
+            return 0;
+        }
+
+        *out_count = pc_data.size();
+        *out_clouds = new CPointCloudData[*out_count];
+
+        for (size_t i = 0; i < pc_data.size(); ++i) {
+            ConvertPointCloudDataToCFormat(pc_data[i], (*out_clouds)[i]);
+        }
+
+        MIDDLEWARE_LOG_INFO("Extracted %zu point clouds from '%s'", *out_count, std_filename.c_str());
+        for (size_t i = 0; i < pc_data.size(); ++i) {
+            MIDDLEWARE_LOG_INFO("  PointCloud[%zu]: '%s' (%zu points, colors=%d, normals=%d)",
+                               i, (*out_clouds)[i].element_name, (*out_clouds)[i].points_count,
+                               (*out_clouds)[i].has_colors, (*out_clouds)[i].has_normals);
+        }
+
+        return 1;
+
+    } catch (...) {
+        *out_count = 0;
+        *out_clouds = nullptr;
+        return 0;
+    }
+}
+
+/**
+ * Get the most recently cached gradient/colormap texture
+ * Returns PNG-encoded raw bytes; caller must decode
+ */
+int GetCachedGradientTexture_C(unsigned char** gradient_png_data,
+                               size_t* out_png_size,
+                               int* out_width,
+                               int* out_height) {
+    if (!gradient_png_data || !out_png_size || !out_width || !out_height) {
+        return 0;
+    }
+
+    try {
+        if (!g_middleware) {
+            return 0;
+        }
+
+        std::vector<uint8_t> outData;
+        int w = 0, h = 0;
+        bool result = g_middleware->GetCachedGradientTexture(outData, w, h);
+
+        if (!result || outData.empty()) {
+            *gradient_png_data = nullptr;
+            *out_png_size = 0;
+            *out_width = 0;
+            *out_height = 0;
+            return 0;
+        }
+
+        // Allocate and copy the PNG data for caller
+        *gradient_png_data = new unsigned char[outData.size()];
+        std::memcpy(*gradient_png_data, outData.data(), outData.size());
+        *out_png_size = outData.size();
+        *out_width = w;
+        *out_height = h;
+        return 1;
+
+    } catch (...) {
+        *gradient_png_data = nullptr;
+        *out_png_size = 0;
+        *out_width = 0;
+        *out_height = 0;
+        return 0;
+    }
+}
+
+/**
+ * Free memory allocated by ProcessPointCloudFromUSD_C
+ */
+void FreePointCloudData_C(CPointCloudData* clouds, size_t count) {
+    if (!clouds || count == 0) return;
+
+    for (size_t i = 0; i < count; ++i) {
+        delete[] clouds[i].positions;
+        delete[] clouds[i].normals;
+        delete[] clouds[i].colors;
+        delete[] clouds[i].widths;
+    }
+    delete[] clouds;
+}
+
+/**
+ * Free memory allocated by GetCachedGradientTexture_C
+ */
+void FreeCachedGradientTexture_C(unsigned char* gradient_rgba) {
+    if (!gradient_rgba) return;
+    delete[] gradient_rgba;
+}
+
 } // extern "C"

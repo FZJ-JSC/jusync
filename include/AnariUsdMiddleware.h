@@ -210,6 +210,9 @@ public:
     bool GetGradientLineAsPNGBuffer(const std::vector<uint8_t>& buffer,
                                     std::vector<uint8_t>& outPng);
 
+    /* gradient cache - returns most recently cached gradient/colormap texture */
+    bool GetCachedGradientTexture(std::vector<uint8_t>& outData, int& outWidth, int& outHeight);
+
     /* status / stats */
     std::string getStatusInfo() const;
     

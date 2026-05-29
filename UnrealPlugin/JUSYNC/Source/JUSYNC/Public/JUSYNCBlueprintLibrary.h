@@ -179,6 +179,13 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|USD")
     static bool ValidateUSDFormat(const TArray<uint8>& Buffer, const FString& Filename);
 
+    // ========== POINT CLOUD PROCESSING ==========
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|PointCloud", CallInEditor, DisplayName = "Load USD Point Cloud From Buffer")
+    static bool LoadUSDPointCloudFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCPointCloudData>& OutPointCloudData);
+
+    // Async point cloud processing delegates
+    DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnAsyncPointCloudLoaded, const TArray<FJUSYNCPointCloudData>&, PCData, bool, bSuccess, const FString&, ErrorMsg);
+
     // ========== TEXTURE PROCESSING ==========
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Texture", CallInEditor)
     static FJUSYNCTextureData CreateTextureFromBuffer(const TArray<uint8>& Buffer);
@@ -280,6 +287,37 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning")
     static TArray<FVector> GetSpawnPointLocations(const FString& TagFilter = TEXT("USDSpawnPoint"));
+
+    // ========== POINT CLOUD SPAWNING ==========
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|PointCloud Spawning", CallInEditor, DisplayName = "Spawn Point Cloud At Location")
+    static AActor* SpawnPointCloudAtLocation(
+        const FJUSYNCPointCloudData& PointCloudData,
+        const FVector& SpawnLocation,
+        const FRotator& SpawnRotation = FRotator::ZeroRotator,
+        const FVector& SpawnScale = FVector(1.0f));
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|PointCloud Spawning", CallInEditor, DisplayName = "Batch Spawn Point Clouds")
+    static TArray<AActor*> BatchSpawnPointClouds(
+        const TArray<FJUSYNCPointCloudData>& PointCloudDataArray,
+        const TArray<FVector>& SpawnLocations);
+
+    // Async point cloud spawn delegate
+    DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnPointCloudSpawnedDyn, AActor*, SpawnedActor, bool, bSuccess);
+    DECLARE_DYNAMIC_DELEGATE_OneParam(FOnPointCloudBatchSpawnedDyn, const TArray<AActor*>&, SpawnedActors);
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|PointCloud Spawning|Async", CallInEditor, DisplayName = "Spawn Point Cloud At Location (Async)")
+    static void SpawnPointCloudAtLocation_Async(
+        const FJUSYNCPointCloudData& PointCloudData,
+        const FVector& SpawnLocation,
+        const FRotator& SpawnRotation,
+        const FVector& SpawnScale,
+        const FOnPointCloudSpawnedDyn& OnSpawned);
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|PointCloud Spawning|Async", CallInEditor, DisplayName = "Batch Spawn Point Clouds (Async)")
+    static void BatchSpawnPointClouds_Async(
+        const TArray<FJUSYNCPointCloudData>& PointCloudDataArray,
+        const TArray<FVector>& SpawnLocations,
+        const FOnPointCloudBatchSpawnedDyn& OnBatchSpawned);
 
 
     // ========== DATA RECEPTION ==========

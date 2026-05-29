@@ -18,6 +18,13 @@
 #include "HAL/PlatformProcess.h"  // For FPlatformProcess::Sleep
 #include "HAL/PlatformMisc.h"     // For FPlatformMisc::NumberOfCoresIncludingHyperthreads
 #include "Async/ParallelFor.h"    // For ParallelFor
+
+#include "GameFramework/Actor.h"   // For SpawnActor
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+#include "LidarPointCloud.h"        // For ULidarPointCloud
+#include "LidarPointCloudComponent.h"
+#include "LidarPointCloudActor.h"
+#endif
 #include <atomic>  // For std::atomic
 
 // Include the C-wrapper header
@@ -1820,6 +1827,279 @@ FJUSYNCRealtimeMeshData UJUSYNCSubsystem::ConvertToRealtimeMeshFormat(const FJUS
 
     RealtimeMesh.Triangles = StandardMesh.Triangles;
     return RealtimeMesh;
+}
+
+// ============================================================================
+// POINT CLOUD PROCESSING
+// ============================================================================
+
+bool UJUSYNCSubsystem::LoadPointCloudFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCPointCloudData>& OutPointCloudData)
+{
+    if (Buffer.Num() == 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("JUSYNC: LoadPointCloudFromBuffer called with empty buffer"));
+        return false;
+    }
+
+    OutPointCloudData.Empty();
+
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    // Check if middleware is initialized
+    if (!bIsInitialized.load())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("JUSYNC: LoadPointCloudFromBuffer called but middleware is not initialized"));
+        return false;
+    }
+
+    FScopeLock Lock(&MiddlewareMutex);
+
+    CPointCloudData* cClouds = nullptr;
+    size_t cCount = 0;
+
+    bool bSuccess = ProcessPointCloudFromUSD_C(
+        reinterpret_cast<const unsigned char*>(Buffer.GetData()),
+        Buffer.Num(),
+        TCHAR_TO_ANSI(*Filename),
+        &cClouds,
+        &cCount
+    ) > 0;
+
+    if (!bSuccess || !cClouds || cCount == 0)
+    {
+        if (bSuccess && cCount == 0)
+        {
+            UE_LOG(LogTemp, Log, TEXT("JUSYNC: No point clouds found in USD '%s'"), *Filename);
+        }
+        else
+        {
+            UE_LOG(LogTemp, Warning, TEXT("JUSYNC: Failed to extract point clouds from '%s'"), *Filename);
+        }
+        if (cClouds) FreePointCloudData_C(cClouds, cCount);
+        return false;
+    }
+
+    OutPointCloudData.SetNum(static_cast<int32>(cCount));
+
+    for (size_t i = 0; i < cCount; ++i)
+    {
+        FJUSYNCPointCloudData& pc = OutPointCloudData[i];
+        const CPointCloudData& cpc = cClouds[i];
+
+        pc.ElementName = ANSI_TO_TCHAR(cpc.element_name);
+        pc.TypeName = ANSI_TO_TCHAR(cpc.type_name);
+        pc.PointCount = static_cast<int32>(cpc.points_count);
+        pc.bHasColors = cpc.has_colors != 0;
+        pc.bHasNormals = cpc.has_normals != 0;
+
+        pc.BoundingBoxMin = FVector(cpc.bounding_box_min[0], cpc.bounding_box_min[1], cpc.bounding_box_min[2]);
+        pc.BoundingBoxMax = FVector(cpc.bounding_box_max[0], cpc.bounding_box_max[1], cpc.bounding_box_max[2]);
+
+        // Convert positions: right-handed Z-up (USD) → left-handed Y-up (UE)
+        // UE transform: X stays, Y becomes Z, Z becomes -Y
+        if (cpc.points_count > 0 && cpc.positions)
+        {
+            pc.Positions.SetNum(pc.PointCount);
+            for (size_t j = 0; j < cpc.points_count; ++j)
+            {
+                float usdX = cpc.positions[j * 3 + 0];
+                float usdY = cpc.positions[j * 3 + 1];
+                float usdZ = cpc.positions[j * 3 + 2];
+                pc.Positions[j] = FVector(usdX, usdZ, -usdY);
+            }
+        }
+
+        // Colors (already 0.0-1.0 floats → FColor 0-255)
+        if (cpc.has_colors && cpc.colors && pc.PointCount > 0)
+        {
+            pc.Colors.SetNum(pc.PointCount);
+            for (int32 j = 0; j < pc.PointCount; ++j)
+            {
+                float r = cpc.colors[j * 4 + 0] * 255.0f;
+                float g = cpc.colors[j * 4 + 1] * 255.0f;
+                float b = cpc.colors[j * 4 + 2] * 255.0f;
+                float a = cpc.colors[j * 4 + 3] * 255.0f;
+                pc.Colors[j] = FColor(static_cast<uint8>(r), static_cast<uint8>(g), static_cast<uint8>(b), static_cast<uint8>(a));
+            }
+        }
+
+        // Widths
+        if (cpc.has_widths && cpc.widths)
+        {
+            pc.Widths.SetNum(pc.PointCount);
+            std::memcpy(pc.Widths.GetData(), cpc.widths, pc.PointCount * sizeof(float));
+        }
+    }
+
+    FreePointCloudData_C(cClouds, cCount);
+
+    UE_LOG(LogTemp, Display, TEXT("JUSYNC: Loaded %d point clouds from '%s'"), OutPointCloudData.Num(), *Filename);
+    return true;
+
+#else
+    UE_LOG(LogTemp, Warning, TEXT("JUSYNC: LoadPointCloudFromBuffer called but middleware not available"));
+    return false;
+#endif
+}
+
+AActor* UJUSYNCSubsystem::SpawnLidarPointCloudAtLocation(const FJUSYNCPointCloudData& PointCloudData,
+    FVector Location, FRotator Rotation, FVector Scale3D)
+{
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (!PointCloudData.IsValid())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("JUSYNC: Cannot spawn point cloud — invalid data"));
+        return nullptr;
+    }
+
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("JUSYNC: Cannot spawn point cloud — no valid world"));
+        return nullptr;
+    }
+
+    // Spawn actor first, disabled, so WorldPartition doesn't trip during heavy SetData
+    FActorSpawnParameters SpawnParams;
+    SpawnParams.Name = MakeUniqueObjectName(World, ALidarPointCloudActor::StaticClass(), *PointCloudData.ElementName);
+    SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    SpawnParams.bDeferConstruction = false;
+
+    ALidarPointCloudActor* SpawnedActor = World->SpawnActor<ALidarPointCloudActor>(Location, Rotation, SpawnParams);
+    if (!SpawnedActor)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("JUSYNC: Failed to spawn ALidarPointCloudActor"));
+        return nullptr;
+    }
+
+    SpawnedActor->SetActorEnableCollision(false);
+
+    // Assign component settings before data
+    ULidarPointCloudComponent* Comp = SpawnedActor->GetPointCloudComponent();
+    if (Comp)
+    {
+        Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+        Comp->ColorSource = ELidarPointCloudColorationMode::Data;
+        Comp->PointSize = 1.0f;
+    }
+
+    // Convert on background thread to avoid blocking the game thread
+    TArray<FVector> Positions = PointCloudData.Positions;
+    TArray<FColor> Colors = PointCloudData.Colors;
+    bool bHasColors = PointCloudData.HasColors();
+    int32 PointCount = PointCloudData.PointCount;
+    FString ElementNameCopy = PointCloudData.ElementName;
+
+    TWeakObjectPtr<ALidarPointCloudActor> WeakActor = SpawnedActor;
+    TWeakObjectPtr<ULidarPointCloudComponent> WeakComp = Comp;
+
+    Async(EAsyncExecution::Thread, [PointCount, Positions, Colors, bHasColors, WeakActor, WeakComp]()
+    {
+        if (!WeakActor.IsValid() || !WeakComp.IsValid()) return;
+
+        // Build LiDAR points on background thread
+        TArray<FLidarPointCloudPoint> Points;
+        Points.SetNum(PointCount);
+
+        for (int32 i = 0; i < PointCount; ++i)
+        {
+            FVector3f pos(Positions[i].X, Positions[i].Y, Positions[i].Z);
+            FColor col = bHasColors ? Colors[i] : FColor::White;
+            Points[i] = FLidarPointCloudPoint(pos, col, true, 0);
+        }
+
+        // Create and set point cloud data
+        ULidarPointCloud* LidarCloud = ULidarPointCloud::CreateFromData(Points, false);
+
+        // Marshal back to game thread for component assignment
+        FFunctionGraphTask::CreateAndDispatchWhenReady(
+            [WeakActor, WeakComp, LidarCloud]()
+            {
+                if (WeakComp.IsValid() && LidarCloud)
+                {
+                    WeakComp->SetPointCloud(LidarCloud);
+                }
+            },
+            TStatId(), nullptr, ENamedThreads::GameThread);
+    });
+
+    if (Scale3D != FVector(1.0f))
+    {
+        SpawnedActor->SetActorScale3D(Scale3D);
+    }
+
+    UE_LOG(LogTemp, Display, TEXT("JUSYNC: Spawning point cloud actor '%s' with %d points (async)"),
+           *PointCloudData.ElementName, PointCloudData.PointCount);
+    return SpawnedActor;
+
+#else
+    UE_LOG(LogTemp, Warning, TEXT("JUSYNC: SpawnLidarPointCloudAtLocation called but middleware not available"));
+    return nullptr;
+#endif
+}
+
+TArray<AActor*> UJUSYNCSubsystem::BatchSpawnPointCloudsAtLocations(const TArray<FJUSYNCPointCloudData>& PointCloudDataArray,
+    const TArray<FVector>& Locations)
+{
+    TArray<AActor*> SpawnedActors;
+
+    if (PointCloudDataArray.Num() == 0 || Locations.Num() == 0)
+    {
+        return SpawnedActors;
+    }
+
+    for (int32 i = 0; i < PointCloudDataArray.Num(); ++i)
+    {
+        if (!PointCloudDataArray[i].IsValid()) continue;
+
+        FVector Loc = i < Locations.Num() ? Locations[i] : FVector::ZeroVector;
+        AActor* Actor = SpawnLidarPointCloudAtLocation(PointCloudDataArray[i], Loc);
+        if (Actor) SpawnedActors.Add(Actor);
+    }
+
+    UE_LOG(LogTemp, Display, TEXT("JUSYNC: Batch spawned %d point cloud actors"), SpawnedActors.Num());
+    return SpawnedActors;
+}
+
+void UJUSYNCSubsystem::LoadPointCloudFromBuffer_Async(const TArray<uint8>& Buffer, const FString& Filename, FOnPointCloudLoaded OnLoaded)
+{
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this, Buffer, Filename, OnLoaded]()
+    {
+        TArray<FJUSYNCPointCloudData> PCData;
+        FString ErrorMsg;
+
+        bool bSuccess = LoadPointCloudFromBuffer(Buffer, Filename, PCData);
+
+        AsyncTask(ENamedThreads::GameThread, [OnLoaded, PCData = MoveTemp(PCData), bSuccess, ErrorMsg]() mutable
+        {
+            OnLoaded.ExecuteIfBound(MoveTemp(PCData), bSuccess, ErrorMsg);
+        });
+    });
+}
+
+void UJUSYNCSubsystem::SpawnLidarPointCloudAtLocation_Async(
+    const FJUSYNCPointCloudData& PointCloudData,
+    FVector Location,
+    FRotator Rotation,
+    FVector Scale3D,
+    FOnPointCloudSpawned OnSpawned)
+{
+    AsyncTask(ENamedThreads::GameThread, [PointCloudData = PointCloudData, Location, Rotation, Scale3D, this, OnSpawned]()
+    {
+        AActor* Actor = SpawnLidarPointCloudAtLocation(PointCloudData, Location, Rotation, Scale3D);
+        OnSpawned.ExecuteIfBound(Actor, Actor != nullptr);
+    });
+}
+
+void UJUSYNCSubsystem::BatchSpawnPointCloudsAtLocations_Async(
+    const TArray<FJUSYNCPointCloudData>& PointCloudDataArray,
+    const TArray<FVector>& Locations,
+    FOnPointCloudBatchSpawned OnBatchSpawned)
+{
+    AsyncTask(ENamedThreads::GameThread, [PointCloudDataArray = PointCloudDataArray, Locations = Locations, this, OnBatchSpawned]()
+    {
+        TArray<AActor*> Spawned = BatchSpawnPointCloudsAtLocations(PointCloudDataArray, Locations);
+        OnBatchSpawned.ExecuteIfBound(Spawned);
+    });
 }
 
 

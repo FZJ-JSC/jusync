@@ -65,6 +65,10 @@ public:
     std::chrono::steady_clock::time_point lastCleanup;
     std::atomic<size_t> maxTrackedFiles{10000};
 
+    // ✅ Gradient/colormap texture caching (for point cloud color baking)
+    std::map<std::string, std::vector<uint8_t>> cachedTextures;
+    std::mutex textureCacheMutex;
+
     // ✅ NEW: Collision configuration
     std::atomic<ECollisionComplexity> defaultCollisionComplexity{ECollisionComplexity::Complex};
     std::mutex collisionConfigMutex;
@@ -376,7 +380,7 @@ public:
                 }
             };
 
-            bool result = usdProcessor->LoadUSDBuffer(buffer, fileName, processorMeshData, progressCallback);
+            bool result = usdProcessor->LoadUSDBuffer(buffer, fileName, processorMeshData, nullptr, progressCallback);
             if (!result || processorMeshData.empty()) {
                 MIDDLEWARE_LOG_ERROR("Failed to load USD data from buffer");
                 return false;
@@ -554,6 +558,37 @@ public:
             return true;
         } catch (const std::exception& e) {
             MIDDLEWARE_LOG_ERROR("Exception in GetGradientLineAsPNGBuffer: %s", e.what());
+            return false;
+        }
+    }
+
+    bool GetCachedGradientTexture(std::vector<uint8_t>& outData, int& outWidth, int& outHeight) {
+        try {
+            std::lock_guard<std::mutex> lock(textureCacheMutex);
+            // Get the most recently cached texture (last in map by insertion order)
+            if (cachedTextures.empty()) {
+                MIDDLEWARE_LOG_INFO("No cached gradient texture available");
+                return false;
+            }
+            // std::map preserves insertion order, get the last element
+            auto it = cachedTextures.end();
+            --it;
+            outData = it->second;
+            // Decode the PNG to get dimensions
+            TextureData texData = CreateTextureFromBuffer(outData);
+            if (!texData.isValid()) {
+                // Fallback: estimate dimensions if texture decode fails
+                outWidth = static_cast<int>(std::sqrt(outData.size() / 4.0));
+                outHeight = 1;
+            } else {
+                outWidth = texData.width;
+                outHeight = texData.height;
+            }
+            MIDDLEWARE_LOG_INFO("Cached gradient texture retrieved: %s (%dx%d, %zu bytes)",
+                               it->first.c_str(), outWidth, outHeight, outData.size());
+            return true;
+        } catch (const std::exception& e) {
+            MIDDLEWARE_LOG_ERROR("Exception in GetCachedGradientTexture: %s", e.what());
             return false;
         }
     }
@@ -862,6 +897,14 @@ private:
             fileData.fileType = fileType;
             MIDDLEWARE_LOG_INFO("File type detected: %s", fileType.c_str());
 
+            // Cache gradient/colormap textures (for point cloud color baking)
+            if (fileType == "IMAGE") {
+                std::lock_guard<std::mutex> lock(textureCacheMutex);
+                cachedTextures[fileData.filename] = fileData.data;
+                MIDDLEWARE_LOG_INFO("Cached gradient texture: %s (%zu bytes)",
+                    fileData.filename.c_str(), fileData.data.size());
+            }
+
             // Mark file as processed BEFORE notifying callbacks
             markFileAsProcessed(fileData.filename, fileData.hash);
 
@@ -1075,6 +1118,10 @@ bool AnariUsdMiddleware::WriteGradientLineAsPNG(const std::vector<uint8_t>& buff
 
 bool AnariUsdMiddleware::GetGradientLineAsPNGBuffer(const std::vector<uint8_t>& buffer, std::vector<uint8_t>& outPngBuffer) {
     return pImpl->GetGradientLineAsPNGBuffer(buffer, outPngBuffer);
+}
+
+bool AnariUsdMiddleware::GetCachedGradientTexture(std::vector<uint8_t>& outData, int& outWidth, int& outHeight) {
+    return pImpl->GetCachedGradientTexture(outData, outWidth, outHeight);
 }
 
 // ✅ NEW: ANARI USD DEALER client methods

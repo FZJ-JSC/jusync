@@ -981,9 +981,10 @@ UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vecto
 
 // Enhanced USD buffer loading with comprehensive safety
 bool UsdProcessor::LoadUSDBuffer(const std::vector<uint8_t>& buffer,
-                                const std::string& fileName,
-                                std::vector<MeshData>& outMeshData,
-                                ProgressCallback progressCallback) {
+                                 const std::string& fileName,
+                                 std::vector<MeshData>& outMeshData,
+                                 std::vector<PointCloudData>* outPointCloudData,
+                                 ProgressCallback progressCallback) {
     std::unique_lock<std::shared_mutex> lock(processingMutex);
     if (shutdownRequested.load()) {
         MIDDLEWARE_LOG_WARNING("USD loading aborted: shutdown requested");
@@ -994,6 +995,9 @@ bool UsdProcessor::LoadUSDBuffer(const std::vector<uint8_t>& buffer,
 
     // Clear output data first
     outMeshData.clear();
+    if (outPointCloudData) {
+        outPointCloudData->clear();
+    }
 
     // Validate inputs
     if (buffer.empty()) {
@@ -1107,13 +1111,17 @@ bool UsdProcessor::LoadUSDBuffer(const std::vector<uint8_t>& buffer,
                 return false;
             }
 
-            if (!ProcessPrim(const_cast<tinyusdz::Prim*>(&rootPrim), outMeshData, identity, 0)) {
+            if (!ProcessPrim(const_cast<tinyusdz::Prim*>(&rootPrim), outMeshData, outPointCloudData, identity, 0)) {
                 MIDDLEWARE_LOG_WARNING("Failed to process root prim: %s", rootPrim.element_name().c_str());
             }
         }
 
         size_t meshesFromMain = outMeshData.size() - initialMeshCount;
         MIDDLEWARE_LOG_INFO("Extracted %zu meshes from main stage", meshesFromMain);
+
+        if (outPointCloudData) {
+            MIDDLEWARE_LOG_INFO("Extracted %zu point clouds from main stage", outPointCloudData->size());
+        }
 
         if (progressCallback) {
             progressCallback(0.7f, "Resolving references");
@@ -1221,7 +1229,7 @@ bool UsdProcessor::LoadUSDFromDisk(const std::string& filePath,
         }
 
         // Use existing buffer processing
-        return LoadUSDBuffer(buffer, filePath, outMeshData, progressCallback);
+        return LoadUSDBuffer(buffer, filePath, outMeshData, nullptr, progressCallback);
 
     } catch (const std::exception& e) {
         MIDDLEWARE_LOG_ERROR("Exception in LoadUSDFromDisk: %s - %s", filePath.c_str(), e.what());
@@ -1324,9 +1332,10 @@ bool UsdProcessor::isSupportedExtension(const std::string& extension) {
 // Private helper methods implementation
 
 bool UsdProcessor::ProcessPrim(void* prim,
-                              std::vector<MeshData>& meshDataArray,
-                              const glm::mat4& parentTransform,
-                              int32_t depth) {
+                               std::vector<MeshData>& meshDataArray,
+                               std::vector<PointCloudData>* outPointCloudData,
+                               const glm::mat4& parentTransform,
+                               int32_t depth) {
     MIDDLEWARE_VALIDATE_POINTER(prim, "ProcessPrim");
 
     // Check recursion depth limit
@@ -1364,37 +1373,59 @@ bool UsdProcessor::ProcessPrim(void* prim,
             return false;
         }
 
-        // Check if this is a mesh primitive
-        const tinyusdz::GeomMesh* mesh = usdPrim.as<tinyusdz::GeomMesh>();
-        if (mesh) {
-            MIDDLEWARE_LOG_DEBUG("Found mesh primitive: %s", usdPrim.element_name().c_str());
+        // Check for point cloud primitive FIRST (def Points)
+        const tinyusdz::GeomPoints* pts = usdPrim.as<tinyusdz::GeomPoints>();
+        if (pts) {
+            MIDDLEWARE_LOG_INFO("Found point cloud primitive: %s", usdPrim.element_name().c_str());
 
-            // Check memory limits before processing
-            if (!checkMemoryLimit(sizeof(MeshData) + 1000000)) { // Estimate 1MB per mesh
-                MIDDLEWARE_LOG_ERROR("Memory limit would be exceeded processing mesh: %s",
-                                    usdPrim.element_name().c_str());
-                return false;
+            PointCloudData pointData;
+            pointData.elementName = usdPrim.element_name();
+            pointData.typeName = usdPrim.prim_type_name();
+
+            if (ExtractPointCloudData(const_cast<tinyusdz::GeomPoints*>(pts), pointData, worldTransform)) {
+                if (pointData.isValid()) {
+                    if (outPointCloudData) {
+                        outPointCloudData->push_back(std::move(pointData));
+                    }
+                    MIDDLEWARE_LOG_INFO("Extracted point cloud: %s (%zu points, %zu colors)",
+                        pointData.elementName.c_str(), pointData.getPointCount(), pointData.vertex_colors.size());
+                }
             }
+        }
 
-            MeshData meshData;
-            meshData.elementName = usdPrim.element_name();
-            meshData.typeName = usdPrim.prim_type_name();
+        // Check if this is a mesh primitive (skip if already handled as point cloud)
+        if (!pts) {
+            const tinyusdz::GeomMesh* mesh = usdPrim.as<tinyusdz::GeomMesh>();
+            if (mesh) {
+                MIDDLEWARE_LOG_DEBUG("Found mesh primitive: %s", usdPrim.element_name().c_str());
 
-            if (ExtractMeshData(const_cast<tinyusdz::GeomMesh*>(mesh), meshData, worldTransform)) {
-                if (meshData.isValid()) {
-                    meshDataArray.push_back(std::move(meshData));
-                    stats.meshesExtracted.fetch_add(1);
-                    MIDDLEWARE_LOG_DEBUG("Successfully extracted mesh: %s (%zu vertices, %zu triangles)",
-                                       meshData.elementName.c_str(),
-                                       meshData.getVertexCount(),
-                                       meshData.getTriangleCount());
+                // Check memory limits before processing
+                if (!checkMemoryLimit(sizeof(MeshData) + 1000000)) { // Estimate 1MB per mesh
+                    MIDDLEWARE_LOG_ERROR("Memory limit would be exceeded processing mesh: %s",
+                                        usdPrim.element_name().c_str());
+                    return false;
+                }
+
+                MeshData meshData;
+                meshData.elementName = usdPrim.element_name();
+                meshData.typeName = usdPrim.prim_type_name();
+
+                if (ExtractMeshData(const_cast<tinyusdz::GeomMesh*>(mesh), meshData, worldTransform)) {
+                    if (meshData.isValid()) {
+                        meshDataArray.push_back(std::move(meshData));
+                        stats.meshesExtracted.fetch_add(1);
+                        MIDDLEWARE_LOG_DEBUG("Successfully extracted mesh: %s (%zu vertices, %zu triangles)",
+                                           meshData.elementName.c_str(),
+                                           meshData.getVertexCount(),
+                                           meshData.getTriangleCount());
+                    } else {
+                        MIDDLEWARE_LOG_WARNING("Extracted mesh data is invalid: %s",
+                                             usdPrim.element_name().c_str());
+                    }
                 } else {
-                    MIDDLEWARE_LOG_WARNING("Extracted mesh data is invalid: %s",
+                    MIDDLEWARE_LOG_WARNING("Failed to extract mesh data: %s",
                                          usdPrim.element_name().c_str());
                 }
-            } else {
-                MIDDLEWARE_LOG_WARNING("Failed to extract mesh data: %s",
-                                     usdPrim.element_name().c_str());
             }
         }
 
@@ -1412,17 +1443,20 @@ bool UsdProcessor::ProcessPrim(void* prim,
                 std::vector<std::future<bool>> futures;
                 futures.reserve(childCount);
                 std::vector<std::vector<MeshData>> childResults(childCount);
+                std::vector<std::vector<PointCloudData>> childPCResults(childCount);
                 
                 for (size_t i = 0; i < childCount; ++i) {
                     futures.push_back(std::async(std::launch::async, [&, i]() {
                         std::vector<MeshData> localMeshData;
+                        std::vector<PointCloudData> localPCData;
                         bool result = ProcessPrim(const_cast<tinyusdz::Prim*>(&children[i]),
-                                                 localMeshData, worldTransform, depth + 1);
+                                                 localMeshData, &localPCData, worldTransform, depth + 1);
                         if (!result) {
                             MIDDLEWARE_LOG_WARNING("Failed to process child prim: %s",
                                                  children[i].element_name().c_str());
                         }
                         childResults[i] = std::move(localMeshData);
+                        childPCResults[i] = std::move(localPCData);
                         return result;
                     }));
                 }
@@ -1431,13 +1465,21 @@ bool UsdProcessor::ProcessPrim(void* prim,
                 for (size_t i = 0; i < futures.size(); ++i) {
                     try {
                         futures[i].get(); // Wait for completion
-                        // Merge results with move semantics
+                        // Merge mesh results
                         auto& result = childResults[i];
                         if (!result.empty()) {
                             meshDataArray.reserve(meshDataArray.size() + result.size());
                             meshDataArray.insert(meshDataArray.end(),
                                                 std::make_move_iterator(result.begin()),
                                                 std::make_move_iterator(result.end()));
+                        }
+                        // Merge point cloud results
+                        auto& pcResult = childPCResults[i];
+                        if (!pcResult.empty() && outPointCloudData) {
+                            outPointCloudData->reserve(outPointCloudData->size() + pcResult.size());
+                            outPointCloudData->insert(outPointCloudData->end(),
+                                                      std::make_move_iterator(pcResult.begin()),
+                                                      std::make_move_iterator(pcResult.end()));
                         }
                     } catch (const std::exception& e) {
                         MIDDLEWARE_LOG_ERROR("Exception processing child %zu: %s", i, e.what());
@@ -1447,7 +1489,7 @@ bool UsdProcessor::ProcessPrim(void* prim,
                 // Sequential processing for small numbers
                 for (const auto& child : children) {
                     if (!ProcessPrim(const_cast<tinyusdz::Prim*>(&child),
-                                    meshDataArray, worldTransform, depth + 1)) {
+                                    meshDataArray, outPointCloudData, worldTransform, depth + 1)) {
                         MIDDLEWARE_LOG_WARNING("Failed to process child prim: %s",
                                              child.element_name().c_str());
                     }
@@ -1457,7 +1499,7 @@ bool UsdProcessor::ProcessPrim(void* prim,
             // Sequential processing for small numbers or deep recursion
             for (const auto& child : children) {
                 if (!ProcessPrim(const_cast<tinyusdz::Prim*>(&child),
-                                meshDataArray, worldTransform, depth + 1)) {
+                                meshDataArray, outPointCloudData, worldTransform, depth + 1)) {
                     MIDDLEWARE_LOG_WARNING("Failed to process child prim: %s",
                                          child.element_name().c_str());
                 }
@@ -1636,109 +1678,54 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             outMeshData.faceVertexCounts.push_back(static_cast<uint32_t>(count));
         }
 
-        if (faceVertexCounts.empty() || faceVertexIndices.empty()) {
-            MIDDLEWARE_LOG_WARNING("Mesh has no face data: %s", outMeshData.elementName.c_str());
-            return false;
+        bool bHasFaces = !faceVertexCounts.empty() && !faceVertexIndices.empty();
+        if (!bHasFaces) {
+            MIDDLEWARE_LOG_INFO("No face data for %s — treating as point cloud (%zu points)",
+                outMeshData.elementName.c_str(), outMeshData.points.size());
         }
 
-        // Conditionally triangulate based on subdivision scheme
         std::vector<uint32_t> finalIndices;
-
-        if (subdivScheme == "none") {
-            // Only triangulate for non-subdivision meshes
-            MIDDLEWARE_LOG_DEBUG("Triangulating mesh (subdivScheme=none)");
-
-            // Pre-calculate total triangles for better memory allocation
-            size_t totalTriangles = 0;
-            for (int32_t count : faceVertexCounts) {
-                if (count >= 3 && count <= 100) {
-                    totalTriangles += (count - 2);
+        if (bHasFaces) {
+            if (subdivScheme == "none") {
+                MIDDLEWARE_LOG_DEBUG("Triangulating mesh (subdivScheme=none)");
+                size_t totalTriangles = 0;
+                for (int32_t count : faceVertexCounts) {
+                    if (count >= 3 && count <= 100) totalTriangles += (count - 2);
                 }
-            }
-            finalIndices.reserve(totalTriangles * 3);
-
-            size_t indexOffset = 0;
-            const size_t vertexCount = outMeshData.points.size();
-            
-            for (size_t faceIdx = 0; faceIdx < faceVertexCounts.size(); ++faceIdx) {
-                int32_t numVertsInFace = faceVertexCounts[faceIdx];
-
-                if (numVertsInFace < 3) {
-                    MIDDLEWARE_LOG_WARNING("Face %zu has less than 3 vertices, skipping", faceIdx);
-                    indexOffset += numVertsInFace;
-                    continue;
-                }
-
-                if (numVertsInFace > 100) {
-                    MIDDLEWARE_LOG_WARNING("Face %zu has too many vertices (%d), skipping", faceIdx, numVertsInFace);
-                    indexOffset += numVertsInFace;
-                    continue;
-                }
-
-                if (indexOffset + numVertsInFace > faceVertexIndices.size()) {
-                    MIDDLEWARE_LOG_ERROR("Face vertex indices out of bounds");
-                    break;
-                }
-
-                // Triangulate this face (fan triangulation) - OPTIMIZED VERSION
-                uint32_t baseIdx = static_cast<uint32_t>(faceVertexIndices[indexOffset]);
-                
-                // Check base index once
-                if (baseIdx >= vertexCount) {
-                    MIDDLEWARE_LOG_WARNING("Invalid base index in face, skipping face");
-                    indexOffset += numVertsInFace;
-                    continue;
-                }
-                
-                // Generate triangles using fan triangulation - optimized loop
-                const int32_t maxTriIdx = numVertsInFace - 2;
-                for (int32_t triIdx = 0; triIdx < maxTriIdx; ++triIdx) {
-                    uint32_t idx1 = static_cast<uint32_t>(faceVertexIndices[indexOffset + triIdx + 1]);
-                    uint32_t idx2 = static_cast<uint32_t>(faceVertexIndices[indexOffset + triIdx + 2]);
-                    
-                    // Fast bounds checking
-                    if (idx1 >= vertexCount || idx2 >= vertexCount) {
-                        MIDDLEWARE_LOG_WARNING("Invalid triangle indices, skipping triangle");
-                        continue;
+                finalIndices.reserve(totalTriangles * 3);
+                size_t indexOffset = 0;
+                const size_t vertexCount = outMeshData.points.size();
+                for (size_t faceIdx = 0; faceIdx < faceVertexCounts.size(); ++faceIdx) {
+                    int32_t numVertsInFace = faceVertexCounts[faceIdx];
+                    if (numVertsInFace < 3 || numVertsInFace > 100) { indexOffset += numVertsInFace; continue; }
+                    if (indexOffset + numVertsInFace > faceVertexIndices.size()) break;
+                    uint32_t baseIdx = static_cast<uint32_t>(faceVertexIndices[indexOffset]);
+                    if (baseIdx >= vertexCount) { indexOffset += numVertsInFace; continue; }
+                    for (int32_t triIdx = 0; triIdx < numVertsInFace - 2; ++triIdx) {
+                        uint32_t idx1 = static_cast<uint32_t>(faceVertexIndices[indexOffset + triIdx + 1]);
+                        uint32_t idx2 = static_cast<uint32_t>(faceVertexIndices[indexOffset + triIdx + 2]);
+                        if (idx1 >= vertexCount || idx2 >= vertexCount) continue;
+                        finalIndices.push_back(baseIdx);
+                        finalIndices.push_back(idx1);
+                        finalIndices.push_back(idx2);
                     }
-                    
-                    // Direct push_back for better cache locality
-                    finalIndices.push_back(baseIdx);
-                    finalIndices.push_back(idx1);
-                    finalIndices.push_back(idx2);
+                    indexOffset += numVertsInFace;
                 }
-
-                indexOffset += numVertsInFace;
-            }
-        } else {
-            // Preserve original topology for subdivision surfaces
-            MIDDLEWARE_LOG_DEBUG("Preserving original topology for subdivision (scheme=%s)", subdivScheme.c_str());
-
-            finalIndices.reserve(faceVertexIndices.size());
-            const size_t vertexCount = outMeshData.points.size();
-            
-            for (const auto& idx : faceVertexIndices) {
-                if (static_cast<size_t>(idx) >= vertexCount) {
-                    MIDDLEWARE_LOG_WARNING("Invalid index %d, skipping", idx);
-                    continue;
+            } else {
+                MIDDLEWARE_LOG_DEBUG("Preserving original topology for subdivision (scheme=%s)", subdivScheme.c_str());
+                finalIndices.reserve(faceVertexIndices.size());
+                const size_t vertexCount = outMeshData.points.size();
+                for (const auto& idx : faceVertexIndices) {
+                    if (static_cast<size_t>(idx) >= vertexCount) continue;
+                    finalIndices.push_back(static_cast<uint32_t>(idx));
                 }
-                finalIndices.push_back(static_cast<uint32_t>(idx));
             }
+
+            if (finalIndices.empty()) { MIDDLEWARE_LOG_WARNING("No valid indices generated"); return false; }
+            outMeshData.indices = std::move(finalIndices);
         }
 
-        if (finalIndices.empty()) {
-            MIDDLEWARE_LOG_WARNING("No valid indices generated");
-            return false;
-        }
-
-        if (finalIndices.size() > safety::MAX_MESH_INDICES) {
-            MIDDLEWARE_LOG_ERROR("Too many indices generated (%zu max %zu)", finalIndices.size(), safety::MAX_MESH_INDICES);
-            return false;
-        }
-
-        outMeshData.indices = std::move(finalIndices);
-
-        // Extract normals with validation and PARALLEL processing
+        // Extract normals
         auto normals = geomMesh->get_normals();
         if (!normals.empty()) {
             if (normals.size() != points.size()) {
@@ -2550,7 +2537,7 @@ bool UsdProcessor::loadReferencedFile(const std::string& filePath, std::vector<M
             glm::mat4 identity(1.0f);
             for (const auto& rootPrim : refStage.root_prims()) {
                 ProcessPrim(const_cast<tinyusdz::Prim*>(&rootPrim),
-                           outMeshData, identity, 0);
+                            outMeshData, nullptr, identity, 0);
             }
 
             size_t meshesAdded = outMeshData.size() - initialMeshCount;
@@ -2570,6 +2557,191 @@ bool UsdProcessor::loadReferencedFile(const std::string& filePath, std::vector<M
         MIDDLEWARE_LOG_ERROR("Exception loading referenced file %s: %s", filePath.c_str(), e.what());
         return false;
     }
+}
+
+bool UsdProcessor::ExtractPointCloudData(tinyusdz::GeomPoints* geomPoints,
+                                         PointCloudData& outData,
+                                         const glm::mat4& worldTransform) {
+    if (!geomPoints) {
+        MIDDLEWARE_LOG_ERROR("ExtractPointCloudData: null GeomPoints pointer");
+        return false;
+    }
+
+    try {
+        auto startTime = std::chrono::high_resolution_clock::now();
+
+        // ── Extract point positions via TypedAttribute<Animatable<std::vector<value::point3f>>> ──
+        auto pointsAnim = geomPoints->points.get_value();
+        if (pointsAnim && pointsAnim->is_timesamples()) {
+            std::vector<tinyusdz::value::point3f> rawPoints;
+            if (pointsAnim->get(0.0, &rawPoints) && !rawPoints.empty()) {
+                outData.positions.resize(rawPoints.size());
+                size_t i = 0;
+                for (const auto& pt : rawPoints) {
+                    glm::vec4 homogeneous = glm::vec4(static_cast<float>(pt.x),
+                                                      static_cast<float>(pt.y),
+                                                      static_cast<float>(pt.z), 1.0f);
+                    glm::vec4 transformed = worldTransform * homogeneous;
+                    outData.positions[i] = glm::vec3(transformed.x / transformed.w,
+                                                     transformed.y / transformed.w,
+                                                     transformed.z / transformed.w);
+                    i++;
+                }
+            } else {
+                MIDDLEWARE_LOG_WARNING("Empty point positions for %s", outData.elementName.c_str());
+                return false;
+            }
+        } else if (pointsAnim && pointsAnim->has_value()) {
+            std::vector<tinyusdz::value::point3f> rawPoints;
+            pointsAnim->get_default(&rawPoints);
+            outData.positions.resize(rawPoints.size());
+            size_t i = 0;
+            for (const auto& pt : rawPoints) {
+                glm::vec4 homogeneous = glm::vec4(static_cast<float>(pt.x),
+                                                  static_cast<float>(pt.y),
+                                                  static_cast<float>(pt.z), 1.0f);
+                glm::vec4 transformed = worldTransform * homogeneous;
+                outData.positions[i] = glm::vec3(transformed.x / transformed.w,
+                                                 transformed.y / transformed.w,
+                                                 transformed.z / transformed.w);
+                i++;
+            }
+        } else {
+            MIDDLEWARE_LOG_WARNING("No point positions found for %s", outData.elementName.c_str());
+            return false;
+        }
+        MIDDLEWARE_LOG_INFO("Extracted %zu point positions from %s",
+            outData.positions.size(), outData.elementName.c_str());
+
+        // ── Extract normals ──
+        auto normalsAnim = geomPoints->normals.get_value();
+        if (normalsAnim) {
+            std::vector<tinyusdz::value::normal3f> normalData;
+            if (normalsAnim->is_timesamples()) {
+                normalsAnim->get(0.0, &normalData);
+            } else if (normalsAnim->has_value()) {
+                normalsAnim->get_default(&normalData);
+            }
+            if (!normalData.empty()) {
+                outData.normals.resize(normalData.size());
+                for (size_t i = 0; i < normalData.size(); i++) {
+                    outData.normals[i] = glm::normalize(glm::vec3(
+                        static_cast<float>(normalData[i].x),
+                        static_cast<float>(normalData[i].y),
+                        static_cast<float>(normalData[i].z)));
+                }
+                MIDDLEWARE_LOG_INFO("Extracted %zu normals from %s", outData.normals.size(), outData.elementName.c_str());
+            }
+        }
+
+        // ── Extract widths ──
+        auto widthsAnim = geomPoints->widths.get_value();
+        if (widthsAnim) {
+            std::vector<float> widthData;
+            if (widthsAnim->is_timesamples()) {
+                widthsAnim->get(0.0, &widthData);
+            } else if (widthsAnim->has_value()) {
+                widthsAnim->get_default(&widthData);
+            }
+            if (!widthData.empty()) {
+                outData.widths = std::move(widthData);
+                MIDDLEWARE_LOG_INFO("Extracted %zu point widths from %s", outData.widths.size(), outData.elementName.c_str());
+            }
+        }
+
+        // ── Extract attribute0 via primvar (GeomPrimvar interface) ──
+        outData.scalarAttributes.clear();
+        const std::vector<std::string> attrNames = {
+            "primvars:attribute0", "attribute0",
+            "primvars:st", "st",
+            "primvars:map1", "map1"
+        };
+        for (const auto& name : attrNames) {
+            tinyusdz::GeomPrimvar primvar;
+            std::string err;
+            if (geomPoints->get_primvar(name, &primvar, &err)) {
+                std::vector<tinyusdz::value::texcoord2f> uvData;
+                if (primvar.get_value(&uvData)) {
+                    outData.scalarAttributes.resize(uvData.size());
+                    for (size_t i = 0; i < uvData.size(); i++) {
+                        outData.scalarAttributes[i] = glm::vec2(uvData[i].s, uvData[i].t);
+                    }
+                    outData.uvSetNames.push_back(name);
+                    MIDDLEWARE_LOG_INFO("Extracted %zu %s attribute values from %s",
+                        outData.scalarAttributes.size(), name.c_str(), outData.elementName.c_str());
+                    break;
+                }
+            }
+        }
+
+        // ── Extract direct colors via primvar (GeomPrimvar interface) ──
+        tinyusdz::GeomPrimvar colorPrimvar;
+        std::string colorErr;
+        if (geomPoints->get_primvar("primvars:color", &colorPrimvar, &colorErr)) {
+            std::vector<tinyusdz::value::color4f> rawColors;
+            if (colorPrimvar.get_value(&rawColors) && !rawColors.empty() &&
+                rawColors.size() == outData.positions.size()) {
+                outData.vertex_colors.resize(rawColors.size());
+                for (size_t i = 0; i < rawColors.size(); i++) {
+                    outData.vertex_colors[i] = glm::vec4(
+                        static_cast<float>(rawColors[i].r),
+                        static_cast<float>(rawColors[i].g),
+                        static_cast<float>(rawColors[i].b),
+                        static_cast<float>(rawColors[i].a));
+                }
+                MIDDLEWARE_LOG_INFO("Extracted %zu direct colors from %s",
+                    rawColors.size(), outData.elementName.c_str());
+            }
+        }
+
+        auto endTime = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
+        MIDDLEWARE_LOG_DEBUG("ExtractPointCloudData for '%s' (%zu points) took %lld ms",
+            outData.elementName.c_str(), outData.positions.size(), duration);
+
+        return true;
+
+    } catch (const std::exception& e) {
+        MIDDLEWARE_LOG_ERROR("Exception in ExtractPointCloudData: %s", e.what());
+        return false;
+    }
+}
+
+bool UsdProcessor::BakeColorsFromGradient(PointCloudData& pointCloud,
+                                          const uint8_t* gradientRGBA,
+                                          int texWidth) {
+    if (!gradientRGBA || texWidth <= 0 || pointCloud.scalarAttributes.empty()) {
+        MIDDLEWARE_LOG_WARNING("BakeColorsFromGradient: invalid input (gradient=%p, width=%d, attrs=%zu)",
+            gradientRGBA, texWidth, pointCloud.scalarAttributes.size());
+        return false;
+    }
+
+    size_t pointCount = pointCloud.scalarAttributes.size();
+    pointCloud.vertex_colors.resize(pointCount);
+
+    // Parallel bake using TBB or std::async
+    size_t batchSize = 100000; // Process in batches for millions of points
+    for (size_t start = 0; start < pointCount; start += batchSize) {
+        size_t end = std::min(start + batchSize, pointCount);
+        for (size_t i = start; i < end; i++) {
+            // attribute0.x is the scalar colormap value in [0, 1]
+            float scalar = pointCloud.scalarAttributes[i].x;
+            int idx = static_cast<int>(scalar * (texWidth - 1));
+            idx = std::clamp(idx, 0, texWidth - 1);
+            int px = idx * 4; // RGBA offset
+
+            pointCloud.vertex_colors[i] = glm::vec4(
+                gradientRGBA[px] / 255.0f,
+                gradientRGBA[px + 1] / 255.0f,
+                gradientRGBA[px + 2] / 255.0f,
+                gradientRGBA[px + 3] / 255.0f
+            );
+        }
+    }
+
+    MIDDLEWARE_LOG_INFO("Baked %zu colors from %dx%d gradient texture (%d channels)",
+        pointCount, texWidth, 1, 4);
+    return true;
 }
 
 } // namespace anari_usd_middleware

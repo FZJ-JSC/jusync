@@ -17,12 +17,14 @@ AJUSYNCFileSpawnerActor::AJUSYNCFileSpawnerActor()
     bClipsOnly = true;
     SpawnTargetActor = nullptr;
     BaseSpawnLocation = FVector::ZeroVector;
-    SpawnSpacing = 200.0f;
+    SpawnSpacing = 0.0f;
     SpawnMaterial = nullptr;
     TextureSampleParameterName = TEXT("");
     SpawnScale = FVector::OneVector;
     bUseUniformScaling = true;
     bAutoStart = true;
+    bSpawnPointClouds = true;
+    PointCloudSize = 1.0f;
     MaxRetries = 2;
     CurrentRetryCount = 0;
     CurrentState = EJUSYNCSpawnerState::Idle;
@@ -64,7 +66,7 @@ void AJUSYNCFileSpawnerActor::StartSpawning()
     FilteredFiles.Empty(); FilteredSizes.Empty(); FilteredRanks.Empty();
     FilesDownloaded = 0; FilesTotal = 0; ActorsSpawned = 0;
     FailedFileIndices.Empty();
-    NextSpawnIndex = 0; PendingDownloads = 0; bIsCancelled = false;
+    NextSpawnIndex = 0; PendingDownloads = 0; PendingAsyncSpawns = 0; bIsCancelled = false;
     CurrentRetryCount = 0;
     CurrentState = EJUSYNCSpawnerState::Connecting;
     UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: starting pipeline"));
@@ -75,6 +77,7 @@ void AJUSYNCFileSpawnerActor::StartSpawning()
 void AJUSYNCFileSpawnerActor::CancelSpawning()
 {
     bIsCancelled = true;
+    PendingAsyncSpawns = 0;
     CurrentState = EJUSYNCSpawnerState::Idle;
     PendingDownloads = 0;
 }
@@ -344,61 +347,140 @@ void AJUSYNCFileSpawnerActor::SpawnMeshFromData(const FString& Filename, const T
     FString Preview;
     bool bParsed = UJUSYNCBlueprintLibrary::LoadUSDFromBuffer(FileData, Filename, MeshData, Preview);
 
-    if (!bParsed)
+    // Also try to extract point clouds
+    TArray<FJUSYNCPointCloudData> PointCloudData;
+    bool bHasPointClouds = UJUSYNCBlueprintLibrary::LoadUSDPointCloudFromBuffer(FileData, Filename, PointCloudData);
+
+    bool bHadMeshes = false;
+    bool bHadPointClouds = false;
+
+    // Async spawn meshes if any
+    if (bParsed && MeshData.Num() > 0)
     {
-        UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: [PARSE FAILED] '%s'"), *Filename);
-        GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Yellow, FString::Printf(TEXT("[Spawner] PARSE FAILED: %s"), *Filename));
-        CheckAllDownloadsComplete();
-        return;
-    }
+        int32 ValidMeshCount = 0;
+        for (const FJUSYNCMeshData& m : MeshData) if (m.IsValid()) ValidMeshCount++;
 
-    if (MeshData.Num() == 0)
-    {
-        UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: [NO MESHES] '%s' parsed but returned 0 meshes"), *Filename);
-        GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Yellow, FString::Printf(TEXT("[Spawner] NO MESHES: %s"), *Filename));
-        CheckAllDownloadsComplete();
-        return;
-    }
-
-    int32 ValidMeshCount = 0;
-    for (const FJUSYNCMeshData& m : MeshData) if (m.IsValid()) ValidMeshCount++;
-
-    if (ValidMeshCount == 0)
-    {
-        UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: [INVALID MESHES] '%s' has %d meshes but none are valid (0 verts/tris)"), *Filename, MeshData.Num());
-        GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Yellow, FString::Printf(TEXT("[Spawner] INVALID MESHES: %s (0 verts/tris)"), *Filename));
-        CheckAllDownloadsComplete();
-        return;
-    }
-
-    for (const FJUSYNCMeshData& Mesh : MeshData)
-    {
-        if (!Mesh.IsValid()) continue;
-
-        FVector SpawnLoc = GetNextSpawnLocation();
-        AActor* Spawned = UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(Mesh, SpawnLoc);
-
-        if (Spawned)
+        if (ValidMeshCount > 0)
         {
-            SpawnedActors.Add(Spawned);
-            ActorsSpawned++;
+            bHadMeshes = true;
 
-            if (SpawnScale != FVector::ZeroVector)
+            PendingAsyncSpawns++;
+            FString FCopy = Filename;
+            AsyncTask(ENamedThreads::GameThread, [this, FCopy, MeshData]()
             {
-                FVector FinalScale = bUseUniformScaling ? FVector(SpawnScale.X) : SpawnScale;
-                Spawned->SetActorScale3D(FinalScale);
-            }
+                int32 SpawnCount = 0;
+                for (int32 i = 0; i < MeshData.Num(); ++i)
+                {
+                    if (!MeshData[i].IsValid()) continue;
 
-            ApplyDynamicMaterial(Cast<UPrimitiveComponent>(Spawned->GetRootComponent()), Filename);
+                    FVector SpawnLoc = GetNextSpawnLocation();
+                    AActor* Spawned = UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(MeshData[i], SpawnLoc);
 
-            OnFileComplete.Broadcast(Filename, Spawned);
-            NextSpawnIndex++;
+                    if (Spawned)
+                    {
+                        SpawnedActors.Add(Spawned);
+                        ActorsSpawned++;
 
-            UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: spawned actor from '%s' (actor #%d)"), *Filename, ActorsSpawned);
+                        // Disable collision on spawned mesh
+                        Spawned->SetActorEnableCollision(false);
+
+                        if (SpawnScale != FVector::ZeroVector)
+                        {
+                            FVector FinalScale = bUseUniformScaling ? FVector(SpawnScale.X) : SpawnScale;
+                            Spawned->SetActorScale3D(FinalScale);
+                        }
+
+                        ApplyDynamicMaterial(Cast<UPrimitiveComponent>(Spawned->GetRootComponent()), FCopy);
+                        OnFileComplete.Broadcast(FCopy, Spawned);
+                        NextSpawnIndex++;
+                        SpawnCount++;
+
+                        UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: spawned mesh '%s' from '%s' (actor #%d)"),
+                               *MeshData[i].ElementName, *FCopy, ActorsSpawned);
+                    }
+                }
+
+                PendingAsyncSpawns--;
+                if (PendingAsyncSpawns <= 0) PendingAsyncSpawns = 0;
+
+                FString ResultMsg = FString::Printf(TEXT("[Spawner] %s: spawned %d meshes"), *FCopy, SpawnCount);
+                GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Green, ResultMsg);
+            });
+        }
+    }
+
+    // Async spawn point clouds if any
+    if (bSpawnPointClouds && bHasPointClouds && PointCloudData.Num() > 0)
+    {
+        int32 ValidPCCount = 0;
+        for (const FJUSYNCPointCloudData& pc : PointCloudData) if (pc.IsValid()) ValidPCCount++;
+
+        if (ValidPCCount > 0)
+        {
+            bHadPointClouds = true;
+
+            FString FCopy = Filename;
+            FVector SpawnSc = SpawnScale;
+            float PCSize = PointCloudSize;
+            bool bUn = bUseUniformScaling;
+            int32 StartIdx = NextSpawnIndex;
+            PendingAsyncSpawns++;
+
+            AsyncTask(ENamedThreads::GameThread, [this, PointCloudData, FCopy, SpawnSc, PCSize, bUn, StartIdx]()
+            {
+                for (const FJUSYNCPointCloudData& PC : PointCloudData)
+                {
+                    if (!PC.IsValid()) continue;
+
+                    FVector SpawnLoc = GetNextSpawnLocation();
+                    AActor* Spawned = UJUSYNCBlueprintLibrary::SpawnPointCloudAtLocation(PC, SpawnLoc, FRotator::ZeroRotator, FVector(1.0f));
+
+                    if (Spawned)
+                    {
+                        SpawnedActors.Add(Spawned);
+                        ActorsSpawned++;
+
+                        // Disable collision on point cloud actor
+                        Spawned->SetActorEnableCollision(false);
+
+                        if (SpawnSc != FVector::ZeroVector)
+                        {
+                            FVector FinalScale = bUn ? FVector(SpawnSc.X) : SpawnSc;
+                            Spawned->SetActorScale3D(FinalScale);
+                        }
+
+                        OnFileComplete.Broadcast(FCopy, Spawned);
+                        NextSpawnIndex++;
+
+                        UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: spawned point cloud '%s' (actor #%d)"),
+                               *PC.ElementName, ActorsSpawned);
+                    }
+                }
+
+                PendingAsyncSpawns--;
+                if (PendingAsyncSpawns <= 0) PendingAsyncSpawns = 0;
+
+                FString ResultMsg = FString::Printf(TEXT("[Spawner] %s: spawned point clouds"), *FCopy);
+                GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Green, ResultMsg);
+            });
+        }
+    }
+
+    // Report if nothing to spawn
+    if (!bHadMeshes && !bHadPointClouds)
+    {
+        if (!bParsed)
+        {
+            UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: [PARSE FAILED] '%s'"), *Filename);
+            GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Yellow,
+                FString::Printf(TEXT("[Spawner] PARSE FAILED: %s"), *Filename));
         }
         else
         {
-            UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: [SPAWN FAILED] mesh '%s' from '%s'"), *Mesh.ElementName, *Filename);
+            UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: [NO GEOMETRY] '%s' parsed but returned no meshes or point clouds"),
+                   *Filename);
+            GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Yellow,
+                FString::Printf(TEXT("[Spawner] NO GEOMETRY: %s"), *Filename));
         }
     }
 

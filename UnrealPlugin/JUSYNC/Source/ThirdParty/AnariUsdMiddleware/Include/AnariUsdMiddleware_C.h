@@ -137,6 +137,36 @@ typedef struct {
     size_t data_size;           // Size of pixel data in bytes
 } CTextureData;
 
+/**
+ * Point cloud data structure for C interface
+ * Contains per-point positions, colors (baked from gradient texture), and optional attributes
+ * Compatible with Unreal Engine LiDAR Point Cloud plugin
+ *
+ * Memory Layout:
+ * - All arrays are flat and suitable for direct conversion to FLidarPointCloudPoint
+ * - Positions as [x1,y1,z1, x2,y2,z2, ...]
+ * - Colors as [r1,g1,b1,a1, r2,g2,b2,a2, ...] in range [0.0, 1.0]
+ */
+typedef struct {
+    char element_name[256];      // USD primitive name (null-terminated)
+    char type_name[128];         // Always "GeomPoints"
+
+    float* positions;            // Flat xyz array, points_count * 3 floats
+    size_t points_count;         // Number of points (not floats)
+
+    float* normals;              // Flat xyz or NULL, points_count * 3
+    float* colors;               // Flat rgba or NULL, points_count * 4, values [0.0, 1.0]
+    float* widths;               // Flat float or NULL, one per point
+    int has_normals;             // 1 if normals array is valid
+    int has_colors;              // 1 if colors array is valid
+    int has_widths;              // 1 if widths array is valid
+
+    // Bounding box
+    float bounding_box_min[3];
+    float bounding_box_max[3];
+
+} CPointCloudData;
+
 // ============================================================================
 // CALLBACK FUNCTION TYPES
 // ============================================================================
@@ -901,6 +931,59 @@ ANARI_USD_MIDDLEWARE_C_API int RequestFilesParallelDirect_C(
     ParallelDownloadCompleteCallback_C completion_callback,
     ParallelDownloadErrorCallback_C error_callback,
     int timeout_ms);
+
+// ============================================================================
+// POINT CLOUD EXTRACTION
+// ============================================================================
+
+/**
+ * Extract point cloud data from a USD buffer
+ * Calls UsdProcessor::LoadUSDBuffer with point cloud output, converts to C struct
+ * Gradient colors are auto-baked from the most recently cached PNG texture
+ *
+ * @param buffer Raw USD buffer data
+ * @param buffer_size Size of buffer in bytes
+ * @param filename Original filename for format detection
+ * @param out_clouds Output: allocated array of CPointCloudData (NULL if no point clouds)
+ * @param out_count Output: number of point clouds extracted
+ * @return 1 if successful, 0 on failure
+ */
+ANARI_USD_MIDDLEWARE_C_API int ProcessPointCloudFromUSD_C(
+    const unsigned char* buffer,
+    size_t buffer_size,
+    const char* filename,
+    CPointCloudData** out_clouds,
+    size_t* out_count);
+
+/**
+ * Retrieve the most recently cached gradient/colormap texture
+ * Colors are baked using the gradient texture width as the colormap size
+ *
+ * @param gradient_rgba Output: allocated RGBA gradient texture data (NULL if none cached)
+ * @param out_width Output: texture width in pixels
+ * @param out_height Output: texture height in pixels
+ * @return 1 if a gradient texture is available, 0 otherwise
+ */
+ANARI_USD_MIDDLEWARE_C_API int GetCachedGradientTexture_C(
+    unsigned char** gradient_png_data,
+    size_t* out_png_size,
+    int* out_width,
+    int* out_height);
+
+/**
+ * Free memory allocated by ProcessPointCloudFromUSD_C
+ *
+ * @param clouds Array of CPointCloudData previously returned by ProcessPointCloudFromUSD_C
+ * @param count Number of elements in the array
+ */
+ANARI_USD_MIDDLEWARE_C_API void FreePointCloudData_C(CPointCloudData* clouds, size_t count);
+
+/**
+ * Free memory allocated by GetCachedGradientTexture_C
+ *
+ * @param gradient_rgba Previously returned gradient texture data
+ */
+ANARI_USD_MIDDLEWARE_C_API void FreeCachedGradientTexture_C(unsigned char* gradient_rgba);
 
 #ifdef __cplusplus
 }

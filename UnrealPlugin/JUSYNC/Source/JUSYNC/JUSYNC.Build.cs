@@ -25,7 +25,8 @@ public class JUSYNC : ModuleRules
             "SlateCore",
             "RenderCore",
             "RHI",
-            "GameplayTasks"
+            "GameplayTasks",
+            "LidarPointCloudRuntime"
         });
 
         // Setup third-party includes

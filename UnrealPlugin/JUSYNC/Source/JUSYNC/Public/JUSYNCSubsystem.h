@@ -70,6 +70,9 @@ public:
     UPROPERTY(BlueprintAssignable, Category = "JUSYNC Events")
     FJUSYNCError OnError;
 
+    UPROPERTY(BlueprintAssignable, Category = "JUSYNC Events")
+    FJUSYNCPointCloudReceived OnPointCloudReceived;
+
     // USD Processing (Legacy - use JUSYNCBlueprintLibrary versions for preview support)
     UFUNCTION(BlueprintCallable, Category = "JUSYNC USD|Legacy", DisplayName = "Load USD From Buffer (Legacy)")
     bool LoadUSDFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCMeshData>& OutMeshData);
@@ -144,6 +147,48 @@ public:
     // Conversion utilities for RealtimeMesh
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Mesh")
     FJUSYNCRealtimeMeshData ConvertToRealtimeMeshFormat(const FJUSYNCMeshData& StandardMesh);
+
+    // Point Cloud Processing
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC PointCloud", DisplayName = "Load Point Cloud From USD Buffer")
+    bool LoadPointCloudFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCPointCloudData>& OutPointCloudData);
+
+    // Async point cloud loading
+    DECLARE_DELEGATE_ThreeParams(FOnPointCloudLoaded, const TArray<FJUSYNCPointCloudData>&, bool, const FString&);
+    void LoadPointCloudFromBuffer_Async(const TArray<uint8>& Buffer, const FString& Filename, FOnPointCloudLoaded OnLoaded);
+
+    // Spawn point cloud as LiDAR actor
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC PointCloud", DisplayName = "Spawn Lidar Point Cloud At Location")
+    AActor* SpawnLidarPointCloudAtLocation(
+        const FJUSYNCPointCloudData& PointCloudData,
+        FVector Location,
+        FRotator Rotation = FRotator::ZeroRotator,
+        FVector Scale3D = FVector(1.0f)
+    );
+
+    // Async point cloud spawning
+    DECLARE_DELEGATE_TwoParams(FOnPointCloudSpawned, AActor*, bool);
+    void SpawnLidarPointCloudAtLocation_Async(
+        const FJUSYNCPointCloudData& PointCloudData,
+        FVector Location,
+        FRotator Rotation,
+        FVector Scale3D,
+        FOnPointCloudSpawned OnSpawned
+    );
+
+    // Batch spawn point clouds
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC PointCloud", DisplayName = "Batch Spawn Point Clouds At Locations")
+    TArray<AActor*> BatchSpawnPointCloudsAtLocations(
+        const TArray<FJUSYNCPointCloudData>& PointCloudDataArray,
+        const TArray<FVector>& Locations
+    );
+
+    // Async batch spawn point clouds
+    DECLARE_DELEGATE_OneParam(FOnPointCloudBatchSpawned, const TArray<AActor*>&);
+    void BatchSpawnPointCloudsAtLocations_Async(
+        const TArray<FJUSYNCPointCloudData>& PointCloudDataArray,
+        const TArray<FVector>& Locations,
+        FOnPointCloudBatchSpawned OnBatchSpawned
+    );
 
     // Texture Integration
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Texture")

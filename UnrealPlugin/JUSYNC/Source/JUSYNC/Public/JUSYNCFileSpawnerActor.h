@@ -88,6 +88,13 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Behavior")
     bool bAutoStart;
 
+    // Point cloud settings
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud")
+    float PointCloudSize;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud")
+    bool bSpawnPointClouds;
+
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Spawner|State")
     EJUSYNCSpawnerState CurrentState;
 
@@ -147,6 +154,7 @@ private:
     void SpawnMeshFromData(const FString& Filename, const TArray<uint8>& FileData);
     void ApplyDynamicMaterial(UPrimitiveComponent* Comp, const FString& Filename);
     void CheckAllDownloadsComplete();
+    void RetryFailedDownloads();
 
     TArray<FString> RawFileList;
     TArray<int64> RawFileSizes;
@@ -158,5 +166,9 @@ private:
 
     int32 NextSpawnIndex;
     int32 PendingDownloads;
+    int32 PendingAsyncSpawns;
     bool bIsCancelled;
+    int32 MaxRetries;
+    int32 CurrentRetryCount;
+    TArray<int32> FailedFileIndices;
 };

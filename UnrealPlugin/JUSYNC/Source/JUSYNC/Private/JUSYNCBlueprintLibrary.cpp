@@ -1091,7 +1091,79 @@ bool UJUSYNCBlueprintLibrary::ValidateUSDFormat(const TArray<uint8>& Buffer, con
         FirstChunk.Contains(TEXT("over "));
 }
 
-// ========== TEXTURE PROCESSING ==========
+// ========== POINT CLOUD PROCESSING ==========
+
+bool UJUSYNCBlueprintLibrary::LoadUSDPointCloudFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCPointCloudData>& OutPointCloudData)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available for point cloud loading"));
+        return false;
+    }
+
+    return Subsystem->LoadPointCloudFromBuffer(Buffer, Filename, OutPointCloudData);
+}
+
+AActor* UJUSYNCBlueprintLibrary::SpawnPointCloudAtLocation(
+    const FJUSYNCPointCloudData& PointCloudData,
+    const FVector& SpawnLocation,
+    const FRotator& SpawnRotation,
+    const FVector& SpawnScale)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available for point cloud spawning"));
+        return nullptr;
+    }
+    return Subsystem->SpawnLidarPointCloudAtLocation(PointCloudData, SpawnLocation, SpawnRotation, SpawnScale);
+}
+
+TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnPointClouds(
+    const TArray<FJUSYNCPointCloudData>& PointCloudDataArray,
+    const TArray<FVector>& SpawnLocations)
+{
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available for point cloud batch spawning"));
+        return TArray<AActor*>();
+    }
+    return Subsystem->BatchSpawnPointCloudsAtLocations(PointCloudDataArray, SpawnLocations);
+}
+
+void UJUSYNCBlueprintLibrary::SpawnPointCloudAtLocation_Async(
+    const FJUSYNCPointCloudData& PointCloudData,
+    const FVector& SpawnLocation,
+    const FRotator& SpawnRotation,
+    const FVector& SpawnScale,
+    const FOnPointCloudSpawnedDyn& OnSpawned)
+{
+    bool bBound = OnSpawned.IsBound();
+    FOnPointCloudSpawnedDyn DelegateCopy = OnSpawned;
+    AsyncTask(ENamedThreads::GameThread, [PointCloudData = PointCloudData, SpawnLocation, SpawnRotation, SpawnScale, DelegateCopy]()
+    {
+        AActor* Actor = SpawnPointCloudAtLocation(PointCloudData, SpawnLocation, SpawnRotation, SpawnScale);
+        DelegateCopy.ExecuteIfBound(Actor, Actor != nullptr);
+    });
+}
+
+void UJUSYNCBlueprintLibrary::BatchSpawnPointClouds_Async(
+    const TArray<FJUSYNCPointCloudData>& PointCloudDataArray,
+    const TArray<FVector>& SpawnLocations,
+    const FOnPointCloudBatchSpawnedDyn& OnBatchSpawned)
+{
+    FOnPointCloudBatchSpawnedDyn DelegateCopy = OnBatchSpawned;
+    AsyncTask(ENamedThreads::GameThread, [PointCloudDataArray = PointCloudDataArray, SpawnLocations = SpawnLocations, DelegateCopy]()
+    {
+        TArray<AActor*> Spawned = BatchSpawnPointClouds(PointCloudDataArray, SpawnLocations);
+        DelegateCopy.ExecuteIfBound(Spawned);
+    });
+}
+
+
+// ========== REALTIME MESH PROCESSING AND SPAWNING ==========
 
 FJUSYNCTextureData UJUSYNCBlueprintLibrary::CreateTextureFromBuffer(const TArray<uint8>& Buffer)
 {
