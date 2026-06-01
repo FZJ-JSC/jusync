@@ -275,6 +275,15 @@ void AJUSYNCFileSpawnerActor::OnFileListReceived_Internal(const TArray<FString>&
     }
 
     // Gradient LUT will be built from middleware cache right after first PC parse
+    // Also try to download PNG gradient from broker first
+    if (GradientPngRankMap.Num() > 0)
+    {
+        UJUSYNCSubsystem* GrdSubsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
+        if (GrdSubsystem)
+        {
+            DownloadGradientPng(GrdSubsystem);
+        }
+    }
 
     CurrentState = EJUSYNCSpawnerState::Downloading;
     UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: downloading %d files"), FilesTotal);
@@ -734,7 +743,41 @@ void AJUSYNCFileSpawnerActor::CheckAllDownloadsComplete()
 {
     if (FilesDownloaded >= FilesTotal)
     {
-        // Flush any remaining buffered PCs if gradient never arrived
+        // Wait for gradient to arrive before flushing (gives async PNG download time)
+        if (PendingPointClouds.Num() > 0 && !bGradientReady)
+        {
+            TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThis = this;
+            FTimerHandle FlushHandle;
+            FTimerDelegate FlushDelay;
+            FlushDelay.BindLambda([WeakThis]()
+            {
+                if (WeakThis.IsValid() && WeakThis->PendingPointClouds.Num() > 0 && !WeakThis->bGradientReady)
+                {
+                    WeakThis->FlushBufferedPointClouds();
+                }
+                else if (WeakThis.IsValid() && WeakThis->bGradientReady)
+                {
+                    UJUSYNCSubsystem* S = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
+                    if (S && S->GetPointCloudSpawner())
+                    {
+                        for (const auto& PC : WeakThis->PendingPointClouds)
+                        {
+                            S->GetPointCloudSpawner()->EnqueuePointCloud(PC);
+                        }
+                        WeakThis->PendingPointClouds.Empty();
+                    }
+                }
+                TWeakObjectPtr<AJUSYNCFileSpawnerActor> Wt = WeakThis;
+                FFunctionGraphTask::CreateAndDispatchWhenReady(
+                    [Wt]() { if (Wt.IsValid()) Wt->CheckAllDownloadsComplete(); },
+                    TStatId(), nullptr, ENamedThreads::GameThread);
+            });
+            if (GWorld)
+                GWorld->GetTimerManager().SetTimer(FlushHandle, FlushDelay, 2.0f, false);
+            return;
+        }
+
+        // Flush any remaining buffered PCs if gradient already arrived
         if (PendingPointClouds.Num() > 0)
         {
             FlushBufferedPointClouds();
@@ -746,7 +789,7 @@ void AJUSYNCFileSpawnerActor::CheckAllDownloadsComplete()
             UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: %d files failed, retrying (%d/%d)..."), FailedFileIndices.Num(), CurrentRetryCount + 1, MaxRetries);
             GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Yellow, FString::Printf(TEXT("[Spawner] Retrying %d failed files (attempt %d/%d)..."), FailedFileIndices.Num(), CurrentRetryCount + 1, MaxRetries));
             CurrentRetryCount++;
-            FilesDownloaded = 0;
+            FilesDownloaded = FilesTotal - FailedFileIndices.Num(); // Count only remaining failed
             RetryFailedDownloads();
             return;
         }

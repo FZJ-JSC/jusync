@@ -36,18 +36,22 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(const FJUSYNCPointCloudData& PC
     UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: queued PC '%s' for async conversion (%d points)"),
            *PCData.ElementName, PCData.PointCount);
 
-    // Copy gradient LUT for thread safety
-    TArray<FColor> LocalLUT = GradientLUT;
-    bool bUseGradient = LocalLUT.Num() > 0;
-
     // Spawn async task — doesn't block the game thread
     AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
         [this, PointCount = PCData.PointCount, Positions = PCData.Positions,
-         Colors = PCData.Colors, bHasColors = PCData.HasColors(),
-         Widths = PCData.Widths, ElementName = PCData.ElementName,
-         InRank, LocalLUT, bUseGradient]()
+          Colors = PCData.Colors, bHasColors = PCData.HasColors(),
+          Widths = PCData.Widths, ElementName = PCData.ElementName,
+          InRank]()
     {
 #ifdef WITH_ANARI_USD_MIDDLEWARE
+        // Capture gradient LUT lazily at conversion time (after possible SetGradientLUT)
+        TArray<FColor> LocalLUT;
+        {
+            FScopeLock Lock(&this->GradientMutex);
+            LocalLUT = this->GradientLUT;
+        }
+        bool bUseGradient = LocalLUT.Num() > 0;
+
         // Build LiDAR points on background thread
         TArray64<FLidarPointCloudPoint> Points;
         Points.SetNum(PointCount);
@@ -156,6 +160,9 @@ AActor* FJUSYNCPointCloudSpawner::AllocateActor()
             Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
             Comp->ColorSource = ELidarPointCloudColorationMode::Data;
             Comp->PointSize = 1.0f;
+            Comp->MinDepth = 0;
+            Comp->MaxDepth = -1;
+            Comp->bUseFrustumCulling = false;
         }
 
         SpawnedActor->SetActorHiddenInGame(true);

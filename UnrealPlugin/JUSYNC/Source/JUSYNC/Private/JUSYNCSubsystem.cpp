@@ -2141,6 +2141,10 @@ AActor* UJUSYNCSubsystem::SpawnLidarPointCloudAtLocation(const FJUSYNCPointCloud
         Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
         Comp->ColorSource = ELidarPointCloudColorationMode::Data;
         Comp->PointSize = 1.0f;
+        // Disable node-based streaming culling so all loaded clouds render at any camera distance
+        Comp->MinDepth = 0;
+        Comp->MaxDepth = -1;
+        Comp->bUseFrustumCulling = false;
     }
 
     // Convert on background thread to avoid blocking the game thread

@@ -42,8 +42,8 @@ public:
     void ClearAllActors();
 
     /** Set a 256-entry gradient color LUT from a decoded PNG row. Attribute0 values map to these colors. */
-    void SetGradientLUT(const TArray<FColor>& InLUT) { GradientLUT = InLUT; }
-    TArray<FColor> GetGradientLUT() const { return GradientLUT; }
+    void SetGradientLUT(const TArray<FColor>& InLUT) { FScopeLock Lock(&GradientMutex); GradientLUT = InLUT; }
+    TArray<FColor> GetGradientLUT() const { FScopeLock Lock(&GradientMutex); return GradientLUT; }
 
     int32 GetReadyQueueCount() const { return ReadyQueue.Num(); }
     int32 GetActiveActorCount() const { return ActiveActors.Num(); }
@@ -68,6 +68,7 @@ private:
     TArray<FConversionEntry> ConversionQueue;
     TArray<FPointCloudReadyEntry> ReadyQueue;
     FCriticalSection QueueMutex;
+    mutable FCriticalSection GradientMutex;
     TArray<AActor*> AvailablePool;
     TSet<AActor*> ActiveActors;
     int32 MaxPoolSize;
