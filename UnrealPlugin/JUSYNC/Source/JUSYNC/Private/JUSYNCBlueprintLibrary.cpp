@@ -1036,6 +1036,48 @@ bool UJUSYNCBlueprintLibrary::LoadUSDFromDisk(const FString& FilePath, TArray<FJ
     return LoadUSDFromBuffer(Buffer, Filename, OutMeshData, OutPreview);
 }
 
+bool UJUSYNCBlueprintLibrary::LoadUSDFullFromBuffer(const TArray<uint8>& Buffer, const FString& Filename,
+    TArray<FJUSYNCMeshData>& OutMeshData, TArray<FJUSYNCPointCloudData>& OutPointCloudData, FString& OutPreview)
+{
+    if (!ValidateBufferSize(Buffer, TEXT("LoadUSDFullFromBuffer")))
+    {
+        return false;
+    }
+
+#if JUSYNC_ENABLE_USD_PREVIEW
+    OutPreview = GetUSDAPreview(Buffer, 15);
+#else
+    OutPreview = TEXT("USD preview disabled for performance");
+#endif
+
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available for full USD loading"));
+        return false;
+    }
+
+    bool bResult = Subsystem->LoadUSDFullFromBuffer(Buffer, Filename, OutMeshData, OutPointCloudData);
+
+    if (bResult)
+    {
+        int32 TotalMeshes = 0;
+        for (const FJUSYNCMeshData& m : OutMeshData)
+        {
+            if (m.IsValid()) TotalMeshes++;
+        }
+        int32 TotalPCs = 0;
+        for (const FJUSYNCPointCloudData& pc : OutPointCloudData)
+        {
+            if (pc.IsValid()) TotalPCs++;
+        }
+        UE_LOG(LogJUSYNC, Log, TEXT("Successfully loaded %d meshes + %d point clouds from USD '%s' (single-pass)"),
+               TotalMeshes, TotalPCs, *Filename);
+    }
+
+    return bResult;
+}
+
 FString UJUSYNCBlueprintLibrary::GetUSDAPreview(const TArray<uint8>& Buffer, int32 MaxLines)
 {
     return ExtractUSDAPreview(Buffer, MaxLines);

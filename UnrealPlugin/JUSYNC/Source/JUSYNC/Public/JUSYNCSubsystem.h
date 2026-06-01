@@ -20,6 +20,7 @@
 
 // Forward declaration to avoid circular dependency
 class UJUSYNCBlueprintLibrary;
+class FJUSYNCPointCloudSpawner;
 
 #include "JUSYNCSubsystem.generated.h"
 
@@ -36,6 +37,12 @@ public:
     virtual void Initialize(FSubsystemCollectionBase& Collection) override;
     virtual void Deinitialize() override;
     virtual bool ShouldCreateSubsystem(UObject* Outer) const override;
+
+    // Async point cloud spawner with actor pooling
+    FJUSYNCPointCloudSpawner* GetPointCloudSpawner() const { return PCSpawner.Get(); }
+
+    // Extract cached gradient from middleware and apply to spawner LUT
+    void ApplyCachedGradientToSpawner();
 
     // Core Connection Management
     UFUNCTION(BlueprintCallable, Category = "JUSYNC")
@@ -79,6 +86,8 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC USD|Legacy", DisplayName = "Load USD From Disk (Legacy)")
     bool LoadUSDFromDisk(const FString& FilePath, TArray<FJUSYNCMeshData>& OutMeshData);
+
+    bool LoadUSDFullFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCMeshData>& OutMeshData, TArray<FJUSYNCPointCloudData>& OutPointCloudData);
 
     // Texture Processing
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Texture")
@@ -439,6 +448,9 @@ private:
     // Display management
     bool bMetricsDisplayVisible{ false };
     TWeakObjectPtr<class UUserWidget> MetricsDisplayWidget;
+
+    // Async point cloud spawner with actor pooling
+    TUniquePtr<class FJUSYNCPointCloudSpawner> PCSpawner;
 
     void CreateMetricsDisplay();
     void DestroyMetricsDisplay();

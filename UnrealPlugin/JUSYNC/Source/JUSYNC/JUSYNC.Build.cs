@@ -26,7 +26,8 @@ public class JUSYNC : ModuleRules
             "RenderCore",
             "RHI",
             "GameplayTasks",
-            "LidarPointCloudRuntime"
+            "LidarPointCloudRuntime",
+            "ImageWrapper"
         });
 
         // Setup third-party includes

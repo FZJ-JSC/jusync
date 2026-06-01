@@ -5,6 +5,7 @@
 #include "Components/PrimitiveComponent.h"
 #include "JUSYNCTypes.h"
 #include "JUSYNCBlueprintLibrary.h"
+#include "JUSYNCPointCloudSpawner.h"
 #include "JUSYNCFileSpawnerActor.generated.h"
 
 UENUM(BlueprintType)
@@ -95,6 +96,14 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud")
     bool bSpawnPointClouds;
 
+    /** Gradient PNG filename on the broker (e.g. "shared/gradient.png"). Leave blank to auto-detect first .png */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud")
+    FString GradientPngFilename;
+
+    /** Look up point colors from gradient PNG using attribute0 as the index */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud", meta = (InlineEditConditionToggle))
+    bool bUseGradientColors;
+
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Spawner|State")
     EJUSYNCSpawnerState CurrentState;
 
@@ -149,12 +158,15 @@ private:
     void OnFileDownloaded(const FString& Filename, const TArray<uint8>& FileData);
     void OnSingleFileDownloaded(const FString& Filename, const TArray<uint8>& FileData, bool bSuccess, int32 FileIndex);
     void OnFileDownloadError(const FString& ErrorMessage);
+    void DownloadGradientPng(UJUSYNCSubsystem* Subsystem);
 
     int32 CalculateDynamicTimeout(int64 FileSizeBytes) const;
-    void SpawnMeshFromData(const FString& Filename, const TArray<uint8>& FileData);
+    void SpawnMeshFromData(const FString& Filename, bool bParsed, TArray<FJUSYNCMeshData>&& MeshData, TArray<FJUSYNCPointCloudData>&& PointCloudData);
     void ApplyDynamicMaterial(UPrimitiveComponent* Comp, const FString& Filename);
     void CheckAllDownloadsComplete();
     void RetryFailedDownloads();
+    void FlushBufferedPointClouds();
+    void OnPointCloudSpawnedHandler(const FString& EleName, AActor* Spawned);
 
     TArray<FString> RawFileList;
     TArray<int64> RawFileSizes;
@@ -163,6 +175,10 @@ private:
     TArray<FString> FilteredFiles;
     TArray<int64> FilteredSizes;
     TArray<int32> FilteredRanks;
+    TMap<FString, int32> GradientPngRankMap;
+    TMap<int32, TArray<FColor>> RankGradients;
+    std::atomic<bool> bGradientReady;
+    TArray<FJUSYNCPointCloudData> PendingPointClouds;
 
     int32 NextSpawnIndex;
     int32 PendingDownloads;

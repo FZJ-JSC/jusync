@@ -280,8 +280,31 @@ ANARI_USD_MIDDLEWARE_C_API int LoadUSDBuffer_C(const unsigned char* buffer,
  * @return 1 on success, 0 on failure
  */
 ANARI_USD_MIDDLEWARE_C_API int LoadUSDFromDisk_C(const char* filepath,
-                                                  CMeshData** out_meshes,
-                                                  size_t* out_count);
+                                                   CMeshData** out_meshes,
+                                                   size_t* out_count);
+
+/**
+ * Load USD data from buffer and extract BOTH meshes + point clouds in a single-pass parse.
+ * Calls UsdProcessor::LoadUSDBuffer once with both mesh and point cloud output,
+ * eliminating the double-parse bottleneck of calling LoadUSDBuffer_C + ProcessPointCloudFromUSD_C.
+ *
+ * @param buffer Raw USD buffer data
+ * @param buffer_size Size of buffer in bytes
+ * @param filename Original filename for format detection
+ * @param out_meshes Output: allocated array of CMeshData (NULL if no meshes)
+ * @param out_mesh_count Output: number of meshes extracted
+ * @param out_clouds Output: allocated array of CPointCloudData (NULL if no point clouds)
+ * @param out_cloud_count Output: number of point clouds extracted
+ * @return 1 on success, 0 on failure
+ */
+ANARI_USD_MIDDLEWARE_C_API int LoadUSDFull_C(
+    const unsigned char* buffer,
+    size_t buffer_size,
+    const char* filename,
+    CMeshData** out_meshes,
+    size_t* out_mesh_count,
+    CPointCloudData** out_clouds,
+    size_t* out_cloud_count);
 
 // ============================================================================
 // USD PROCESSING FUNCTIONS WITH COLLISION SUPPORT

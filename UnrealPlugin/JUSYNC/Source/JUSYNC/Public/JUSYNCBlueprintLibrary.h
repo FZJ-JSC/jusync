@@ -169,6 +169,10 @@ public:
     static bool LoadUSDFromBuffer(const TArray<uint8>& Buffer, const FString& Filename,
         TArray<FJUSYNCMeshData>& OutMeshData, FString& OutPreview);
 
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|USD", CallInEditor, DisplayName = "Load USD Full (Mesh + Point Cloud)")
+    static bool LoadUSDFullFromBuffer(const TArray<uint8>& Buffer, const FString& Filename,
+        TArray<FJUSYNCMeshData>& OutMeshData, TArray<FJUSYNCPointCloudData>& OutPointCloudData, FString& OutPreview);
+
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|USD", CallInEditor)
     static bool LoadUSDFromDisk(const FString& FilePath,
         TArray<FJUSYNCMeshData>& OutMeshData, FString& OutPreview);
@@ -262,11 +266,13 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning", CallInEditor)
     static AActor* SpawnRealtimeMeshAtLocation(const FJUSYNCMeshData& MeshData,
         const FVector& SpawnLocation,
-        const FRotator& SpawnRotation = FRotator::ZeroRotator);
+        const FRotator& SpawnRotation = FRotator::ZeroRotator,
+        UMaterialInterface* CustomMaterial = nullptr);
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning", CallInEditor)
     static AActor* SpawnRealtimeMeshAtActor(const FJUSYNCMeshData& MeshData,
-        AActor* TargetActor);
+        AActor* TargetActor,
+        UMaterialInterface* CustomMaterial = nullptr);
 
 
     DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnBatchSpawnProgress,

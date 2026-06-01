@@ -2012,11 +2012,22 @@ static void ConvertPointCloudDataToCFormat(const anari_usd_middleware::UsdProces
         }
     }
 
-    // Widths
+    // Widths — fallback to scalarAttributes[0].x (attribute0 colormap value) when USD widths empty
     if (!src.widths.empty()) {
         dst.has_widths = 1;
         dst.widths = new float[src.widths.size()];
         std::memcpy(dst.widths, src.widths.data(), src.widths.size() * sizeof(float));
+    }
+    else if (!src.scalarAttributes.empty() && dst.points_count > 0)
+    {
+        // Use scalarAttributes.x as widths for gradient/color-mapping purposes
+        size_t wcount = std::min(src.scalarAttributes.size(), dst.points_count);
+        dst.has_widths = 1;
+        dst.widths = new float[wcount];
+        for (size_t i = 0; i < wcount; ++i) {
+            dst.widths[i] = src.scalarAttributes[i].x;
+        }
+        MIDDLEWARE_LOG_INFO("Falling back to scalarAttributes.x for widths (%zu values)", wcount);
     }
 
     // Bounding box
@@ -2087,6 +2098,84 @@ int ProcessPointCloudFromUSD_C(const unsigned char* buffer,
 
     } catch (...) {
         *out_count = 0;
+        *out_clouds = nullptr;
+        return 0;
+    }
+}
+
+/**
+ * Load USD data from buffer and extract BOTH meshes + point clouds in a single-pass parse.
+ * Eliminates the double-parse bottleneck of calling LoadUSDBuffer_C + ProcessPointCloudFromUSD_C.
+ */
+int LoadUSDFull_C(const unsigned char* buffer,
+                  size_t buffer_size,
+                  const char* filename,
+                  CMeshData** out_meshes,
+                  size_t* out_mesh_count,
+                  CPointCloudData** out_clouds,
+                  size_t* out_cloud_count) {
+    if (!buffer || !filename || !out_meshes || !out_mesh_count || !out_clouds || !out_cloud_count) {
+        return 0;
+    }
+
+    try {
+        std::vector<uint8_t> std_buffer(buffer, buffer + buffer_size);
+        std::string std_filename(filename);
+
+        anari_usd_middleware::UsdProcessor processor;
+        std::vector<anari_usd_middleware::UsdProcessor::MeshData> mesh_data;
+        std::vector<anari_usd_middleware::UsdProcessor::PointCloudData> pc_data;
+
+        bool result = processor.LoadUSDBuffer(std_buffer, std_filename, mesh_data, &pc_data);
+
+        if (!result) {
+            *out_mesh_count = 0;
+            *out_meshes = nullptr;
+            *out_cloud_count = 0;
+            *out_clouds = nullptr;
+            return 0;
+        }
+
+        if (!mesh_data.empty()) {
+            *out_mesh_count = mesh_data.size();
+            *out_meshes = new CMeshData[*out_mesh_count];
+            for (size_t i = 0; i < mesh_data.size(); ++i) {
+                ConvertMeshDataToCFormat(mesh_data[i], (*out_meshes)[i]);
+                (*out_meshes)[i].collision_type = COLLISION_NONE;
+                (*out_meshes)[i].collision_vertices = nullptr;
+                (*out_meshes)[i].collision_indices = nullptr;
+                (*out_meshes)[i].collision_vertices_count = 0;
+                (*out_meshes)[i].collision_indices_count = 0;
+                for (int j = 0; j < 3; j++) {
+                    (*out_meshes)[i].bounding_box_min[j] = 0.0f;
+                    (*out_meshes)[i].bounding_box_max[j] = 0.0f;
+                    (*out_meshes)[i].sphere_center[j] = 0.0f;
+                }
+                (*out_meshes)[i].sphere_radius = 0.0f;
+            }
+        } else {
+            *out_mesh_count = 0;
+            *out_meshes = nullptr;
+        }
+
+        if (!pc_data.empty()) {
+            *out_cloud_count = pc_data.size();
+            *out_clouds = new CPointCloudData[*out_cloud_count];
+            for (size_t i = 0; i < pc_data.size(); ++i) {
+                ConvertPointCloudDataToCFormat(pc_data[i], (*out_clouds)[i]);
+            }
+        } else {
+            *out_cloud_count = 0;
+            *out_clouds = nullptr;
+        }
+
+        MIDDLEWARE_LOG_INFO("LoadUSDFull_C: extracted %zu meshes + %zu point clouds from '%s' in single pass",
+                            *out_mesh_count, *out_cloud_count, std_filename.c_str());
+        return 1;
+    } catch (...) {
+        *out_mesh_count = 0;
+        *out_meshes = nullptr;
+        *out_cloud_count = 0;
         *out_clouds = nullptr;
         return 0;
     }

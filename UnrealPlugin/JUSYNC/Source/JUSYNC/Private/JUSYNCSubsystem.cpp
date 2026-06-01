@@ -18,8 +18,8 @@
 #include "HAL/PlatformProcess.h"  // For FPlatformProcess::Sleep
 #include "HAL/PlatformMisc.h"     // For FPlatformMisc::NumberOfCoresIncludingHyperthreads
 #include "Async/ParallelFor.h"    // For ParallelFor
-
 #include "GameFramework/Actor.h"   // For SpawnActor
+#include "JUSYNCPointCloudSpawner.h"
 #ifdef WITH_ANARI_USD_MIDDLEWARE
 #include "LidarPointCloud.h"        // For ULidarPointCloud
 #include "LidarPointCloudComponent.h"
@@ -439,6 +439,11 @@ void UJUSYNCSubsystem::Initialize(FSubsystemCollectionBase& Collection)
     // Set global instance for callbacks
     g_SubsystemInstance.store(this);
 
+    // Initialize async point cloud spawner
+    PCSpawner = MakeUnique<FJUSYNCPointCloudSpawner>(TWeakObjectPtr<UJUSYNCSubsystem>(this));
+    PCSpawner->SetMaxPoolSize(8);
+    PCSpawner->SetBudgetMs(2.0f);
+
     UE_LOG(LogJUSYNC, Log, TEXT("=== JUSYNC SUBSYSTEM INITIALIZED ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Global instance set: %p"), g_SubsystemInstance.load());
     UE_LOG(LogJUSYNC, Log, TEXT("JUSYNCSubsystem initialized with C-wrapper interface"));
@@ -770,6 +775,122 @@ bool UJUSYNCSubsystem::LoadUSDFromDisk(const FString& FilePath, TArray<FJUSYNCMe
     return false;
 }
 
+bool UJUSYNCSubsystem::LoadUSDFullFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCMeshData>& OutMeshData, TArray<FJUSYNCPointCloudData>& OutPointCloudData)
+{
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (!bIsInitialized.load())
+    {
+        UE_LOG(LogTemp, Error, TEXT("JUSYNC: LoadUSDFullFromBuffer called but middleware is not initialized"));
+        return false;
+    }
+
+    OutMeshData.Empty();
+    OutPointCloudData.Empty();
+
+    if (Buffer.Num() == 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("JUSYNC: LoadUSDFullFromBuffer called with empty buffer"));
+        return false;
+    }
+
+    FScopeLock Lock(&MiddlewareMutex);
+
+    FTCHARToUTF8 FilenameConverter(*Filename);
+    const char* FilenameCStr = FilenameConverter.Get();
+
+    CMeshData* CMeshes = nullptr;
+    size_t MeshCount = 0;
+    CPointCloudData* CClouds = nullptr;
+    size_t CloudCount = 0;
+
+    int Result = LoadUSDFull_C(
+        Buffer.GetData(), Buffer.Num(), FilenameCStr,
+        &CMeshes, &MeshCount,
+        &CClouds, &CloudCount
+    );
+
+    bool bSuccess = Result == 1;
+
+    if (!bSuccess)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("JUSYNC: LoadUSDFullFromBuffer failed for '%s'"), *Filename);
+        if (CMeshes) FreeMeshData_C(CMeshes, MeshCount);
+        if (CClouds) FreePointCloudData_C(CClouds, CloudCount);
+        return false;
+    }
+
+    // Convert meshes
+    if (CMeshes && MeshCount > 0)
+    {
+        OutMeshData.Reserve(MeshCount);
+        for (size_t i = 0; i < MeshCount; ++i)
+        {
+            FJUSYNCMeshData UEMeshData = ConvertCMeshDataToUE_Helper(CMeshes[i]);
+            OutMeshData.Add(UEMeshData);
+        }
+        FreeMeshData_C(CMeshes, MeshCount);
+    }
+
+    // Convert point clouds
+    if (CClouds && CloudCount > 0)
+    {
+        OutPointCloudData.SetNum(static_cast<int32>(CloudCount));
+        for (size_t i = 0; i < CloudCount; ++i)
+        {
+            FJUSYNCPointCloudData& pc = OutPointCloudData[i];
+            const CPointCloudData& cpc = CClouds[i];
+
+            pc.ElementName = ANSI_TO_TCHAR(cpc.element_name);
+            pc.TypeName = ANSI_TO_TCHAR(cpc.type_name);
+            pc.PointCount = static_cast<int32>(cpc.points_count);
+            pc.bHasColors = cpc.has_colors != 0;
+            pc.bHasNormals = cpc.has_normals != 0;
+            pc.BoundingBoxMin = FVector(cpc.bounding_box_min[0], cpc.bounding_box_min[1], cpc.bounding_box_min[2]);
+            pc.BoundingBoxMax = FVector(cpc.bounding_box_max[0], cpc.bounding_box_max[1], cpc.bounding_box_max[2]);
+
+            if (cpc.points_count > 0 && cpc.positions)
+            {
+                pc.Positions.SetNum(pc.PointCount);
+                for (size_t j = 0; j < cpc.points_count; ++j)
+                {
+                    float usdX = cpc.positions[j * 3 + 0];
+                    float usdY = cpc.positions[j * 3 + 1];
+                    float usdZ = cpc.positions[j * 3 + 2];
+                    pc.Positions[j] = FVector(usdX, usdZ, -usdY);
+                }
+            }
+
+            if (cpc.has_colors && cpc.colors && pc.PointCount > 0)
+            {
+                pc.Colors.SetNum(pc.PointCount);
+                for (int32 j = 0; j < pc.PointCount; ++j)
+                {
+                    float r = cpc.colors[j * 4 + 0] * 255.0f;
+                    float g = cpc.colors[j * 4 + 1] * 255.0f;
+                    float b = cpc.colors[j * 4 + 2] * 255.0f;
+                    float a = cpc.colors[j * 4 + 3] * 255.0f;
+                    pc.Colors[j] = FColor(static_cast<uint8>(r), static_cast<uint8>(g), static_cast<uint8>(b), static_cast<uint8>(a));
+                }
+            }
+
+            if (cpc.has_widths && cpc.widths)
+            {
+                pc.Widths.SetNum(pc.PointCount);
+                std::memcpy(pc.Widths.GetData(), cpc.widths, pc.PointCount * sizeof(float));
+            }
+        }
+        FreePointCloudData_C(CClouds, CloudCount);
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("JUSYNC: LoadUSDFullFromBuffer: %d meshes + %d point clouds from '%s' (single-pass)"),
+           OutMeshData.Num(), OutPointCloudData.Num(), *Filename);
+    return true;
+#else
+    UE_LOG(LogTemp, Warning, TEXT("JUSYNC: LoadUSDFullFromBuffer called but middleware not available"));
+    return false;
+#endif
+}
+
 FJUSYNCTextureData UJUSYNCSubsystem::CreateTextureFromBuffer(const TArray<uint8>& Buffer)
 {
     FJUSYNCTextureData Result;
@@ -906,6 +1027,46 @@ bool UJUSYNCSubsystem::GetPNGDimensions(const TArray<uint8>& Buffer, int32& OutW
     }
 #endif
     return false;
+}
+
+void UJUSYNCSubsystem::ApplyCachedGradientToSpawner()
+{
+#ifndef WITH_ANARI_USD_MIDDLEWARE
+    return;
+#endif
+
+    if (!bIsInitialized.load()) return;
+
+    unsigned char* gradientData = nullptr;
+    size_t gradientSize = 0;
+    int width = 0, height = 0;
+
+    int Result = GetCachedGradientTexture_C(&gradientData, &gradientSize, &width, &height);
+    if (Result != 1 || !gradientData || gradientSize == 0 || width < 1 || height < 1)
+    {
+        UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC: No cached gradient texture in middleware"));
+        return;
+    }
+
+    // Build LUT from top row (first width pixels, RGBA)
+    TArray<FColor> LUT;
+    const int entries = FMath::Min(width, 256);
+    LUT.Reserve(entries);
+    for (int x = 0; x < entries; ++x)
+    {
+        const uint8* px = gradientData + x * 4;
+        LUT.Add(FColor(px[0], px[1], px[2], px[3]));
+    }
+
+    FreeCachedGradientTexture_C(gradientData);
+
+    UE_LOG(LogJUSYNC, Display, TEXT("[Gradients] LUT built from cached gradient: %d colors"), LUT.Num());
+
+    FJUSYNCPointCloudSpawner* Sp = PCSpawner.Get();
+    if (Sp)
+    {
+        Sp->SetGradientLUT(LUT);
+    }
 }
 
 bool UJUSYNCSubsystem::GetImageRowAsPNGBuffer(const TArray<uint8>& Buffer, int32 RowIndex, TArray<uint8>& OutPNGBuffer)
@@ -1986,13 +2147,18 @@ AActor* UJUSYNCSubsystem::SpawnLidarPointCloudAtLocation(const FJUSYNCPointCloud
     TArray<FVector> Positions = PointCloudData.Positions;
     TArray<FColor> Colors = PointCloudData.Colors;
     bool bHasColors = PointCloudData.HasColors();
+    TArray<float> Widths = PointCloudData.Widths;
     int32 PointCount = PointCloudData.PointCount;
     FString ElementNameCopy = PointCloudData.ElementName;
+
+    // Copy gradient LUT for thread-safe use (same as spawner path)
+    TArray<FColor> PCLUT = PCSpawner.IsValid() ? PCSpawner->GetGradientLUT() : TArray<FColor>();
+    bool bUseGradient = PCLUT.Num() > 0 && !bHasColors && Widths.Num() > 0;
 
     TWeakObjectPtr<ALidarPointCloudActor> WeakActor = SpawnedActor;
     TWeakObjectPtr<ULidarPointCloudComponent> WeakComp = Comp;
 
-    Async(EAsyncExecution::Thread, [PointCount, Positions, Colors, bHasColors, WeakActor, WeakComp]()
+    Async(EAsyncExecution::Thread, [PointCount, Positions, Colors, bHasColors, Widths, WeakActor, WeakComp, PCLUT, bUseGradient]()
     {
         if (!WeakActor.IsValid() || !WeakComp.IsValid()) return;
 
@@ -2003,7 +2169,21 @@ AActor* UJUSYNCSubsystem::SpawnLidarPointCloudAtLocation(const FJUSYNCPointCloud
         for (int32 i = 0; i < PointCount; ++i)
         {
             FVector3f pos(Positions[i].X, Positions[i].Y, Positions[i].Z);
-            FColor col = bHasColors ? Colors[i] : FColor::White;
+            FColor col;
+            if (bHasColors)
+            {
+                col = Colors[i];
+            }
+            else if (bUseGradient && Widths.IsValidIndex(i))
+            {
+                float Attr0 = Widths[i];
+                int32 LUTIdx = FMath::Clamp(FMath::RoundToInt(Attr0 * (PCLUT.Num() - 1)), 0, PCLUT.Num() - 1);
+                col = PCLUT[LUTIdx];
+            }
+            else
+            {
+                col = FColor::White;
+            }
             Points[i] = FLidarPointCloudPoint(pos, col, true, 0);
         }
 
@@ -2493,7 +2673,7 @@ void UJUSYNCSubsystem::CreateMaterialFromTexture_Async_Return_Internal(
 
 // ========== REALTIMEMESH SPAWNING IMPLEMENTATION ==========
 
-AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(const FJUSYNCMeshData& MeshData, const FVector& SpawnLocation, const FRotator& SpawnRotation)
+AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(const FJUSYNCMeshData& MeshData, const FVector& SpawnLocation, const FRotator& SpawnRotation, UMaterialInterface* CustomMaterial)
 {
     if (!MeshData.IsValid())
     {
@@ -2519,33 +2699,11 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(const FJUSYNCMeshDa
     FActorSpawnParameters SpawnParams;
     SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
     
-    // Extract rank from filename for actor naming
-    FString BaseActorName = TEXT("JUSYNC_Mesh");
-    int32 Rank = UJUSYNCBlueprintLibrary::ExtractRankFromFilename(MeshData.ElementName);
-    
-    UE_LOG(LogJUSYNC, Log, TEXT("Extracted rank %d from filename: %s"), Rank, *MeshData.ElementName);
-    
-    if (Rank >= 0)
-    {
-        // Simple rank-based naming for Outliner visibility
-        // Use first few characters of filename hash for uniqueness
-        uint32 FilenameHash = GetTypeHash(MeshData.ElementName);
-        int32 ShortHash = FilenameHash % 10000; // 4-digit hash
-        
-        // Add timestamp for additional uniqueness
-        static int32 Counter = 0;
-        Counter++;
-        FString Timestamp = FString::Printf(TEXT("%d"), FDateTime::Now().GetTicks() % 1000000);
-        
-        BaseActorName = FString::Printf(TEXT("Rank_%d_%04d_%s_%d"), Rank, ShortHash, *Timestamp, Counter);
-        UE_LOG(LogJUSYNC, Log, TEXT("Using rank-based actor name: %s"), *BaseActorName);
-    }
-    else
-    {
-        // Fallback to element name if rank not found
-        BaseActorName = MeshData.ElementName;
-        UE_LOG(LogJUSYNC, Warning, TEXT("Rank not found in filename, using element name: %s"), *BaseActorName);
-    }
+    // Unique actor name
+    static std::atomic<int32> GlobalSpawnCounter{0};
+    int32 SpawnIdx = GlobalSpawnCounter.fetch_add(1, std::memory_order_relaxed);
+    uint32 FilenameHash = GetTypeHash(MeshData.ElementName);
+    FString BaseActorName = FString::Printf(TEXT("JUSYNC_H%x_N%d"), FilenameHash, SpawnIdx);
     
     // Generate unique actor name to avoid conflicts
     FName UniqueActorName = MakeUniqueObjectName(World, AActor::StaticClass(), FName(*BaseActorName));
@@ -2567,6 +2725,12 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(const FJUSYNCMeshDa
     URealtimeMeshComponent* MeshComp = NewObject<URealtimeMeshComponent>(SpawnedActor);
     SpawnedActor->SetRootComponent(MeshComp);
     MeshComp->RegisterComponent();
+
+    // Set custom material BEFORE mesh creation so guard in CreateRealtimeMeshFromJUSYNC skips fallback
+    if (CustomMaterial)
+    {
+        MeshComp->SetMaterial(0, CustomMaterial);
+    }
     
     // ✅ CORRECTED: Now set the location AFTER root component is set
     SpawnedActor->SetActorLocation(SpawnLocation);
@@ -2579,8 +2743,7 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(const FJUSYNCMeshDa
     {
         // ✅ CORRECTED: Verify the actual location after setting
         FVector ActualLocation = SpawnedActor->GetActorLocation();
-        FString Message = FString::Printf(TEXT("✅ RealtimeMesh spawned: Rank %d - %s at %s"), 
-                                        Rank, *MeshData.ElementName, *ActualLocation.ToString());
+        FString Message = FString::Printf(TEXT("✅ RealtimeMesh spawned: %s at %s"), *MeshData.ElementName, *ActualLocation.ToString());
         //DisplayDebugMessage(Message, 5.0f, FLinearColor::Green);
         UE_LOG(LogJUSYNC, Log, TEXT("%s"), *Message);
         return SpawnedActor;
@@ -2594,7 +2757,7 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(const FJUSYNCMeshDa
 }
 
 
-AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtActor(const FJUSYNCMeshData& MeshData, AActor* TargetActor)
+AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtActor(const FJUSYNCMeshData& MeshData, AActor* TargetActor, UMaterialInterface* CustomMaterial)
 {
     if (!TargetActor)
     {
@@ -2605,7 +2768,7 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtActor(const FJUSYNCMeshData&
     FVector SpawnLocation = TargetActor->GetActorLocation();
     FRotator SpawnRotation = TargetActor->GetActorRotation();
     
-    return SpawnRealtimeMeshAtLocation(MeshData, SpawnLocation, SpawnRotation);
+    return SpawnRealtimeMeshAtLocation(MeshData, SpawnLocation, SpawnRotation, CustomMaterial);
 }
 
 TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocations(
