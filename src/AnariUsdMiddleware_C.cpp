@@ -2129,11 +2129,42 @@ int LoadUSDFull_C(const unsigned char* buffer,
         bool result = processor.LoadUSDBuffer(std_buffer, std_filename, mesh_data, &pc_data);
 
         if (!result) {
+            MIDDLEWARE_LOG_ERROR("LoadUSDFull_C: LoadUSDBuffer returned false for '%s' (size=%zu bytes)",
+                std_filename.c_str(), buffer_size);
             *out_mesh_count = 0;
             *out_meshes = nullptr;
             *out_cloud_count = 0;
             *out_clouds = nullptr;
             return 0;
+        }
+
+        /*
+         * Diagnose: if result is true but pc_data has an entry with 0 positions,
+         * TinyUSDZ parsed the file but ExtractPointCloudData couldn't get point data.
+         */
+        {
+            size_t valid_pc = 0, invalid_pc = 0;
+            for (const auto& pc : pc_data) {
+                if (pc.positions.size() > 0) valid_pc++;
+                else invalid_pc++;
+            }
+            if (invalid_pc > 0) {
+                MIDDLEWARE_LOG_ERROR("LoadUSDFull_C: %zu point clouds have 0 positions for '%s' (valid=%zu, invalid=%zu)",
+                    invalid_pc, std_filename.c_str(), valid_pc, invalid_pc);
+            }
+            /*
+             * If all extracted PCs have 0 positions, treat as failure (no usable data)
+             */
+            if (valid_pc == 0 && invalid_pc > 0) {
+                MIDDLEWARE_LOG_ERROR("LoadUSDFull_C: no usable point clouds extracted — discarding for '%s'",
+                    std_filename.c_str());
+                pc_data.clear();
+            }
+        }
+
+        if (mesh_data.empty() && pc_data.empty()) {
+            MIDDLEWARE_LOG_WARNING("LoadUSDFull_C: LoadUSDBuffer succeeded but returned 0 meshes + 0 PCs for '%s'",
+                std_filename.c_str());
         }
 
         if (!mesh_data.empty()) {

@@ -240,12 +240,16 @@ void FJUSYNCPointCloudSpawner::DrainReadyQueue()
 
         if (!LidarCloud)
         {
+            FString EntryName = Entry.ElementName;
             UE_LOG(LogTemp, Warning, TEXT("JUSYNC Spawner: failed to create LiDAR cloud for '%s'"),
-                   *Entry.ElementName);
+                   *EntryName);
             ReleaseActor(Actor);
             ReadyQueue.Pop();
             continue;
         }
+
+        // Refresh bounds to ensure correct frustum intersection in LOD Manager
+        LidarCloud->RefreshBounds();
 
         ULidarPointCloudComponent* Comp = Cast<ALidarPointCloudActor>(Actor)->GetPointCloudComponent();
         if (Comp)
@@ -256,14 +260,16 @@ void FJUSYNCPointCloudSpawner::DrainReadyQueue()
         Actor->SetActorHiddenInGame(false);
         Actor->SetActorEnableCollision(false);
 
+        FString EntryName = Entry.ElementName;
+        int32 EntryPoints = Entry.Points.Num();
         Entry.bSpawned = true;
         ReadyQueue.Pop();
         ItemsProcessed++;
 
-        OnPointCloudSpawned.Broadcast(Entry.ElementName, Actor);
+        OnPointCloudSpawned.Broadcast(EntryName, Actor);
 
         UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: loaded PC actor '%s' (%d points, budget: %.1fms remaining)"),
-               *Entry.ElementName, Entry.Points.Num(), (RemainingBudget - Elapsed) * 1000.0f);
+               *EntryName, EntryPoints, (RemainingBudget - Elapsed) * 1000.0f);
 #endif
     }
 }

@@ -32,7 +32,8 @@ public:
 
     void EnqueuePointCloud(const FJUSYNCPointCloudData& PCData, int32 InRank = 0);
     virtual void Tick(float DeltaTime) override;
-
+    virtual ETickableTickType GetTickableTickType() const override { return ETickableTickType::Conditional; }
+    virtual bool IsTickable() const override { return Owner.IsValid(); }
     virtual TStatId GetStatId() const override { RETURN_QUICK_DECLARE_CYCLE_STAT(FJUSYNCPointCloudSpawner, STATGROUP_Tickables); }
 
     void SetMaxPoolSize(int32 InMax) { MaxPoolSize = InMax; }
@@ -47,6 +48,8 @@ public:
 
     int32 GetReadyQueueCount() const { return ReadyQueue.Num(); }
     int32 GetActiveActorCount() const { return ActiveActors.Num(); }
+
+    void DrainReadyQueue();
 
     FOnPointCloudSpawned OnPointCloudSpawned;
 
@@ -77,7 +80,6 @@ private:
     float BudgetMs;
     TArray<FColor> GradientLUT;
 
-    void DrainReadyQueue();
     AActor* AllocateActor();
     void ReleaseActor(AActor*);
 };

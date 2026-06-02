@@ -161,7 +161,7 @@ private:
     void DownloadGradientPng(UJUSYNCSubsystem* Subsystem);
 
     int32 CalculateDynamicTimeout(int64 FileSizeBytes) const;
-    void SpawnMeshFromData(const FString& Filename, bool bParsed, TArray<FJUSYNCMeshData>&& MeshData, TArray<FJUSYNCPointCloudData>&& PointCloudData);
+    void SpawnMeshFromData(const FString& Filename, bool bParsed, TArray<FJUSYNCMeshData>&& MeshData, TArray<FJUSYNCPointCloudData>&& PointCloudData, int32 FileIndex);
     void ApplyDynamicMaterial(UPrimitiveComponent* Comp, const FString& Filename);
     void CheckAllDownloadsComplete();
     void RetryFailedDownloads();
@@ -187,4 +187,5 @@ private:
     int32 MaxRetries;
     int32 CurrentRetryCount;
     TArray<int32> FailedFileIndices;
+    TArray<int32> ParseFailedIndices;
 };

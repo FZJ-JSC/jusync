@@ -1384,11 +1384,11 @@ bool UsdProcessor::ProcessPrim(void* prim,
 
             if (ExtractPointCloudData(const_cast<tinyusdz::GeomPoints*>(pts), pointData, worldTransform)) {
                 if (pointData.isValid()) {
+                    MIDDLEWARE_LOG_INFO("Extracted point cloud: %s (%zu positions, %zu colors)",
+                        pointData.elementName.c_str(), pointData.positions.size(), pointData.vertex_colors.size());
                     if (outPointCloudData) {
                         outPointCloudData->push_back(std::move(pointData));
                     }
-                    MIDDLEWARE_LOG_INFO("Extracted point cloud: %s (%zu points, %zu colors)",
-                        pointData.elementName.c_str(), pointData.getPointCount(), pointData.vertex_colors.size());
                 }
             }
         }

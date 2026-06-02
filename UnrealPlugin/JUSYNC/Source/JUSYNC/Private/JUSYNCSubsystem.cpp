@@ -441,8 +441,15 @@ void UJUSYNCSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
     // Initialize async point cloud spawner
     PCSpawner = MakeUnique<FJUSYNCPointCloudSpawner>(TWeakObjectPtr<UJUSYNCSubsystem>(this));
-    PCSpawner->SetMaxPoolSize(8);
-    PCSpawner->SetBudgetMs(2.0f);
+    PCSpawner->SetMaxPoolSize(16);
+    PCSpawner->SetBudgetMs(500.0f);
+
+    // Set LiDAR point budget to handle many simultaneous point clouds (100M+ points)
+    // Prevents the LOD manager from culling distant clouds due to adaptive budget scaling
+    if (GEngine)
+    {
+        GEngine->Exec(nullptr, TEXT("r.LidarPointBudget 200000000"));
+    }
 
     UE_LOG(LogJUSYNC, Log, TEXT("=== JUSYNC SUBSYSTEM INITIALIZED ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Global instance set: %p"), g_SubsystemInstance.load());
@@ -813,7 +820,8 @@ bool UJUSYNCSubsystem::LoadUSDFullFromBuffer(const TArray<uint8>& Buffer, const 
 
     if (!bSuccess)
     {
-        UE_LOG(LogTemp, Warning, TEXT("JUSYNC: LoadUSDFullFromBuffer failed for '%s'"), *Filename);
+        UE_LOG(LogTemp, Warning, TEXT("JUSYNC: LoadUSDFullFromBuffer failed for '%s' (buffer=%d bytes, C_result=%d MeshCount=%llu CloudCount=%llu)"),
+            *Filename, Buffer.Num(), Result, (uint64)MeshCount, (uint64)CloudCount);
         if (CMeshes) FreeMeshData_C(CMeshes, MeshCount);
         if (CClouds) FreePointCloudData_C(CClouds, CloudCount);
         return false;
@@ -2200,6 +2208,7 @@ AActor* UJUSYNCSubsystem::SpawnLidarPointCloudAtLocation(const FJUSYNCPointCloud
             {
                 if (WeakComp.IsValid() && LidarCloud)
                 {
+                    LidarCloud->RefreshBounds();
                     WeakComp->SetPointCloud(LidarCloud);
                 }
             },
