@@ -41,7 +41,7 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Connection")
     int32 RequestTimeoutMs;
 
-    /** Estimated network bandwidth in bytes/sec for dynamic timeout calculation (1MB/s = 1000000) */
+    /** Estimated network bandwidth in bytes/sec for dynamic timeout calculation (default: 10GB/s = 10737418240) */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Connection")
     float BandwidthBytesPerSecond;
 
@@ -88,6 +88,18 @@ public:
     /** Automatically start spawning when the actor begins play */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Behavior")
     bool bAutoStart;
+
+    /** Enable live update mode: watches for broker notifications and polls for file changes */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|LiveUpdate", meta = (DisplayName = "Enable Live Updates"))
+    bool bEnableLiveUpdates;
+
+    /** Poll interval for checking file changes when in live update mode (seconds). Set to 0 to rely solely on broker notifications. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|LiveUpdate", meta = (EditCondition = "bEnableLiveUpdates", EditConditionHides))
+    float LiveUpdatePollInterval;
+
+    /** Automatically destroy and re-spawn updated meshes when a file change is detected */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|LiveUpdate", meta = (EditCondition = "bEnableLiveUpdates", EditConditionHides))
+    bool bAutoRefreshMeshes;
 
     // Point cloud settings
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud")
@@ -168,6 +180,16 @@ private:
     void FlushBufferedPointClouds();
     void OnPointCloudSpawnedHandler(const FString& EleName, AActor* Spawned);
 
+    // Live update support
+    UFUNCTION()
+    void OnBrokerNotification(const FJUSYNCNotification& Notification);
+    void HandleFileUpdateNotification(const FString& Filename, int32_t SourceRank);
+    void HandleCommitCompleteNotification();
+    void StartLiveUpdatePolling();
+    void StopLiveUpdatePolling();
+    void OnLiveUpdateTimer();
+    bool RefreshSingleFile(const FString& Filename, int32 TargetRank);
+
     TArray<FString> RawFileList;
     TArray<int64> RawFileSizes;
     TArray<int32> RawFileRanks;
@@ -188,4 +210,12 @@ private:
     int32 CurrentRetryCount;
     TArray<int32> FailedFileIndices;
     TArray<int32> ParseFailedIndices;
+
+    // Live update state
+    FTimerHandle LiveUpdateTimerHandle;
+    TMap<FString, AActor*> FileToActorMap;
+    TMap<FString, int64> FileLastSize;
+    double LastCommitCompleteTime;
+    double CommitCompleteCooldown;
+    bool bCommitDiffInProgress;
 };

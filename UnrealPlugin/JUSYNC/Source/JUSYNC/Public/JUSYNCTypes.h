@@ -315,6 +315,40 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCWorkerStatusReceived, const T
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCWorkerCountReceived, int32, WorkerCount);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCPointCloudReceived, const TArray<FJUSYNCPointCloudData>&, PointCloudData);
 
+// Live update notification from broker (NOTIFY_FILE_UPDATE=300, NOTIFY_COMMIT_COMPLETE=301)
+UENUM(BlueprintType)
+enum class EJUSYNCNotificationType : uint8
+{
+    FileUpdate    UMETA(DisplayName = "File Updated"),
+    CommitComplete UMETA(DisplayName = "Commit Complete")
+};
+
+USTRUCT(BlueprintType)
+struct JUSYNC_API FJUSYNCNotification
+{
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+    EJUSYNCNotificationType Type;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+    int32 SourceRank;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+    FString Filename;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+    int64 FileSize;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+    int64 Timestamp;
+
+    FJUSYNCNotification()
+        : Type(EJUSYNCNotificationType::FileUpdate), SourceRank(-1), FileSize(0), Timestamp(0) {}
+};
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCNotificationReceived, const FJUSYNCNotification&, Notification);
+
 // ========== BENCHMARKING STRUCTURES ==========
 
 /**

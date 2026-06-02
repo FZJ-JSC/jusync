@@ -1,4 +1,4 @@
-#include "JUSYNCSubsystem.h"
+﻿#include "JUSYNCSubsystem.h"
 #include "JUSYNCBlueprintLibrary.h"
 #include "Engine/Engine.h"
 #include "Engine/Texture2D.h"
@@ -204,6 +204,39 @@ extern "C" void MessageReceivedCallback_Static(const char* message)
     });
 }
 
+extern "C" void NotificationCallback_Static(uint32_t messageType, int32_t sourceRank,
+                                             const char* filename, uint64_t fileSize, uint64_t timestamp)
+{
+    FString NotifType = (messageType == 301) ? TEXT("NOTIFY_COMMIT_COMPLETE") : TEXT("NOTIFY_FILE_UPDATE");
+    UE_LOG(LogJUSYNC, Display, TEXT("=== ZMQ NOTIFICATION: %s (rank %d, file '%s', %llu bytes) ==="),
+           *NotifType, sourceRank, filename ? UTF8_TO_TCHAR(filename) : TEXT("(none)"),
+           static_cast<unsigned long long>(timestamp));
+
+    FString FilenameCopy = filename ? FString(UTF8_TO_TCHAR(filename)) : TEXT("");
+
+    AsyncTask(ENamedThreads::GameThread, [FilenameCopy, messageType, sourceRank, fileSize, timestamp]()
+    {
+        UJUSYNCSubsystem* Subsystem = g_SubsystemInstance.load();
+        if (!Subsystem)
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("NotificationCallback_Static: Subsystem instance is null, notification dropped"));
+            return;
+        }
+
+        FJUSYNCNotification Notification;
+        Notification.Type = (messageType == 301) ? EJUSYNCNotificationType::CommitComplete : EJUSYNCNotificationType::FileUpdate;
+        Notification.SourceRank = sourceRank;
+        Notification.Filename = FilenameCopy;
+        Notification.FileSize = static_cast<int64>(fileSize);
+        Notification.Timestamp = static_cast<int64>(timestamp);
+
+        UE_LOG(LogJUSYNC, Log, TEXT("Broadcasting notification to Blueprint: %s '%s'"),
+               (Notification.Type == EJUSYNCNotificationType::CommitComplete) ? TEXT("CommitComplete") : TEXT("FileUpdate"),
+               *Notification.Filename);
+        Subsystem->OnNotificationReceived.Broadcast(Notification);
+    });
+}
+
 // Helper function to convert C mesh data to UE format
 // Enhanced ConvertCMeshDataToUE_Helper with FORCED vertex interpolation while preserving all functionality
 static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool bForceVertexInterpolation = true)
@@ -214,7 +247,7 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
     UEMesh.ElementName = FString(UTF8_TO_TCHAR(CMesh.element_name));
     UEMesh.TypeName = FString(UTF8_TO_TCHAR(CMesh.type_name));
 
-    // 2. Convert points (OPTIMIZED - flat array → FVector array)
+    // 2. Convert points (OPTIMIZED - flat array â†’ FVector array)
     size_t PointCount = CMesh.points_count / 3;
     UEMesh.Vertices.Reserve(PointCount);
     
@@ -269,7 +302,7 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
         }
     }
 
-    // 6. ✅ ENHANCED: Vertex‐colors with FORCED vertex interpolation while preserving all functionality
+    // 6. âœ… ENHANCED: Vertexâ€colors with FORCED vertex interpolation while preserving all functionality
     if (CMesh.vertex_colors && CMesh.vertex_colors_count >= 4)
     {
         int32 VertexCount = static_cast<int32>(PointCount);
@@ -283,7 +316,7 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
 
         if (bDetectedVertexInterp)
         {
-            // ✅ CASE 1: Already vertex interpolation - direct mapping (OPTIMIZED)
+            // âœ… CASE 1: Already vertex interpolation - direct mapping (OPTIMIZED)
             const float* colorsPtr = CMesh.vertex_colors;
             for (int32 i = 0; i < VertexCount; ++i)
             {
@@ -297,8 +330,8 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
         }
         else if (bDetectedUniformInterp && bForceVertexInterpolation)
         {
-            // ✅ CASE 2: Uniform detected + Force Vertex = Convert uniform to smooth vertex interpolation
-            // UE_LOG(LogJUSYNC, Log, TEXT("🎨 CONVERTING uniform to smooth VERTEX interpolation"));
+            // âœ… CASE 2: Uniform detected + Force Vertex = Convert uniform to smooth vertex interpolation
+            // UE_LOG(LogJUSYNC, Log, TEXT("ðŸŽ¨ CONVERTING uniform to smooth VERTEX interpolation"));
             
             // Initialize vertex color accumulation arrays
             TArray<FLinearColor> AccumulatedColors;
@@ -306,7 +339,7 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
             AccumulatedColors.SetNumZeroed(VertexCount);
             ColorCounts.SetNumZeroed(VertexCount);
             
-            // ✅ ENHANCED: Accumulate colors from all faces that use each vertex (for smooth blending)
+            // âœ… ENHANCED: Accumulate colors from all faces that use each vertex (for smooth blending)
             for (int32 FaceIdx = 0; FaceIdx < FaceCount && FaceIdx < ColorCount; ++FaceIdx)
             {
                 int32 i0 = UEMesh.Triangles[FaceIdx * 3 + 0];
@@ -325,7 +358,7 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
                         CMesh.vertex_colors[cidx + 3]
                     );
                     
-                    // ✅ SMOOTH BLENDING: Accumulate this face color to all three vertices
+                    // âœ… SMOOTH BLENDING: Accumulate this face color to all three vertices
                     AccumulatedColors[i0] += FaceColor;
                     AccumulatedColors[i1] += FaceColor;
                     AccumulatedColors[i2] += FaceColor;
@@ -336,7 +369,7 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
                 }
             }
             
-            // ✅ FINALIZE: Average the accumulated colors and convert to FColor
+            // âœ… FINALIZE: Average the accumulated colors and convert to FColor
             for (int32 i = 0; i < VertexCount; ++i)
             {
                 FLinearColor FinalColor;
@@ -360,13 +393,13 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
                 UEMesh.VertexColors.Add(FColor(r, g, b, a));
             }
             
-            UE_LOG(LogJUSYNC, Log, TEXT("✅ Converted uniform to smooth vertex interpolation: %d vertex colors"), 
+            UE_LOG(LogJUSYNC, Log, TEXT("âœ… Converted uniform to smooth vertex interpolation: %d vertex colors"), 
                    UEMesh.VertexColors.Num());
         }
         else if (bDetectedUniformInterp && !bForceVertexInterpolation)
         {
-            // ✅ CASE 3: Keep original uniform behavior (PRESERVED for backwards compatibility)
-            UE_LOG(LogJUSYNC, Log, TEXT("🎨 Using original UNIFORM interpolation (flat shading)"));
+            // âœ… CASE 3: Keep original uniform behavior (PRESERVED for backwards compatibility)
+            UE_LOG(LogJUSYNC, Log, TEXT("ðŸŽ¨ Using original UNIFORM interpolation (flat shading)"));
             UEMesh.VertexColors.Reserve(FaceCount * 3);
             
             for (int32 f = 0; f < FaceCount; ++f)
@@ -387,8 +420,8 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
         }
         else
         {
-            // ✅ CASE 4: Fallback behavior (PRESERVED)
-            UE_LOG(LogJUSYNC, Warning, TEXT("🎨 Using fallback vertex interpolation"));
+            // âœ… CASE 4: Fallback behavior (PRESERVED)
+            UE_LOG(LogJUSYNC, Warning, TEXT("ðŸŽ¨ Using fallback vertex interpolation"));
             for (int32 i = 0; i < VertexCount; ++i)
             {
                 if (i < ColorCount)
@@ -407,10 +440,10 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
             }
         }
 
-        // ✅ PRESERVED: Debug logging for color verification
-        UE_LOG(LogJUSYNC, Log, TEXT("🎨 Final vertex colors: %d"), UEMesh.VertexColors.Num());
+        // âœ… PRESERVED: Debug logging for color verification
+        UE_LOG(LogJUSYNC, Log, TEXT("ðŸŽ¨ Final vertex colors: %d"), UEMesh.VertexColors.Num());
         
-        // ✅ PRESERVED: DEBUG dump first 20 different colours
+        // âœ… PRESERVED: DEBUG dump first 20 different colours
         TSet<FColor> Unique;
         for (int32 i = 0; i < UEMesh.VertexColors.Num(); ++i)
         {
@@ -497,13 +530,7 @@ bool UJUSYNCSubsystem::InitializeMiddleware(const FString& Endpoint)
     
     UE_LOG(LogJUSYNC, Log, TEXT("Using C endpoint: %s"), UTF8_TO_TCHAR(EndpointCStr));
     
-    // Register callbacks BEFORE initialization
-    UE_LOG(LogJUSYNC, Log, TEXT("Registering ZMQ callbacks..."));
-    RegisterUpdateCallback_C(FileReceivedCallback_Static);
-    RegisterMessageCallback_C(MessageReceivedCallback_Static);
-    UE_LOG(LogJUSYNC, Log, TEXT("✅ Callbacks registered"));
-    
-    // Initialize middleware using C interface
+    // Initialize middleware using C interface (g_middleware is created here)
     UE_LOG(LogJUSYNC, Log, TEXT("Calling InitializeMiddleware_C..."));
     int Result = InitializeMiddleware_C(EndpointCStr);
     
@@ -513,8 +540,15 @@ bool UJUSYNCSubsystem::InitializeMiddleware(const FString& Endpoint)
     
     if (Result == 1)
     {
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ USD processors initialized (DEALER-only mode)"));
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ Ready to connect to broker via DEALER socket"));
+        UE_LOG(LogJUSYNC, Log, TEXT("âœ… USD processors initialized (DEALER-only mode)"));
+        UE_LOG(LogJUSYNC, Log, TEXT("âœ… Ready to connect to broker via DEALER socket"));
+        
+        // Register callbacks AFTER initialization (g_middleware must exist)
+        UE_LOG(LogJUSYNC, Log, TEXT("Registering ZMQ callbacks..."));
+        RegisterUpdateCallback_C(FileReceivedCallback_Static);
+        RegisterMessageCallback_C(MessageReceivedCallback_Static);
+        RegisterNotificationCallback_C(NotificationCallback_Static);
+        UE_LOG(LogJUSYNC, Log, TEXT(" Callbacks registered (file, message, notification)"));
         
         // Test connection status
         int ConnectionStatus = IsConnected_C();
@@ -528,7 +562,7 @@ bool UJUSYNCSubsystem::InitializeMiddleware(const FString& Endpoint)
     }
     else
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to initialize JUSYNC Middleware (Result: %d)"), Result);
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to initialize JUSYNC Middleware (Result: %d)"), Result);
     }
     
     return Result == 1;
@@ -604,7 +638,7 @@ bool UJUSYNCSubsystem::StartReceiving()
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (!bIsInitialized.load())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot start receiving - middleware not initialized"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot start receiving - middleware not initialized"));
         return false;
     }
     
@@ -616,8 +650,8 @@ bool UJUSYNCSubsystem::StartReceiving()
     
     if (Result == 1)
     {
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ JUSYNC Started Receiving Data"));
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ ROUTER is now listening for DEALER messages"));
+        UE_LOG(LogJUSYNC, Log, TEXT("âœ… JUSYNC Started Receiving Data"));
+        UE_LOG(LogJUSYNC, Log, TEXT("âœ… ROUTER is now listening for DEALER messages"));
         
         // Additional status checks
         int ConnectionStatus = IsConnected_C();
@@ -630,7 +664,7 @@ bool UJUSYNCSubsystem::StartReceiving()
     }
     else
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to start receiving (Result: %d)"), Result);
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to start receiving (Result: %d)"), Result);
         UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Start receiving: Failed"));
     }
     
@@ -666,7 +700,7 @@ void UJUSYNCSubsystem::HandleFileReceivedForLibrary(const FJUSYNCFileData& FileD
     int32 NewCount = UJUSYNCBlueprintLibrary::ReceivedFiles.Num();
     
     UE_LOG(LogJUSYNC, Log, TEXT("Blueprint Library file count: %d -> %d"), PreviousCount, NewCount);
-    UE_LOG(LogJUSYNC, Log, TEXT("✅ File added to Blueprint Library: %s"), *FileData.Filename);
+    UE_LOG(LogJUSYNC, Log, TEXT("âœ… File added to Blueprint Library: %s"), *FileData.Filename);
 }
 
 void UJUSYNCSubsystem::HandleMessageReceivedForLibrary(const FString& Message)
@@ -1150,7 +1184,7 @@ void RecalculateNormals(FJUSYNCMeshData& MeshData)
             FVector v1 = MeshData.Vertices[i1];
             FVector v2 = MeshData.Vertices[i2];
             
-            // ✅ FIXED: Calculate normal for counter-clockwise winding (v2-v0 x v1-v0)
+            // âœ… FIXED: Calculate normal for counter-clockwise winding (v2-v0 x v1-v0)
             FVector FaceNormal = FVector::CrossProduct(v2 - v0, v1 - v0).GetSafeNormal();
             
             // Ensure normal points outward (you may need to flip this if still wrong)
@@ -1180,13 +1214,13 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
     // Enhanced safety checks
     if (!RealtimeMeshComponent || !RealtimeMeshComponent->IsValidLowLevel())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid or destroyed RealtimeMeshComponent"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Invalid or destroyed RealtimeMeshComponent"));
         return false;
     }
 
     if (!InMeshData.IsValid())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid mesh data"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Invalid mesh data"));
         return false;
     }
 
@@ -1196,17 +1230,17 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
     // Additional validation of mesh data arrays
     if (MeshData.Vertices.Num() == 0)
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Mesh has no vertices"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Mesh has no vertices"));
         return false;
     }
 
     if (MeshData.Triangles.Num() < 3 || (MeshData.Triangles.Num() % 3) != 0)
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid triangle count: %d (must be multiple of 3)"), MeshData.Triangles.Num());
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Invalid triangle count: %d (must be multiple of 3)"), MeshData.Triangles.Num());
         return false;
     }
 
-    UE_LOG(LogJUSYNC, Log, TEXT("🎨 === SMOOTH VERTEX INTERPOLATION MESH CREATION ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("ðŸŽ¨ === SMOOTH VERTEX INTERPOLATION MESH CREATION ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Mesh: %d vertices, %d triangles, %d colors"),
            MeshData.Vertices.Num(), MeshData.Triangles.Num() / 3, MeshData.VertexColors.Num());
 
@@ -1217,14 +1251,14 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
     // Safety: Ensure we don't exceed reasonable limits
     if (FinalVertexCount > 1000000)
     {
-        UE_LOG(LogJUSYNC, Warning, TEXT("⚠️ Very large mesh: %d vertices (consider splitting)"), FinalVertexCount);
+        UE_LOG(LogJUSYNC, Warning, TEXT("âš ï¸ Very large mesh: %d vertices (consider splitting)"), FinalVertexCount);
     }
 
     // Initialize RealtimeMesh builder
     URealtimeMeshSimple* RealtimeMesh = RealtimeMeshComponent->InitializeRealtimeMesh<URealtimeMeshSimple>();
     if (!RealtimeMesh)
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to initialize RealtimeMesh"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to initialize RealtimeMesh"));
         return false;
     }
 
@@ -1238,7 +1272,7 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
         if (VertexColorMaterial)
         {
             RealtimeMeshComponent->SetMaterial(0, VertexColorMaterial);
-            UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied cached M_VertexColor material as fallback"));
+            UE_LOG(LogJUSYNC, Log, TEXT("âœ… Applied cached M_VertexColor material as fallback"));
         }
         else
         {
@@ -1249,13 +1283,13 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
                 auto* DynMat = UMaterialInstanceDynamic::Create(DefaultMat, RealtimeMeshComponent);
                 DynMat->SetScalarParameterValue(TEXT("UseVertexColor"), 1.0f);
                 RealtimeMeshComponent->SetMaterial(0, DynMat);
-                UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied enhanced default material as fallback"));
+                UE_LOG(LogJUSYNC, Log, TEXT("âœ… Applied enhanced default material as fallback"));
             }
         }
     }
     else
     {
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ Using provided material (preserving texture material from Blueprint)"));
+        UE_LOG(LogJUSYNC, Log, TEXT("âœ… Using provided material (preserving texture material from Blueprint)"));
     }
 
 
@@ -1320,7 +1354,7 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
         }
         else
         {
-            UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid triangle %d: [%d,%d,%d] vs %d vertices"), 
+            UE_LOG(LogJUSYNC, Error, TEXT("âŒ Invalid triangle %d: [%d,%d,%d] vs %d vertices"), 
                    Face, i0, i1, i2, FinalVertexCount);
         }
     }
@@ -1336,8 +1370,8 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
 
     RealtimeMeshComponent->MarkRenderStateDirty();
     
-    UE_LOG(LogJUSYNC, Log, TEXT("🎨 === SMOOTH VERTEX INTERPOLATION MESH CREATION COMPLETE ==="));
-    UE_LOG(LogJUSYNC, Log, TEXT("✅ CreateRealtimeMeshFromJUSYNC: Smooth mesh created '%s' (%d verts, %d tris)"),
+    UE_LOG(LogJUSYNC, Log, TEXT("ðŸŽ¨ === SMOOTH VERTEX INTERPOLATION MESH CREATION COMPLETE ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("âœ… CreateRealtimeMeshFromJUSYNC: Smooth mesh created '%s' (%d verts, %d tris)"),
            *MeshData.ElementName, FinalVertexCount, FinalTriCount);
 
     return true;
@@ -1351,20 +1385,20 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNCWithSplitting(
     // Enhanced safety checks
     if (!RealtimeMeshComponent || !RealtimeMeshComponent->IsValidLowLevel())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid or destroyed RealtimeMeshComponent"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Invalid or destroyed RealtimeMeshComponent"));
         return false;
     }
 
     if (!MeshData.IsValid())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid mesh data"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Invalid mesh data"));
         return false;
     }
 
     const int32 TotalVertices = MeshData.Vertices.Num();
     const int32 TotalTriangles = MeshData.Triangles.Num() / 3;
 
-    UE_LOG(LogJUSYNC, Log, TEXT("🎨 === MESH CREATION WITH SPLITTING ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("ðŸŽ¨ === MESH CREATION WITH SPLITTING ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Mesh: %d vertices, %d triangles, MaxVerticesPerChunk: %d"),
            TotalVertices, TotalTriangles, MaxVerticesPerChunk);
 
@@ -1383,7 +1417,7 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNCWithSplitting(
     URealtimeMeshSimple* RealtimeMesh = RealtimeMeshComponent->InitializeRealtimeMesh<URealtimeMeshSimple>();
     if (!RealtimeMesh)
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to initialize RealtimeMesh"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to initialize RealtimeMesh"));
         return false;
     }
 
@@ -1396,7 +1430,7 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNCWithSplitting(
         if (VertexColorMaterial)
         {
             RealtimeMeshComponent->SetMaterial(0, VertexColorMaterial);
-            UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied cached M_VertexColor material"));
+            UE_LOG(LogJUSYNC, Log, TEXT("âœ… Applied cached M_VertexColor material"));
         }
     }
 
@@ -1405,11 +1439,11 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNCWithSplitting(
     
     if (SplitMeshes.Num() == 0)
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to split mesh"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to split mesh"));
         return false;
     }
 
-    UE_LOG(LogJUSYNC, Log, TEXT("✅ Successfully split mesh into %d chunks"), SplitMeshes.Num());
+    UE_LOG(LogJUSYNC, Log, TEXT("âœ… Successfully split mesh into %d chunks"), SplitMeshes.Num());
 
     // Create mesh sections for each chunk
     for (int32 ChunkIdx = 0; ChunkIdx < SplitMeshes.Num(); ++ChunkIdx)
@@ -1472,7 +1506,7 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNCWithSplitting(
             }
             else
             {
-                UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid triangle %d in chunk %d: [%d,%d,%d] vs %d vertices"),
+                UE_LOG(LogJUSYNC, Error, TEXT("âŒ Invalid triangle %d in chunk %d: [%d,%d,%d] vs %d vertices"),
                        Face, ChunkIdx, i0, i1, i2, VertexCount);
             }
         }
@@ -1490,8 +1524,8 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNCWithSplitting(
                ChunkIdx, VertexCount, TriangleCount);
     }
 
-    UE_LOG(LogJUSYNC, Log, TEXT("✅ Successfully created mesh with %d sections"), SplitMeshes.Num());
-    UE_LOG(LogJUSYNC, Log, TEXT("🎨 === MESH CREATION WITH SPLITTING COMPLETE ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("âœ… Successfully created mesh with %d sections"), SplitMeshes.Num());
+    UE_LOG(LogJUSYNC, Log, TEXT("ðŸŽ¨ === MESH CREATION WITH SPLITTING COMPLETE ==="));
 
     return true;
 }
@@ -1505,14 +1539,14 @@ TArray<FJUSYNCMeshData> UJUSYNCSubsystem::SplitLargeMeshForRealtimeMesh(
     
     if (!LargeMesh.IsValid())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot split invalid mesh"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot split invalid mesh"));
         return SplitMeshes;
     }
 
     const int32 TotalVertices = LargeMesh.Vertices.Num();
     const int32 TotalTriangles = LargeMesh.Triangles.Num() / 3;
 
-    UE_LOG(LogJUSYNC, Log, TEXT("🔪 === SPLITTING LARGE MESH ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("ðŸ”ª === SPLITTING LARGE MESH ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Input: %d vertices, %d triangles"), TotalVertices, TotalTriangles);
     UE_LOG(LogJUSYNC, Log, TEXT("Max vertices per chunk: %d, Preserve connectivity: %s"),
            MaxVerticesPerChunk, bPreserveConnectivity ? TEXT("Yes") : TEXT("No"));
@@ -1703,8 +1737,8 @@ TArray<FJUSYNCMeshData> UJUSYNCSubsystem::SplitLargeMeshForRealtimeMesh(
         }
     }
 
-    UE_LOG(LogJUSYNC, Log, TEXT("✅ Split mesh into %d valid chunks (from %d total grid cells)"), ValidChunks, NumChunks);
-    UE_LOG(LogJUSYNC, Log, TEXT("🔪 === SPLITTING COMPLETE ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("âœ… Split mesh into %d valid chunks (from %d total grid cells)"), ValidChunks, NumChunks);
+    UE_LOG(LogJUSYNC, Log, TEXT("ðŸ”ª === SPLITTING COMPLETE ==="));
 
     // Record the split for benchmarking
     double EndTime = FPlatformTime::Seconds();
@@ -1725,14 +1759,14 @@ bool UJUSYNCSubsystem::CheckMemoryLimitsForMesh(
 
     if (!MeshData.IsValid())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot check memory limits for invalid mesh"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot check memory limits for invalid mesh"));
         return false;
     }
 
     const int32 TotalVertices = MeshData.Vertices.Num();
     const int32 TotalTriangles = MeshData.Triangles.Num() / 3;
 
-    UE_LOG(LogJUSYNC, Log, TEXT("💾 === MEMORY LIMIT CHECK ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("ðŸ’¾ === MEMORY LIMIT CHECK ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Mesh: %d vertices, %d triangles"), TotalVertices, TotalTriangles);
     UE_LOG(LogJUSYNC, Log, TEXT("Safety margin: %.1f%%"), SafetyMarginPercent);
 
@@ -1770,7 +1804,7 @@ bool UJUSYNCSubsystem::CheckMemoryLimitsForMesh(
     // Check RAM limits
     if (OutRequiredRAM_MB > SafeAvailableRAMMB)
     {
-        UE_LOG(LogJUSYNC, Warning, TEXT("⚠️ Mesh exceeds available RAM (%.2f MB > %.2f MB)"),
+        UE_LOG(LogJUSYNC, Warning, TEXT("âš ï¸ Mesh exceeds available RAM (%.2f MB > %.2f MB)"),
                OutRequiredRAM_MB, SafeAvailableRAMMB);
         bCanLoad = false;
     }
@@ -1781,20 +1815,20 @@ bool UJUSYNCSubsystem::CheckMemoryLimitsForMesh(
     
     if (TotalVertices > RecommendedMaxVertices)
     {
-        UE_LOG(LogJUSYNC, Warning, TEXT("⚠️ Mesh exceeds RMC vertex limit (%d > %d)"),
+        UE_LOG(LogJUSYNC, Warning, TEXT("âš ï¸ Mesh exceeds RMC vertex limit (%d > %d)"),
                TotalVertices, RecommendedMaxVertices);
         bCanLoad = false;
     }
 
     if (TotalTriangles > RecommendedMaxTriangles)
     {
-        UE_LOG(LogJUSYNC, Warning, TEXT("⚠️ Mesh exceeds RMC triangle limit (%d > %d)"),
+        UE_LOG(LogJUSYNC, Warning, TEXT("âš ï¸ Mesh exceeds RMC triangle limit (%d > %d)"),
                TotalTriangles, RecommendedMaxTriangles);
         bCanLoad = false;
     }
 
-    UE_LOG(LogJUSYNC, Log, TEXT("Can load: %s"), bCanLoad ? TEXT("✅ Yes") : TEXT("❌ No"));
-    UE_LOG(LogJUSYNC, Log, TEXT("💾 === MEMORY CHECK COMPLETE ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("Can load: %s"), bCanLoad ? TEXT("âœ… Yes") : TEXT("âŒ No"));
+    UE_LOG(LogJUSYNC, Log, TEXT("ðŸ’¾ === MEMORY CHECK COMPLETE ==="));
 
     return bCanLoad;
 }
@@ -1808,17 +1842,17 @@ TArray<URealtimeMeshComponent*> UJUSYNCSubsystem::CreateMultipleRMCComponentsFor
 
     if (!LargeMesh.IsValid())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot create RMC components for invalid mesh"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot create RMC components for invalid mesh"));
         return CreatedComponents;
     }
 
     if (!ParentActor)
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Parent actor is null"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Parent actor is null"));
         return CreatedComponents;
     }
 
-    UE_LOG(LogJUSYNC, Log, TEXT("🏗️ === CREATING MULTIPLE RMC COMPONENTS ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("ðŸ—ï¸ === CREATING MULTIPLE RMC COMPONENTS ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Large mesh: %d vertices, %d triangles"),
            LargeMesh.Vertices.Num(), LargeMesh.Triangles.Num() / 3);
     UE_LOG(LogJUSYNC, Log, TEXT("Parent actor: %s"), *ParentActor->GetName());
@@ -1835,7 +1869,7 @@ TArray<URealtimeMeshComponent*> UJUSYNCSubsystem::CreateMultipleRMCComponentsFor
 
     if (SplitMeshes.Num() == 0)
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to split mesh"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to split mesh"));
         return CreatedComponents;
     }
 
@@ -1853,7 +1887,7 @@ TArray<URealtimeMeshComponent*> UJUSYNCSubsystem::CreateMultipleRMCComponentsFor
         URealtimeMeshComponent* ChunkComponent = NewObject<URealtimeMeshComponent>(ParentActor, FName(*ComponentName));
         if (!ChunkComponent)
         {
-            UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to create RMC component for chunk %d"), ChunkIdx);
+            UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to create RMC component for chunk %d"), ChunkIdx);
             continue;
         }
 
@@ -1872,19 +1906,19 @@ TArray<URealtimeMeshComponent*> UJUSYNCSubsystem::CreateMultipleRMCComponentsFor
 
             CreatedComponents.Add(ChunkComponent);
             
-            UE_LOG(LogJUSYNC, Log, TEXT("✅ Created chunk %d: %s (%d vertices, %d triangles)"),
+            UE_LOG(LogJUSYNC, Log, TEXT("âœ… Created chunk %d: %s (%d vertices, %d triangles)"),
                    ChunkIdx, *ChunkComponent->GetName(),
                    ChunkMesh.Vertices.Num(), ChunkMesh.Triangles.Num() / 3);
         }
         else
         {
-            UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to create mesh for chunk %d"), ChunkIdx);
+            UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to create mesh for chunk %d"), ChunkIdx);
             ChunkComponent->DestroyComponent();
         }
     }
 
-    UE_LOG(LogJUSYNC, Log, TEXT("🏗️ Created %d RMC components for large mesh"), CreatedComponents.Num());
-    UE_LOG(LogJUSYNC, Log, TEXT("🏗️ === RMC COMPONENT CREATION COMPLETE ==="));
+    UE_LOG(LogJUSYNC, Log, TEXT("ðŸ—ï¸ Created %d RMC components for large mesh"), CreatedComponents.Num());
+    UE_LOG(LogJUSYNC, Log, TEXT("ðŸ—ï¸ === RMC COMPONENT CREATION COMPLETE ==="));
 
     return CreatedComponents;
 }
@@ -1981,7 +2015,7 @@ FJUSYNCRealtimeMeshData UJUSYNCSubsystem::ConvertToRealtimeMeshFormat(const FJUS
             Vertex.UV = FVector2D::ZeroVector;
         }
 
-        // ✅ NEW: Handle vertex colors
+        // âœ… NEW: Handle vertex colors
         if (i < StandardMesh.VertexColors.Num())
         {
             Vertex.Color = StandardMesh.VertexColors[i];
@@ -2063,7 +2097,7 @@ bool UJUSYNCSubsystem::LoadPointCloudFromBuffer(const TArray<uint8>& Buffer, con
         pc.BoundingBoxMin = FVector(cpc.bounding_box_min[0], cpc.bounding_box_min[1], cpc.bounding_box_min[2]);
         pc.BoundingBoxMax = FVector(cpc.bounding_box_max[0], cpc.bounding_box_max[1], cpc.bounding_box_max[2]);
 
-        // Convert positions: right-handed Z-up (USD) → left-handed Y-up (UE)
+        // Convert positions: right-handed Z-up (USD) â†’ left-handed Y-up (UE)
         // UE transform: X stays, Y becomes Z, Z becomes -Y
         if (cpc.points_count > 0 && cpc.positions)
         {
@@ -2077,7 +2111,7 @@ bool UJUSYNCSubsystem::LoadPointCloudFromBuffer(const TArray<uint8>& Buffer, con
             }
         }
 
-        // Colors (already 0.0-1.0 floats → FColor 0-255)
+        // Colors (already 0.0-1.0 floats â†’ FColor 0-255)
         if (cpc.has_colors && cpc.colors && pc.PointCount > 0)
         {
             pc.Colors.SetNum(pc.PointCount);
@@ -2116,14 +2150,14 @@ AActor* UJUSYNCSubsystem::SpawnLidarPointCloudAtLocation(const FJUSYNCPointCloud
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (!PointCloudData.IsValid())
     {
-        UE_LOG(LogTemp, Warning, TEXT("JUSYNC: Cannot spawn point cloud — invalid data"));
+        UE_LOG(LogTemp, Warning, TEXT("JUSYNC: Cannot spawn point cloud â€” invalid data"));
         return nullptr;
     }
 
     UWorld* World = GetWorld();
     if (!World)
     {
-        UE_LOG(LogTemp, Warning, TEXT("JUSYNC: Cannot spawn point cloud — no valid world"));
+        UE_LOG(LogTemp, Warning, TEXT("JUSYNC: Cannot spawn point cloud â€” no valid world"));
         return nullptr;
     }
 
@@ -2443,7 +2477,7 @@ void UJUSYNCSubsystem::ApplyProcessedMeshToComponent(const FProcessedMeshData& P
 {
     if (!RealtimeMeshComponent)
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid component for applying processed mesh"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Invalid component for applying processed mesh"));
         return;
     }
     
@@ -2455,7 +2489,7 @@ void UJUSYNCSubsystem::ApplyProcessedMeshToComponent(const FProcessedMeshData& P
     
     if (bHadExistingMaterial)
     {
-        UE_LOG(LogJUSYNC, Log, TEXT("📦 Storing existing material for reapplication: %s"),
+        UE_LOG(LogJUSYNC, Log, TEXT("ðŸ“¦ Storing existing material for reapplication: %s"),
                *ExistingMaterial->GetName());
     }
     
@@ -2463,7 +2497,7 @@ void UJUSYNCSubsystem::ApplyProcessedMeshToComponent(const FProcessedMeshData& P
     URealtimeMeshSimple* RealtimeMesh = RealtimeMeshComponent->InitializeRealtimeMesh<URealtimeMeshSimple>();
     if (!RealtimeMesh)
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to initialize RealtimeMesh"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to initialize RealtimeMesh"));
         return;
     }
     
@@ -2477,7 +2511,7 @@ void UJUSYNCSubsystem::ApplyProcessedMeshToComponent(const FProcessedMeshData& P
         if (VertexColorMaterial)
         {
             RealtimeMeshComponent->SetMaterial(0, VertexColorMaterial);
-            UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied cached M_VertexColor material as fallback"));
+            UE_LOG(LogJUSYNC, Log, TEXT("âœ… Applied cached M_VertexColor material as fallback"));
         }
         else
         {
@@ -2488,13 +2522,13 @@ void UJUSYNCSubsystem::ApplyProcessedMeshToComponent(const FProcessedMeshData& P
                 auto* DynMat = UMaterialInstanceDynamic::Create(DefaultMat, RealtimeMeshComponent);
                 DynMat->SetScalarParameterValue(TEXT("UseVertexColor"), 1.0f);
                 RealtimeMeshComponent->SetMaterial(0, DynMat);
-                UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied enhanced default material as fallback"));
+                UE_LOG(LogJUSYNC, Log, TEXT("âœ… Applied enhanced default material as fallback"));
             }
         }
     }
     else
     {
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ Using provided material (preserving texture material from Blueprint)"));
+        UE_LOG(LogJUSYNC, Log, TEXT("âœ… Using provided material (preserving texture material from Blueprint)"));
     }
     
     // Create mesh streams from processed data
@@ -2527,7 +2561,7 @@ void UJUSYNCSubsystem::ApplyProcessedMeshToComponent(const FProcessedMeshData& P
         }
         else
         {
-            UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid triangle %d: [%d,%d,%d] vs %d vertices"), 
+            UE_LOG(LogJUSYNC, Error, TEXT("âŒ Invalid triangle %d: [%d,%d,%d] vs %d vertices"), 
                    Face, i0, i1, i2, ProcessedData.FinalVertexCount);
         }
     }
@@ -2548,24 +2582,24 @@ void UJUSYNCSubsystem::ApplyProcessedMeshToComponent(const FProcessedMeshData& P
     {
         // Force reapplication of the material to ensure it's properly bound
         RealtimeMeshComponent->SetMaterial(0, ExistingMaterial);
-        UE_LOG(LogJUSYNC, Log, TEXT("🔄 Reapplied existing material after mesh creation: %s"),
+        UE_LOG(LogJUSYNC, Log, TEXT("ðŸ”„ Reapplied existing material after mesh creation: %s"),
                *ExistingMaterial->GetName());
         
         // Additional verification
         UMaterialInterface* CurrentMaterial = RealtimeMeshComponent->GetMaterial(0);
         if (CurrentMaterial == ExistingMaterial)
         {
-            UE_LOG(LogJUSYNC, Log, TEXT("✅ Material verification passed: Material correctly applied"));
+            UE_LOG(LogJUSYNC, Log, TEXT("âœ… Material verification passed: Material correctly applied"));
         }
         else
         {
-            UE_LOG(LogJUSYNC, Warning, TEXT("⚠️ Material verification failed: Expected %s, Got %s"),
+            UE_LOG(LogJUSYNC, Warning, TEXT("âš ï¸ Material verification failed: Expected %s, Got %s"),
                    *ExistingMaterial->GetName(),
                    CurrentMaterial ? *CurrentMaterial->GetName() : TEXT("NULL"));
         }
     }
     
-    UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied processed mesh '%s' (%d verts, %d tris)"),
+    UE_LOG(LogJUSYNC, Log, TEXT("âœ… Applied processed mesh '%s' (%d verts, %d tris)"),
            *ProcessedData.ElementName, ProcessedData.FinalVertexCount, ProcessedData.FinalTriCount);
 }
 
@@ -2575,11 +2609,11 @@ void UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC_Async(
 {
     if (!RealtimeMeshComponent || !MeshData.IsValid())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Invalid input to CreateRealtimeMeshFromJUSYNC_Async"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Invalid input to CreateRealtimeMeshFromJUSYNC_Async"));
         return;
     }
     
-    UE_LOG(LogJUSYNC, Log, TEXT("🚀 Starting async mesh creation for: %s"), *MeshData.ElementName);
+    UE_LOG(LogJUSYNC, Log, TEXT("ðŸš€ Starting async mesh creation for: %s"), *MeshData.ElementName);
     
     // Make copies for the lambda captures
     FJUSYNCMeshData MeshDataCopy = MeshData;
@@ -2599,7 +2633,7 @@ void UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC_Async(
             if (ComponentPtr.IsValid())
             {
                 ApplyProcessedMeshToComponent(ProcessedData, ComponentPtr.Get());
-                UE_LOG(LogJUSYNC, Log, TEXT("🎉 Async mesh creation complete: %s"), *ProcessedData.ElementName);
+                UE_LOG(LogJUSYNC, Log, TEXT("ðŸŽ‰ Async mesh creation complete: %s"), *ProcessedData.ElementName);
             }
             else
             {
@@ -2667,7 +2701,7 @@ void UJUSYNCSubsystem::CreateMaterialFromTexture_Async_Return_Internal(
                 // Apply the texture to the material using the specified parameter name
                 DynamicMaterial->SetTextureParameterValue(CapturedTextureParameterName, TexturePtr.Get());
                 
-                UE_LOG(LogJUSYNC, Log, TEXT("✅ Created dynamic material from texture (Base: %s, Param: %s)"),
+                UE_LOG(LogJUSYNC, Log, TEXT("âœ… Created dynamic material from texture (Base: %s, Param: %s)"),
                        *BaseMaterialPtr->GetName(), *CapturedTextureParameterName.ToString());
                 
                 // Call the callback with the created material
@@ -2678,7 +2712,7 @@ void UJUSYNCSubsystem::CreateMaterialFromTexture_Async_Return_Internal(
             }
             else
             {
-                UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to create dynamic material instance"));
+                UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to create dynamic material instance"));
             }
         });
     });
@@ -2708,7 +2742,7 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(const FJUSYNCMeshDa
         return nullptr;
     }
 
-    // ✅ CORRECTED: Spawn actor first at origin
+    // âœ… CORRECTED: Spawn actor first at origin
     FActorSpawnParameters SpawnParams;
     SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
     
@@ -2734,7 +2768,7 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(const FJUSYNCMeshDa
     // Actor already has the unique name from spawn parameters
     UE_LOG(LogJUSYNC, Log, TEXT("Spawned actor with final name: %s (original base: %s)"), *SpawnedActor->GetName(), *BaseActorName);
 
-    // ✅ CORRECTED: Create and set root component FIRST
+    // âœ… CORRECTED: Create and set root component FIRST
     URealtimeMeshComponent* MeshComp = NewObject<URealtimeMeshComponent>(SpawnedActor);
     SpawnedActor->SetRootComponent(MeshComp);
     MeshComp->RegisterComponent();
@@ -2745,7 +2779,7 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(const FJUSYNCMeshDa
         MeshComp->SetMaterial(0, CustomMaterial);
     }
     
-    // ✅ CORRECTED: Now set the location AFTER root component is set
+    // âœ… CORRECTED: Now set the location AFTER root component is set
     SpawnedActor->SetActorLocation(SpawnLocation);
     SpawnedActor->SetActorRotation(SpawnRotation);
 
@@ -2754,9 +2788,9 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(const FJUSYNCMeshDa
     
     if (bSuccess)
     {
-        // ✅ CORRECTED: Verify the actual location after setting
+        // âœ… CORRECTED: Verify the actual location after setting
         FVector ActualLocation = SpawnedActor->GetActorLocation();
-        FString Message = FString::Printf(TEXT("✅ RealtimeMesh spawned: %s at %s"), *MeshData.ElementName, *ActualLocation.ToString());
+        FString Message = FString::Printf(TEXT("âœ… RealtimeMesh spawned: %s at %s"), *MeshData.ElementName, *ActualLocation.ToString());
         //DisplayDebugMessage(Message, 5.0f, FLinearColor::Green);
         UE_LOG(LogJUSYNC, Log, TEXT("%s"), *Message);
         return SpawnedActor;
@@ -2808,7 +2842,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocations(
     }
     else if (FinalLocations.Num() != MeshDataArray.Num())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Array size mismatch! Meshes: %d, Locations: %d"),
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Array size mismatch! Meshes: %d, Locations: %d"),
                MeshDataArray.Num(), FinalLocations.Num());
         return TArray<AActor*>();
     }
@@ -2822,7 +2856,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocations(
     }
     else if (FinalRotations.Num() != MeshDataArray.Num())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Rotation array size mismatch! Expected: %d, Got: %d"), 
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Rotation array size mismatch! Expected: %d, Got: %d"), 
                MeshDataArray.Num(), FinalRotations.Num());
         return TArray<AActor*>();
     }
@@ -2834,7 +2868,7 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocations(
     }
 
     // Async spawning logic
-    UE_LOG(LogJUSYNC, Log, TEXT("🚀 Starting ASYNC batch spawn with rotations"));
+    UE_LOG(LogJUSYNC, Log, TEXT("ðŸš€ Starting ASYNC batch spawn with rotations"));
     TSharedPtr<TArray<AActor*>> SharedSpawnedActors = MakeShared<TArray<AActor*>>();
     SharedSpawnedActors->Reserve(MeshDataArray.Num());
 
@@ -2851,18 +2885,18 @@ TArray<FVector> UJUSYNCBlueprintLibrary::GetSpawnPointLocations(const FString& T
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (!Subsystem)
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ No JUSYNC Subsystem"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ No JUSYNC Subsystem"));
         return SpawnLocations;
     }
 
     UWorld* World = Subsystem->GetWorld();
     if (!World)
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ No World context"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ No World context"));
         return SpawnLocations;
     }
 
-    // 🔍 DEBUG: Log search parameters
+    // ðŸ” DEBUG: Log search parameters
     UE_LOG(LogJUSYNC, Log, TEXT("=== SEARCHING FOR SPAWN POINTS ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Tag Filter: '%s'"), *TagFilter);
 
@@ -2903,7 +2937,7 @@ bool UJUSYNCSubsystem::ConnectToBroker(const FString& BrokerEndpoint, int32 Time
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (!bIsInitialized.load())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot connect to broker - middleware not initialized"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot connect to broker - middleware not initialized"));
         return false;
     }
     
@@ -2918,14 +2952,14 @@ bool UJUSYNCSubsystem::ConnectToBroker(const FString& BrokerEndpoint, int32 Time
     
     if (Result == 1)
     {
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ Connected to ANARI USD broker at %s"), *BrokerEndpoint);
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ DEALER socket connected through SSH tunnel"));
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ Ready for synchronous file requests"));
+        UE_LOG(LogJUSYNC, Log, TEXT("âœ… Connected to ANARI USD broker at %s"), *BrokerEndpoint);
+        UE_LOG(LogJUSYNC, Log, TEXT("âœ… DEALER socket connected through SSH tunnel"));
+        UE_LOG(LogJUSYNC, Log, TEXT("âœ… Ready for synchronous file requests"));
         return true;
     }
     else
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to connect to broker (Result: %d)"), Result);
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to connect to broker (Result: %d)"), Result);
         return false;
     }
 #endif
@@ -2940,7 +2974,7 @@ void UJUSYNCSubsystem::DisconnectFromBroker()
     
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     DisconnectFromBroker_C();
-    UE_LOG(LogJUSYNC, Log, TEXT("✅ Disconnected from ANARI USD broker"));
+    UE_LOG(LogJUSYNC, Log, TEXT("âœ… Disconnected from ANARI USD broker"));
 #endif
 }
 
@@ -2965,7 +2999,7 @@ bool UJUSYNCSubsystem::IsBrokerConnected() const
 
 bool UJUSYNCSubsystem::RequestFileList(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles)
 {
-    // ✅ FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
+    // âœ… FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
     UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING FILE LIST FROM BROKER ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Target Rank: %d"), TargetRank);
@@ -2974,13 +3008,13 @@ bool UJUSYNCSubsystem::RequestFileList(int32 TargetRank, int32 TimeoutMs, TArray
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (!bIsInitialized.load())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request file list - middleware not initialized"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request file list - middleware not initialized"));
         return false;
     }
     
     if (!IsBrokerConnected())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request file list - not connected to broker"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request file list - not connected to broker"));
         return false;
     }
     
@@ -3008,12 +3042,12 @@ bool UJUSYNCSubsystem::RequestFileList(int32 TargetRank, int32 TimeoutMs, TArray
         // Free C memory
         FreeFileList_C(FileList, FileCount);
         
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved %d files from broker"), OutFiles.Num());
+        UE_LOG(LogJUSYNC, Log, TEXT("âœ… Retrieved %d files from broker"), OutFiles.Num());
         return true;
     }
     else
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to request file list (Result: %d)"), Result);
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to request file list (Result: %d)"), Result);
         if (FileList)
         {
             FreeFileList_C(FileList, FileCount);
@@ -3025,7 +3059,7 @@ bool UJUSYNCSubsystem::RequestFileList(int32 TargetRank, int32 TimeoutMs, TArray
 
 bool UJUSYNCSubsystem::RequestFileListWithSizes(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles, TArray<int64>& OutSizes)
 {
-    // ✅ FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
+    // âœ… FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
     // For broadcast requests (target_rank = -1), dynamically determine worker count
     int32 AdjustedTimeoutMs = TimeoutMs;
@@ -3068,13 +3102,13 @@ bool UJUSYNCSubsystem::RequestFileListWithSizes(int32 TargetRank, int32 TimeoutM
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (!bIsInitialized.load())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request file list - middleware not initialized"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request file list - middleware not initialized"));
         return false;
     }
     
     if (!IsBrokerConnected())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request file list - not connected to broker"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request file list - not connected to broker"));
         return false;
     }
     
@@ -3106,12 +3140,12 @@ bool UJUSYNCSubsystem::RequestFileListWithSizes(int32 TargetRank, int32 TimeoutM
         // Free C memory
         FreeFileListWithSizes_C(FileList, FileSizes, FileCount);
         
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved %d files with sizes from broker"), OutFiles.Num());
+        UE_LOG(LogJUSYNC, Log, TEXT("âœ… Retrieved %d files with sizes from broker"), OutFiles.Num());
         return true;
     }
     else
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to request file list with sizes (Result: %d)"), Result);
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to request file list with sizes (Result: %d)"), Result);
         if (FileList || FileSizes)
         {
             FreeFileListWithSizes_C(FileList, FileSizes, FileCount);
@@ -3123,7 +3157,7 @@ bool UJUSYNCSubsystem::RequestFileListWithSizes(int32 TargetRank, int32 TimeoutM
 
 bool UJUSYNCSubsystem::RequestFileListWithSizesAndRanks(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles, TArray<int64>& OutSizes, TArray<int32>& OutRanks)
 {
-    // ✅ FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
+    // âœ… FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
     // For broadcast requests (target_rank = -1), dynamically determine worker count
     int32 AdjustedTimeoutMs = TimeoutMs;
@@ -3166,13 +3200,13 @@ bool UJUSYNCSubsystem::RequestFileListWithSizesAndRanks(int32 TargetRank, int32 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (!bIsInitialized.load())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request file list - middleware not initialized"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request file list - middleware not initialized"));
         return false;
     }
     
     if (!IsBrokerConnected())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request file list - not connected to broker"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request file list - not connected to broker"));
         return false;
     }
     
@@ -3208,12 +3242,12 @@ bool UJUSYNCSubsystem::RequestFileListWithSizesAndRanks(int32 TargetRank, int32 
         // Free C memory
         FreeFileListWithSizesAndRanks_C(FileList, FileSizes, FileRanks, FileCount);
         
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved %d files with sizes and ranks from broker"), OutFiles.Num());
+        UE_LOG(LogJUSYNC, Log, TEXT("âœ… Retrieved %d files with sizes and ranks from broker"), OutFiles.Num());
         return true;
     }
     else
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to request file list with sizes and ranks (Result: %d)"), Result);
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to request file list with sizes and ranks (Result: %d)"), Result);
         if (FileList || FileSizes || FileRanks)
         {
             FreeFileListWithSizesAndRanks_C(FileList, FileSizes, FileRanks, FileCount);
@@ -3225,11 +3259,11 @@ bool UJUSYNCSubsystem::RequestFileListWithSizesAndRanks(int32 TargetRank, int32 
 
 bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, int32 TimeoutMs, TArray<uint8>& OutData)
 {
-    // ✅ FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
+    // âœ… FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
     if (Filename.IsEmpty())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request file - filename is empty"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request file - filename is empty"));
         return false;
     }
     
@@ -3241,13 +3275,13 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (!bIsInitialized.load())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request file - middleware not initialized"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request file - middleware not initialized"));
         return false;
     }
     
     if (!IsBrokerConnected())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request file - not connected to broker"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request file - not connected to broker"));
         return false;
     }
     
@@ -3266,7 +3300,7 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
     }
     catch (...)
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Exception caught in RequestFile_C"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Exception caught in RequestFile_C"));
         if (FileData)
         {
             FreeBuffer_C(FileData);
@@ -3283,7 +3317,7 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
         const size_t MAX_REASONABLE_FILE_SIZE = 100ULL * 1024 * 1024 * 1024; // 100GB
         if (FileSize > MAX_REASONABLE_FILE_SIZE)
         {
-            UE_LOG(LogJUSYNC, Error, TEXT("❌ File size suspiciously large: %llu bytes (max: %llu)"), FileSize, MAX_REASONABLE_FILE_SIZE);
+            UE_LOG(LogJUSYNC, Error, TEXT("âŒ File size suspiciously large: %llu bytes (max: %llu)"), FileSize, MAX_REASONABLE_FILE_SIZE);
             FreeBuffer_C(FileData);
             return false;
         }
@@ -3294,7 +3328,7 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
         // Safety check: ensure allocation succeeded
         if (OutData.Num() != static_cast<int32>(FileSize))
         {
-            UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to allocate buffer for file (requested: %llu, got: %d)"), FileSize, OutData.Num());
+            UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to allocate buffer for file (requested: %llu, got: %d)"), FileSize, OutData.Num());
             FreeBuffer_C(FileData);
             return false;
         }
@@ -3303,7 +3337,7 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
         uint8* DestPtr = OutData.GetData();
         if (!DestPtr && FileSize > 0)
         {
-            UE_LOG(LogJUSYNC, Error, TEXT("❌ Destination buffer is null for non-zero file size"));
+            UE_LOG(LogJUSYNC, Error, TEXT("âŒ Destination buffer is null for non-zero file size"));
             FreeBuffer_C(FileData);
             return false;
         }
@@ -3314,12 +3348,12 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
         FreeBuffer_C(FileData);
         FileData = nullptr; // Prevent accidental reuse
         
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved file '%s' (%d bytes) from broker"), *Filename, OutData.Num());
+        UE_LOG(LogJUSYNC, Log, TEXT("âœ… Retrieved file '%s' (%d bytes) from broker"), *Filename, OutData.Num());
         return true;
     }
     else
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to request file (Result: %d)"), Result);
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to request file (Result: %d)"), Result);
         if (FileData)
         {
             FreeBuffer_C(FileData);
@@ -3332,17 +3366,17 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
 
 bool UJUSYNCSubsystem::RequestFilesParallel(const TArray<FString>& Filenames, const TArray<int32>& TargetRanks, int32 TimeoutMs, TArray<FJUSYNCFileData>& OutFiles)
 {
-    // ✅ FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
+    // âœ… FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
     if (Filenames.Num() == 0)
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request files - filename list is empty"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request files - filename list is empty"));
         return false;
     }
     
     if (Filenames.Num() != TargetRanks.Num())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request files - mismatch between filenames count (%d) and target ranks count (%d)"), Filenames.Num(), TargetRanks.Num());
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request files - mismatch between filenames count (%d) and target ranks count (%d)"), Filenames.Num(), TargetRanks.Num());
         return false;
     }
     
@@ -3351,13 +3385,13 @@ bool UJUSYNCSubsystem::RequestFilesParallel(const TArray<FString>& Filenames, co
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (!bIsInitialized.load())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request files - middleware not initialized"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request files - middleware not initialized"));
         return false;
     }
     
     if (!IsBrokerConnected())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request files - not connected to broker"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request files - not connected to broker"));
         return false;
     }
     
@@ -3438,7 +3472,7 @@ bool UJUSYNCSubsystem::RequestFilesParallel(const TArray<FString>& Filenames, co
             FileData.Hash = TEXT("");
             CurrentOutFiles->Add(FileData);
             (*CurrentFilesReceived)++;
-            UE_LOG(LogJUSYNC, Log, TEXT("✅ Parallel download received: %s (%d bytes)"), *FileData.Filename, FileData.Data.Num());
+            UE_LOG(LogJUSYNC, Log, TEXT("âœ… Parallel download received: %s (%d bytes)"), *FileData.Filename, FileData.Data.Num());
         }
     };
     
@@ -3448,7 +3482,7 @@ bool UJUSYNCSubsystem::RequestFilesParallel(const TArray<FString>& Filenames, co
         if (CurrentDownloadComplete && CurrentDownloadSuccess) {
             *CurrentDownloadSuccess = true;
             *CurrentDownloadComplete = true;
-            UE_LOG(LogJUSYNC, Log, TEXT("✅ All parallel downloads completed"));
+            UE_LOG(LogJUSYNC, Log, TEXT("âœ… All parallel downloads completed"));
         }
     };
     
@@ -3457,7 +3491,7 @@ bool UJUSYNCSubsystem::RequestFilesParallel(const TArray<FString>& Filenames, co
         FScopeLock CallbackLock(&CallbackMutex);
         FString UE_Filename = UTF8_TO_TCHAR(filename);
         FString UE_Error = UTF8_TO_TCHAR(error_message);
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Parallel download error for %s: %s"), *UE_Filename, *UE_Error);
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Parallel download error for %s: %s"), *UE_Filename, *UE_Error);
         if (CurrentDownloadComplete && CurrentDownloadSuccess) {
             *CurrentDownloadSuccess = false;
             *CurrentDownloadComplete = true;
@@ -3478,7 +3512,7 @@ bool UJUSYNCSubsystem::RequestFilesParallel(const TArray<FString>& Filenames, co
             TimeoutMs
         );
         
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ RequestFilesParallelAsync_C called - downloads running in background"));
+        UE_LOG(LogJUSYNC, Log, TEXT("âœ… RequestFilesParallelAsync_C called - downloads running in background"));
         
         // For synchronous compatibility, we still need to wait
         // But for true pipeline, we should return immediately
@@ -3489,18 +3523,18 @@ bool UJUSYNCSubsystem::RequestFilesParallel(const TArray<FString>& Filenames, co
         if (TimeoutMs == 0)
         {
             // Immediate return for pipeline mode
-            UE_LOG(LogJUSYNC, Log, TEXT("✅ Pipeline mode: returning immediately, callbacks will process files as they arrive"));
+            UE_LOG(LogJUSYNC, Log, TEXT("âœ… Pipeline mode: returning immediately, callbacks will process files as they arrive"));
             return true;
         }
     }
     catch (const std::exception& e)
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Exception in parallel download: %s"), UTF8_TO_TCHAR(e.what()));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Exception in parallel download: %s"), UTF8_TO_TCHAR(e.what()));
         return false;
     }
     catch (...)
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Unknown exception in parallel download"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Unknown exception in parallel download"));
         return false;
     }
     
@@ -3518,12 +3552,12 @@ bool UJUSYNCSubsystem::RequestFilesParallel(const TArray<FString>& Filenames, co
         
         if (bDownloadSuccess && FilesReceived >= FilesExpected)
         {
-            UE_LOG(LogJUSYNC, Log, TEXT("✅ Successfully downloaded %d files in parallel"), OutFiles.Num());
+            UE_LOG(LogJUSYNC, Log, TEXT("âœ… Successfully downloaded %d files in parallel"), OutFiles.Num());
             return true;
         }
         else
         {
-            UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to download files in parallel (received %d/%d files)"), 
+            UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to download files in parallel (received %d/%d files)"), 
                    FilesReceived.load(), FilesExpected.load());
             return false;
         }
@@ -3536,14 +3570,14 @@ bool UJUSYNCSubsystem::RequestFilesParallel(const TArray<FString>& Filenames, co
     }
     
 #else
-    UE_LOG(LogJUSYNC, Error, TEXT("❌ Parallel downloads not available - middleware not compiled"));
+    UE_LOG(LogJUSYNC, Error, TEXT("âŒ Parallel downloads not available - middleware not compiled"));
     return false;
 #endif
 }
 
 bool UJUSYNCSubsystem::RequestFrame(int32 FrameNumber, int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCFileData>& OutFiles)
 {
-    // ✅ FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
+    // âœ… FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
     UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING FRAME FROM BROKER ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Frame Number: %d"), FrameNumber);
@@ -3553,13 +3587,13 @@ bool UJUSYNCSubsystem::RequestFrame(int32 FrameNumber, int32 TargetRank, int32 T
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (!bIsInitialized.load())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request frame - middleware not initialized"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request frame - middleware not initialized"));
         return false;
     }
     
     if (!IsBrokerConnected())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request frame - not connected to broker"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request frame - not connected to broker"));
         return false;
     }
     
@@ -3595,12 +3629,12 @@ bool UJUSYNCSubsystem::RequestFrame(int32 FrameNumber, int32 TargetRank, int32 T
         // Free C memory using middleware function
         FreeFrameFiles_C(CFrameFiles, FileCount);
         
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ Retrieved frame %d with %d files from broker"), FrameNumber, OutFiles.Num());
+        UE_LOG(LogJUSYNC, Log, TEXT("âœ… Retrieved frame %d with %d files from broker"), FrameNumber, OutFiles.Num());
         return true;
     }
     else
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to request frame (Result: %d)"), Result);
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to request frame (Result: %d)"), Result);
         if (CFrameFiles)
         {
             FreeFrameFiles_C(CFrameFiles, FileCount);
@@ -3612,7 +3646,7 @@ bool UJUSYNCSubsystem::RequestFrame(int32 FrameNumber, int32 TargetRank, int32 T
 
 bool UJUSYNCSubsystem::RequestWorkerStatus(int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCWorkerStatus>& OutWorkerStatus)
 {
-    // ✅ FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
+    // âœ… FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
     UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING WORKER STATUS FROM BROKER ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Target Rank: %d"), TargetRank);
@@ -3621,13 +3655,13 @@ bool UJUSYNCSubsystem::RequestWorkerStatus(int32 TargetRank, int32 TimeoutMs, TA
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (!bIsInitialized.load())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request worker status - middleware not initialized"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request worker status - middleware not initialized"));
         return false;
     }
     
     if (!IsBrokerConnected())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request worker status - not connected to broker"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request worker status - not connected to broker"));
         return false;
     }
     
@@ -3651,11 +3685,11 @@ bool UJUSYNCSubsystem::RequestWorkerStatus(int32 TargetRank, int32 TimeoutMs, TA
             
             OutWorkerStatus.Add(Status);
         }
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ Successfully retrieved worker list: %d workers"), OutWorkerStatus.Num());
+        UE_LOG(LogJUSYNC, Log, TEXT("âœ… Successfully retrieved worker list: %d workers"), OutWorkerStatus.Num());
     }
     else
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to retrieve worker list from middleware"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to retrieve worker list from middleware"));
         OutWorkerStatus.Empty();
     }
     
@@ -3666,7 +3700,7 @@ bool UJUSYNCSubsystem::RequestWorkerStatus(int32 TargetRank, int32 TimeoutMs, TA
 
 bool UJUSYNCSubsystem::RequestWorkerCount(int32 TimeoutMs, int32& OutWorkerCount)
 {
-    // ✅ FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
+    // âœ… FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
     UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING WORKER COUNT FROM BROKER ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Timeout: %d ms"), TimeoutMs);
@@ -3674,13 +3708,13 @@ bool UJUSYNCSubsystem::RequestWorkerCount(int32 TimeoutMs, int32& OutWorkerCount
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (!bIsInitialized.load())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request worker count - middleware not initialized"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request worker count - middleware not initialized"));
         return false;
     }
     
     if (!IsBrokerConnected())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request worker count - not connected to broker"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request worker count - not connected to broker"));
         return false;
     }
     
@@ -3691,11 +3725,11 @@ bool UJUSYNCSubsystem::RequestWorkerCount(int32 TimeoutMs, int32& OutWorkerCount
     if (bSuccess)
     {
         OutWorkerCount = static_cast<int32>(workerList.size());
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ Successfully retrieved worker count: %d workers"), OutWorkerCount);
+        UE_LOG(LogJUSYNC, Log, TEXT("âœ… Successfully retrieved worker count: %d workers"), OutWorkerCount);
     }
     else
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to retrieve worker count from middleware"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to retrieve worker count from middleware"));
         OutWorkerCount = 0;
     }
     
@@ -3706,7 +3740,7 @@ bool UJUSYNCSubsystem::RequestWorkerCount(int32 TimeoutMs, int32& OutWorkerCount
 
 bool UJUSYNCSubsystem::RequestTotalWorkerCount(int32 TimeoutMs, int32& OutTotalCount)
 {
-    // ✅ FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
+    // âœ… FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
     UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING TOTAL WORKER COUNT (INCLUDING RANK 0) ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Timeout: %d ms"), TimeoutMs);
@@ -3714,13 +3748,13 @@ bool UJUSYNCSubsystem::RequestTotalWorkerCount(int32 TimeoutMs, int32& OutTotalC
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (!bIsInitialized.load())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request total worker count - middleware not initialized"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request total worker count - middleware not initialized"));
         return false;
     }
     
     if (!IsBrokerConnected())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request total worker count - not connected to broker"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request total worker count - not connected to broker"));
         return false;
     }
     
@@ -3731,11 +3765,11 @@ bool UJUSYNCSubsystem::RequestTotalWorkerCount(int32 TimeoutMs, int32& OutTotalC
     if (Result == 1)
     {
         OutTotalCount = static_cast<int32>(TotalCount);
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ Total worker count (including rank 0): %d"), OutTotalCount);
+        UE_LOG(LogJUSYNC, Log, TEXT("âœ… Total worker count (including rank 0): %d"), OutTotalCount);
     }
     else
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to retrieve total worker count"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to retrieve total worker count"));
         OutTotalCount = 0;
     }
     
@@ -3748,7 +3782,7 @@ bool UJUSYNCSubsystem::RequestTotalWorkerCount(int32 TimeoutMs, int32& OutTotalC
 
 bool UJUSYNCSubsystem::RequestWorkerCountExcludingRank0(int32 TimeoutMs, int32& OutWorkerCount)
 {
-    // ✅ FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
+    // âœ… FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
     UE_LOG(LogJUSYNC, Log, TEXT("=== REQUESTING WORKER COUNT (EXCLUDING RANK 0) ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("Timeout: %d ms"), TimeoutMs);
@@ -3756,13 +3790,13 @@ bool UJUSYNCSubsystem::RequestWorkerCountExcludingRank0(int32 TimeoutMs, int32& 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (!bIsInitialized.load())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request worker count - middleware not initialized"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request worker count - middleware not initialized"));
         return false;
     }
     
     if (!IsBrokerConnected())
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Cannot request worker count - not connected to broker"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request worker count - not connected to broker"));
         return false;
     }
     
@@ -3773,11 +3807,11 @@ bool UJUSYNCSubsystem::RequestWorkerCountExcludingRank0(int32 TimeoutMs, int32& 
     if (Result == 1)
     {
         OutWorkerCount = static_cast<int32>(WorkerCount);
-        UE_LOG(LogJUSYNC, Log, TEXT("✅ Worker count (excluding rank 0): %d"), OutWorkerCount);
+        UE_LOG(LogJUSYNC, Log, TEXT("âœ… Worker count (excluding rank 0): %d"), OutWorkerCount);
     }
     else
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to retrieve worker count"));
+        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to retrieve worker count"));
         OutWorkerCount = 0;
     }
     
@@ -3833,12 +3867,12 @@ void UJUSYNCSubsystem::CreateMaterialFromTexture_Async(UTexture2D* Texture, URea
                 if (URealtimeMeshComponent* Component = ComponentPtr.Get())
                 {
                     Component->SetMaterial(0, DynamicMaterial);
-                    UE_LOG(LogJUSYNC, Log, TEXT("✅ Applied dynamic material to mesh component"));
+                    UE_LOG(LogJUSYNC, Log, TEXT("âœ… Applied dynamic material to mesh component"));
                 }
             }
             else
             {
-                UE_LOG(LogJUSYNC, Error, TEXT("❌ Failed to create dynamic material instance"));
+                UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to create dynamic material instance"));
             }
         });
     });

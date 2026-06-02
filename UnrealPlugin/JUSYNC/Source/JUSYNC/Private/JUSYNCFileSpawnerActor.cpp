@@ -6,13 +6,14 @@
 #include "Modules/ModuleManager.h"
 #include "IImageWrapper.h"
 #include "IImageWrapperModule.h"
+#include "Kismet/GameplayStatics.h"
 
 AJUSYNCFileSpawnerActor::AJUSYNCFileSpawnerActor()
 {
     PrimaryActorTick.bCanEverTick = false;
     BrokerEndpoint = TEXT("tcp://localhost:5556");
     RequestTimeoutMs = 5000;
-    BandwidthBytesPerSecond = 1000000.0f;
+    BandwidthBytesPerSecond = 10737418240.0f; // 10GB/s - max bandwidth, no artificial throttling
     MinimumFileSizeBytes = 1000;
     bFilterUSDOnly = true;
     bClipsOnly = true;
@@ -24,6 +25,12 @@ AJUSYNCFileSpawnerActor::AJUSYNCFileSpawnerActor()
     SpawnScale = FVector::OneVector;
     bUseUniformScaling = true;
     bAutoStart = true;
+    bEnableLiveUpdates = false;
+    LiveUpdatePollInterval = 5.0f;
+    bAutoRefreshMeshes = true;
+    LastCommitCompleteTime = 0.0;
+    CommitCompleteCooldown = 5.0;
+    bCommitDiffInProgress = false;
     bSpawnPointClouds = true;
     bUseGradientColors = true;
     GradientPngFilename = TEXT("");
@@ -43,6 +50,14 @@ AJUSYNCFileSpawnerActor::AJUSYNCFileSpawnerActor()
 void AJUSYNCFileSpawnerActor::BeginPlay()
 {
     Super::BeginPlay();
+
+    // Bind to broker notification events for live updates
+    UJUSYNCSubsystem* Subsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
+    if (Subsystem)
+    {
+        Subsystem->OnNotificationReceived.AddDynamic(this, &AJUSYNCFileSpawnerActor::OnBrokerNotification);
+    }
+
     if (bAutoStart)
     {
         UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: auto-starting pipeline"));
@@ -52,6 +67,14 @@ void AJUSYNCFileSpawnerActor::BeginPlay()
 
 void AJUSYNCFileSpawnerActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+    StopLiveUpdatePolling();
+
+    UJUSYNCSubsystem* Subsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
+    if (Subsystem)
+    {
+        Subsystem->OnNotificationReceived.RemoveAll(this);
+    }
+
     CancelSpawning();
     ClearSpawnedActors();
     Super::EndPlay(EndPlayReason);
@@ -108,6 +131,8 @@ void AJUSYNCFileSpawnerActor::ClearSpawnedActors()
         if (Actor) Actor->Destroy();
     SpawnedActors.Empty();
     ActorsSpawned = 0;
+    FileToActorMap.Empty();
+    FileLastSize.Empty();
 }
 
 FVector AJUSYNCFileSpawnerActor::GetNextSpawnLocation() const
@@ -126,7 +151,7 @@ FVector AJUSYNCFileSpawnerActor::GetNextSpawnLocation() const
 int32 AJUSYNCFileSpawnerActor::CalculateDynamicTimeout(int64 FileSizeBytes) const
 {
     const int32 BaseTimeout = 5000;
-    const int32 MaxTimeout = 120000;
+    const int32 MaxTimeout = 600000; // 10 minutes max - allow large transfers
     float TimeForTransfer = (static_cast<float>(FileSizeBytes) / FMath::Max(1.0f, BandwidthBytesPerSecond)) * 1000.0f;
     int32 DynamicTimeout = BaseTimeout + static_cast<int32>(TimeForTransfer);
     return FMath::Clamp(DynamicTimeout, RequestTimeoutMs, MaxTimeout);
@@ -612,6 +637,9 @@ void AJUSYNCFileSpawnerActor::SpawnMeshFromData(const FString& Filename, bool bP
                         SpawnedActors.Add(Spawned);
                         ActorsSpawned++;
 
+                        // Track for live updates
+                        FileToActorMap.Add(MeshData[i].ElementName + TEXT("|") + FCopy, Spawned);
+
                         // Disable collision on spawned mesh
                         Spawned->SetActorEnableCollision(false);
 
@@ -736,6 +764,13 @@ void AJUSYNCFileSpawnerActor::OnPointCloudSpawnedHandler(const FString& EleName,
         SpawnedActors.Add(Spawned);
         ActorsSpawned++;
         Spawned->SetActorEnableCollision(false);
+
+        // Track for live updates (use element name as key)
+        if (!EleName.IsEmpty())
+        {
+            FileToActorMap.Add(EleName, Spawned);
+        }
+
         OnFileComplete.Broadcast(EleName, Spawned);
         NextSpawnIndex++;
 
@@ -899,6 +934,12 @@ void AJUSYNCFileSpawnerActor::CheckAllDownloadsComplete()
         FailedFileIndices.Empty();
         ParseFailedIndices.Empty();
         OnAllComplete.Broadcast(ActorsSpawned, bSuccess);
+
+        // Start live update polling if enabled
+        if (bEnableLiveUpdates)
+        {
+            StartLiveUpdatePolling();
+        }
     }
 }
 
@@ -941,4 +982,390 @@ void AJUSYNCFileSpawnerActor::RetryFailedDownloads()
                     TStatId(), nullptr, ENamedThreads::GameThread);
             });
     }
+}
+
+// ============================================================================
+// LIVE UPDATE SUPPORT
+// ============================================================================
+
+void AJUSYNCFileSpawnerActor::OnBrokerNotification(const FJUSYNCNotification& Notification)
+{
+    if (!bEnableLiveUpdates || CurrentState != EJUSYNCSpawnerState::Complete)
+        return;
+
+    if (Notification.Type == EJUSYNCNotificationType::FileUpdate)
+    {
+        UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] File update notification: '%s' (rank %d)"),
+               *Notification.Filename, Notification.SourceRank);
+        HandleFileUpdateNotification(Notification.Filename, Notification.SourceRank);
+    }
+    else if (Notification.Type == EJUSYNCNotificationType::CommitComplete)
+    {
+        UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Commit complete notification"));
+        HandleCommitCompleteNotification();
+    }
+}
+
+void AJUSYNCFileSpawnerActor::HandleFileUpdateNotification(const FString& Filename, int32_t SourceRank)
+{
+    if (!bAutoRefreshMeshes || Filename.IsEmpty())
+    {
+        UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Skipping file update: auto-refresh disabled or empty filename"));
+        return;
+    }
+
+    // Skip non-geometry files — only clip USD files are worth refreshing
+    if (!Filename.EndsWith(TEXT(".usda")) && !Filename.EndsWith(TEXT(".usd")))
+    {
+        UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Skipping non-USD file: '%s'"), *Filename);
+        return;
+    }
+    if (Filename.StartsWith(TEXT("Session_")) || Filename == TEXT("scene.usda") ||
+        Filename.Contains(TEXT("manifest")) || Filename.Contains(TEXT("images/")) ||
+        Filename.Contains(TEXT("shared/")))
+    {
+        UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Skipping root/manifest file: '%s'"), *Filename);
+        return;
+    }
+
+    UE_LOG(LogTemp, Display, TEXT("[LiveUpdate] Refreshing file: '%s' from rank %d"), *Filename, SourceRank);
+    GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Blue,
+        FString::Printf(TEXT("[LiveUpdate] Refreshing: %s"), *Filename));
+
+    // Try to find the rank from our stored file lists
+    int32 TargetRank = SourceRank;
+    if (TargetRank < 0)
+    {
+        // Search in filtered files
+        for (int32 i = 0; i < FilteredFiles.Num(); ++i)
+        {
+            if (FilteredFiles[i] == Filename)
+            {
+                TargetRank = FilteredRanks.IsValidIndex(i) ? FilteredRanks[i] : 0;
+                break;
+            }
+        }
+        // Also search in raw files
+        if (TargetRank < 0)
+        {
+            for (int32 i = 0; i < RawFileRanks.Num(); ++i)
+            {
+                if (RawFileList.IsValidIndex(i) && RawFileList[i] == Filename)
+                {
+                    TargetRank = RawFileRanks[i];
+                    break;
+                }
+            }
+        }
+    }
+
+    RefreshSingleFile(Filename, TargetRank);
+}
+
+void AJUSYNCFileSpawnerActor::HandleCommitCompleteNotification()
+{
+    if (!bAutoRefreshMeshes)
+    {
+        UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Skipping commit complete: auto-refresh disabled"));
+        return;
+    }
+
+    double Now = FPlatformTime::Seconds();
+    if (bCommitDiffInProgress)
+    {
+        UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Skipping commit complete: diff already in progress"));
+        return;
+    }
+    if (Now - LastCommitCompleteTime < CommitCompleteCooldown)
+    {
+        double Remaining = CommitCompleteCooldown - (Now - LastCommitCompleteTime);
+        UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Skipping commit complete: cooldown active (%.1fs remaining)"), Remaining);
+        return;
+    }
+
+    LastCommitCompleteTime = Now;
+    bCommitDiffInProgress = true;
+    UE_LOG(LogTemp, Display, TEXT("[LiveUpdate] Commit complete - re-fetching file list"));
+
+    // Capture subsystem on game thread (lookup fails on background threads)
+    UJUSYNCSubsystem* Subsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
+    if (!Subsystem || !Subsystem->IsBrokerConnected())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[LiveUpdate] Cannot refresh: broker not connected"));
+        bCommitDiffInProgress = false;
+        return;
+    }
+
+    TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThis = this;
+    TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
+
+    Async(EAsyncExecution::Thread, [WeakSubsystem, WeakThis]()
+    {
+        if (!WeakSubsystem.IsValid() || !WeakThis.IsValid()) return;
+
+        TArray<FString> NewFiles;
+        TArray<int64> NewSizes;
+        TArray<int32> NewRanks;
+        bool bSuccess = WeakSubsystem->RequestFileListWithSizesAndRanks(-1, 15000, NewFiles, NewSizes, NewRanks);
+
+        FFunctionGraphTask::CreateAndDispatchWhenReady(
+            [WeakThis, NewFiles, NewSizes, NewRanks, bSuccess]()
+            {
+                if (!WeakThis.IsValid() || !bSuccess || NewFiles.Num() == 0)
+            {
+                if (WeakThis.IsValid()) WeakThis->bCommitDiffInProgress = false;
+                return;
+            }
+
+                // Find files that are new or changed
+                TMap<FString, int64> OldSizes;
+                for (int32 i = 0; i < WeakThis->FilteredFiles.Num(); ++i)
+                {
+                    OldSizes.Add(WeakThis->FilteredFiles[i],
+                                 WeakThis->FilteredSizes.IsValidIndex(i) ? WeakThis->FilteredSizes[i] : 0);
+                }
+
+                int32 ChangedCount = 0;
+                int32 NewCount = 0;
+                int32 SkippedCount = 0;
+                TArray<FString> ChangedFiles;
+
+                for (int32 i = 0; i < NewFiles.Num(); ++i)
+                {
+                    const FString& Fname = NewFiles[i];
+                    int64 NewSize = NewSizes.IsValidIndex(i) ? NewSizes[i] : 0;
+                    int32 Rank = NewRanks.IsValidIndex(i) ? NewRanks[i] : 0;
+
+                    // Only refresh USD clip files — skip manifests, root scenes, images, etc.
+                    if (!Fname.EndsWith(TEXT(".usda")) && !Fname.EndsWith(TEXT(".usd")))
+                    {
+                        SkippedCount++;
+                        continue;
+                    }
+                    // Skip root scene files and shared manifests
+                    if (Fname.StartsWith(TEXT("Session_")) || Fname == TEXT("scene.usda") ||
+                        Fname.Contains(TEXT("manifest")) || Fname.Contains(TEXT("images/")) ||
+                        Fname.Contains(TEXT("shared/")))
+                    {
+                        SkippedCount++;
+                        continue;
+                    }
+
+                    int64 OldSize = 0;
+                    int64* pOldSize = OldSizes.Find(Fname);
+                    bool bFound = pOldSize != nullptr;
+                    if (bFound) OldSize = *pOldSize;
+
+                    if (!bFound || NewSize != OldSize)
+                    {
+                        if (!bFound) NewCount++;
+                        else ChangedCount++;
+                        ChangedFiles.Add(Fname);
+                        UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Detected change: '%s' (old: %lld, new: %lld)"),
+                               *Fname, static_cast<long long>(OldSize), static_cast<long long>(NewSize));
+                        WeakThis->RefreshSingleFile(Fname, Rank);
+                    }
+                }
+
+                // Show summary on screen
+                int32 TotalChanges = ChangedCount + NewCount;
+                if (TotalChanges > 0)
+                {
+                    FString Summary = FString::Printf(TEXT("[LiveUpdate] %d changed, %d new, %d skipped"), ChangedCount, NewCount, SkippedCount);
+                    if (ChangedFiles.Num() <= 3)
+                    {
+                        for (const FString& F : ChangedFiles)
+                            Summary += FString::Printf(TEXT("\n  - %s"), *F);
+                    }
+                    else
+                    {
+                        for (int32 i = 0; i < 3 && i < ChangedFiles.Num(); ++i)
+                            Summary += FString::Printf(TEXT("\n  - %s"), *ChangedFiles[i]);
+                        Summary += FString::Printf(TEXT("\n  ... and %d more"), ChangedFiles.Num() - 3);
+                    }
+                    GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Orange, Summary);
+                }
+
+                // Update stored file lists
+                WeakThis->RawFileList = NewFiles;
+                WeakThis->RawFileSizes = NewSizes;
+                WeakThis->RawFileRanks = NewRanks;
+                WeakThis->bCommitDiffInProgress = false;
+            },
+            TStatId(), nullptr, ENamedThreads::GameThread);
+    });
+}
+
+void AJUSYNCFileSpawnerActor::StartLiveUpdatePolling()
+{
+    if (!bEnableLiveUpdates || LiveUpdatePollInterval <= 0.0f)
+        return;
+
+    if (GWorld)
+    {
+        GWorld->GetTimerManager().ClearTimer(LiveUpdateTimerHandle);
+        GWorld->GetTimerManager().SetTimer(LiveUpdateTimerHandle,
+            FTimerDelegate::CreateUObject(this, &AJUSYNCFileSpawnerActor::OnLiveUpdateTimer),
+            LiveUpdatePollInterval, true);
+        UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Polling started (interval: %.1fs)"), LiveUpdatePollInterval);
+    }
+}
+
+void AJUSYNCFileSpawnerActor::StopLiveUpdatePolling()
+{
+    if (GWorld)
+    {
+        GWorld->GetTimerManager().ClearTimer(LiveUpdateTimerHandle);
+    }
+}
+
+void AJUSYNCFileSpawnerActor::OnLiveUpdateTimer()
+{
+    if (CurrentState != EJUSYNCSpawnerState::Complete)
+        return;
+
+    HandleCommitCompleteNotification();
+}
+
+bool AJUSYNCFileSpawnerActor::RefreshSingleFile(const FString& Filename, int32 TargetRank)
+{
+    if (Filename.IsEmpty())
+        return false;
+
+    // Capture subsystem on game thread
+    UJUSYNCSubsystem* Subsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
+    if (!Subsystem || !Subsystem->IsBrokerConnected())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[LiveUpdate] Cannot refresh '%s': broker not connected"), *Filename);
+        return false;
+    }
+
+    // Find existing actor for this file and destroy it
+    // Match by: key contains filename, OR filename contains key (handles point clouds keyed by element name)
+    TArray<AActor*> ActorsToRemove;
+    for (const auto& Pair : FileToActorMap)
+    {
+        if (Pair.Key.Contains(Filename) || Filename.Contains(Pair.Key))
+        {
+            if (Pair.Value && Pair.Value->IsValidLowLevel())
+            {
+                ActorsToRemove.Add(Pair.Value);
+            }
+        }
+    }
+
+    // Remove old entries
+    for (auto It = FileToActorMap.CreateIterator(); It; ++It)
+    {
+        if (It->Key.Contains(Filename) || Filename.Contains(It->Key))
+        {
+            It.RemoveCurrent();
+        }
+    }
+
+    // Destroy old actors
+    for (AActor* OldActor : ActorsToRemove)
+    {
+        if (SpawnedActors.Contains(OldActor))
+        {
+            SpawnedActors.Remove(OldActor);
+            ActorsSpawned--;
+        }
+        if (OldActor) OldActor->Destroy();
+    }
+
+    // Download and re-spawn
+    TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThis = this;
+    TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
+    FString FilenameCopy = Filename;
+    int32 RankCopy = TargetRank;
+
+    Async(EAsyncExecution::Thread, [WeakSubsystem, WeakThis, FilenameCopy, RankCopy]()
+    {
+        if (!WeakSubsystem.IsValid() || !WeakThis.IsValid()) return;
+
+        int64 FileSize = 1048576; // Default 1MB for timeout calc
+        int32 Timeout = 30000;
+
+        TArray<uint8> FileData;
+        bool bSuccess = WeakSubsystem->RequestFile(FilenameCopy, RankCopy, Timeout, FileData);
+
+        if (!bSuccess || FileData.Num() == 0)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("[LiveUpdate] Failed to download updated file: '%s'"), *FilenameCopy);
+            return;
+        }
+
+        // Parse on background thread
+        TArray<FJUSYNCMeshData> MeshData;
+        TArray<FJUSYNCPointCloudData> PointCloudData;
+        FString Preview;
+        bool bParsed = UJUSYNCBlueprintLibrary::LoadUSDFullFromBuffer(FileData, FilenameCopy, MeshData, PointCloudData, Preview);
+
+        TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakCopy = WeakThis;
+        FFunctionGraphTask::CreateAndDispatchWhenReady(
+            [WeakCopy, FilenameCopy, bParsed, MeshData = MoveTemp(MeshData), PointCloudData = MoveTemp(PointCloudData)]() mutable
+            {
+                if (!WeakCopy.IsValid()) return;
+
+                if (!bParsed || (MeshData.Num() == 0 && PointCloudData.Num() == 0))
+                {
+                    UE_LOG(LogTemp, Warning, TEXT("[LiveUpdate] Parse returned no data for: '%s'"), *FilenameCopy);
+                    return;
+                }
+
+                // Spawn meshes
+                for (int32 i = 0; i < MeshData.Num(); ++i)
+                {
+                    if (!MeshData[i].IsValid()) continue;
+
+                    FVector SpawnLoc = WeakCopy->GetNextSpawnLocation();
+                    AActor* Spawned = UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(MeshData[i], SpawnLoc);
+
+                    if (Spawned)
+                    {
+                        WeakCopy->SpawnedActors.Add(Spawned);
+                        WeakCopy->ActorsSpawned++;
+                        WeakCopy->FileToActorMap.Add(MeshData[i].ElementName + TEXT("|") + FilenameCopy, Spawned);
+                        Spawned->SetActorEnableCollision(false);
+
+                        if (WeakCopy->SpawnScale != FVector::ZeroVector)
+                        {
+                            FVector FinalScale = WeakCopy->bUseUniformScaling ? FVector(WeakCopy->SpawnScale.X) : WeakCopy->SpawnScale;
+                            Spawned->SetActorScale3D(FinalScale);
+                        }
+
+                        WeakCopy->OnFileComplete.Broadcast(FilenameCopy, Spawned);
+                        WeakCopy->NextSpawnIndex++;
+                        UE_LOG(LogTemp, Display, TEXT("[LiveUpdate] Refreshed mesh from '%s'"), *FilenameCopy);
+                    }
+                }
+
+                // Spawn point clouds
+                if (WeakCopy->bSpawnPointClouds && PointCloudData.Num() > 0)
+                {
+                    UJUSYNCSubsystem* S = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
+                    if (S && S->GetPointCloudSpawner())
+                    {
+                        FJUSYNCPointCloudSpawner* Spawner = S->GetPointCloudSpawner();
+                        Spawner->SetSpawnLocation(WeakCopy->GetNextSpawnLocation());
+                        Spawner->SetSpawnScale(WeakCopy->bUseUniformScaling ? WeakCopy->SpawnScale.X : 1.0f);
+
+                        for (const FJUSYNCPointCloudData& PC : PointCloudData)
+                        {
+                            if (PC.IsValid())
+                            {
+                                Spawner->EnqueuePointCloud(PC);
+                            }
+                        }
+                    }
+                }
+
+                FString ResultMsg = FString::Printf(TEXT("[LiveUpdate] Refreshed: %s"), *FilenameCopy);
+                GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Green, ResultMsg);
+            },
+            TStatId(), nullptr, ENamedThreads::GameThread);
+    });
+
+    return true;
 }

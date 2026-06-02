@@ -1516,6 +1516,24 @@ void RegisterMessageCallback_C(MessageReceivedCallback_C callback) {
     g_message_callback.store(callback, std::memory_order_release);
 }
 
+/**
+ * Register callback for broker push notifications (NOTIFY_FILE_UPDATE, NOTIFY_COMMIT_COMPLETE)
+ */
+void RegisterNotificationCallback_C(NotificationCallback_C callback) {
+    if (!g_middleware) {
+        return;
+    }
+    if (callback) {
+        g_middleware->setNotificationCallback([callback](uint32_t messageType, int32_t sourceRank,
+                                                          const std::string& filename,
+                                                          uint64_t fileSize, uint64_t timestamp) {
+            callback(messageType, sourceRank, filename.c_str(), fileSize, timestamp);
+        });
+    } else {
+        g_middleware->setNotificationCallback(nullptr);
+    }
+}
+
 // ============================================================================
 // ASYNC BROKER FUNCTIONS (NON-BLOCKING)
 // ============================================================================

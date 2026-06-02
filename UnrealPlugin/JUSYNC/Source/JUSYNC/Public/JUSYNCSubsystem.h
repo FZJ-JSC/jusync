@@ -80,6 +80,10 @@ public:
     UPROPERTY(BlueprintAssignable, Category = "JUSYNC Events")
     FJUSYNCPointCloudReceived OnPointCloudReceived;
 
+    // Live update notification from broker
+    UPROPERTY(BlueprintAssignable, Category = "JUSYNC Events")
+    FJUSYNCNotificationReceived OnNotificationReceived;
+
     // USD Processing (Legacy - use JUSYNCBlueprintLibrary versions for preview support)
     UFUNCTION(BlueprintCallable, Category = "JUSYNC USD|Legacy", DisplayName = "Load USD From Buffer (Legacy)")
     bool LoadUSDFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCMeshData>& OutMeshData);

@@ -339,6 +339,30 @@ struct ZmqPropertyResponse {
 #pragma pack(pop)
 
 /**
+ * File Notification Message Structure
+ * Sent from broker to client as push notification (NOTIFY_FILE_UPDATE=300, NOTIFY_COMMIT_COMPLETE=301)
+ */
+#pragma pack(push, 1)
+struct ZmqFileNotification {
+    uint32_t magic;            // 0x55534446 ("USDF")
+    uint32_t message_type;     // NOTIFY_FILE_UPDATE or NOTIFY_COMMIT_COMPLETE
+    int32_t source_rank;       // Which rank sent this
+    char filename[256];        // Filename that was updated
+    uint64_t file_size;        // Current file size
+    uint64_t timestamp;        // Unix timestamp of update
+
+    ZmqFileNotification() {
+        memset(this, 0, sizeof(ZmqFileNotification));
+        magic = ANARI_USD_MAGIC;
+    }
+
+    std::string getFilename() const {
+        return std::string(filename, strnlen(filename, sizeof(filename)));
+    }
+};
+#pragma pack(pop)
+
+/**
  * Worker Registration Message Structure
  * Sent from worker to broker during registration
  */
@@ -404,7 +428,12 @@ namespace MessageUtils {
     }
     
     inline bool isValidMessageType(uint32_t type) {
-        return type >= 1 && type <= 301;
+        return type >= 1 && type <= 401;
+    }
+
+    inline bool isNotificationType(uint32_t type) {
+        return type == static_cast<uint32_t>(ZmqMessageType::NOTIFY_FILE_UPDATE) ||
+               type == static_cast<uint32_t>(ZmqMessageType::NOTIFY_COMMIT_COMPLETE);
     }
     
     inline std::string getMessageTypeName(uint32_t type) {

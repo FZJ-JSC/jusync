@@ -1557,4 +1557,12 @@ AnariUsdClient* AnariUsdMiddleware::getClient() const {
     return pImpl->anariUsdClient.get();
 }
 
+void AnariUsdMiddleware::setNotificationCallback(NotificationCallback cb) {
+    if (!pImpl || !pImpl->anariUsdClient) {
+        MIDDLEWARE_LOG_ERROR("Cannot set notification callback: middleware not initialized");
+        return;
+    }
+    pImpl->anariUsdClient->setNotificationCallback(std::move(cb));
+}
+
 } // namespace anari_usd_middleware

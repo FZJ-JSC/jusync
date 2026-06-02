@@ -1252,6 +1252,45 @@ void AnariUsdClient::updateHealthStatus() {
     // Additional health checks can be added here
 }
 
+void AnariUsdClient::setNotificationCallback(NotificationCallback callback) {
+    std::lock_guard<std::mutex> lock(notificationCallbackMutex);
+    notificationCallback = std::move(callback);
+    MIDDLEWARE_LOG_INFO("Notification callback %s", notificationCallback ? "registered" : "cleared");
+}
+
+void AnariUsdClient::handleNotification(const std::vector<uint8_t>& data) {
+    if (data.size() < sizeof(ZmqFileNotification)) {
+        MIDDLEWARE_LOG_WARNING("Notification message too small: %zu bytes", data.size());
+        return;
+    }
+
+    const ZmqFileNotification* notif = reinterpret_cast<const ZmqFileNotification*>(data.data());
+
+    if (!MessageUtils::isValidMagic(notif->magic)) {
+        MIDDLEWARE_LOG_WARNING("Invalid magic in notification: 0x%08X", notif->magic);
+        return;
+    }
+
+    std::string typeName = (notif->message_type == static_cast<uint32_t>(ZmqMessageType::NOTIFY_COMMIT_COMPLETE))
+        ? "NOTIFY_COMMIT_COMPLETE" : "NOTIFY_FILE_UPDATE";
+    MIDDLEWARE_LOG_INFO("Received %s from rank %d: '%s' (%llu bytes, timestamp %llu)",
+                        typeName.c_str(), notif->source_rank, notif->getFilename().c_str(),
+                        static_cast<unsigned long long>(notif->file_size),
+                        static_cast<unsigned long long>(notif->timestamp));
+
+    std::lock_guard<std::mutex> lock(notificationCallbackMutex);
+    if (notificationCallback) {
+        try {
+            notificationCallback(notif->message_type, notif->source_rank,
+                                 notif->getFilename(), notif->file_size, notif->timestamp);
+        } catch (const std::exception& e) {
+            MIDDLEWARE_LOG_ERROR("Exception in notification callback: %s", e.what());
+        } catch (...) {
+            MIDDLEWARE_LOG_ERROR("Unknown exception in notification callback");
+        }
+    }
+}
+
 bool AnariUsdClient::requestWorkerListString(std::vector<std::tuple<int32_t, std::string, std::string>>& outWorkers, int timeoutMs) {
     if (connectionStatus.load() != ConnectionStatus::Connected || !zmqSocket) {
         MIDDLEWARE_LOG_ERROR("AnariUsdClient not connected");
@@ -2004,7 +2043,18 @@ void AnariUsdClient::dispatcherThread() {
 // ---------------------------------------------------------------------------
 
 void AnariUsdClient::enqueueResponseFrame(const std::vector<uint8_t>& delimiter,
-                                           const std::vector<uint8_t>& data) {
+                                            const std::vector<uint8_t>& data) {
+    // Check if this is a notification message (NOTIFY_FILE_UPDATE=300 or NOTIFY_COMMIT_COMPLETE=301)
+    // Notifications have no request_id and would never be matched by waiting threads
+    if (data.size() >= 8) {
+        uint32_t magic = *reinterpret_cast<const uint32_t*>(data.data());
+        uint32_t msgType = *reinterpret_cast<const uint32_t*>(data.data() + 4);
+        if (magic == ANARI_USD_MAGIC && MessageUtils::isNotificationType(msgType)) {
+            handleNotification(data);
+            return; // Don't enqueue notification into response queue
+        }
+    }
+
     auto entry = std::make_shared<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>>(
         std::move(const_cast<std::vector<uint8_t>&>(delimiter)),
         std::move(const_cast<std::vector<uint8_t>&>(data)));

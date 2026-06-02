@@ -1,0 +1,30 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "vs2022-release",
+      "displayName": "Visual Studio 2022 Release (CUDA)",
+      "description": "Default build: VS2022, x64, Release, CUDA enabled",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "ENABLE_CUDA_ACCELERATION": "ON",
+        "ENABLE_MESH_ACCELERATION": "ON",
+        "ENABLE_AVX512": "ON",
+        "ENABLE_AVX2": "ON",
+        "ENABLE_SSE4": "ON",
+        "BUILD_TESTS": "OFF",
+        "BUILD_JUSYNC_Receiver_GUI": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "vs2022-release",
+      "displayName": "Build Release (VS2022 + CUDA)",
+      "configurePreset": "vs2022-release",
+      "configuration": "Release"
+    }
+  ]
+}

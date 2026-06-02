@@ -552,6 +552,42 @@ ANARI_USD_MIDDLEWARE_C_API void RegisterUpdateCallback_C(FileReceivedCallback_C 
 ANARI_USD_MIDDLEWARE_C_API void RegisterMessageCallback_C(MessageReceivedCallback_C callback);
 
 // ============================================================================
+// NOTIFICATION CALLBACK (LIVE UPDATE SUPPORT)
+// ============================================================================
+
+/**
+ * Notification types for live update callbacks
+ */
+typedef enum {
+    CNotificationType_FileUpdate = 300,     // A file has been updated on the broker
+    CNotificationType_CommitComplete = 301  // A scene commit is complete
+} CNotificationType;
+
+/**
+ * Callback function type for broker notifications (file updates, commit complete)
+ * Called from the ZMQ dispatcher thread - keep processing minimal
+ *
+ * @param message_type CNotificationType_FileUpdate or CNotificationType_CommitComplete
+ * @param source_rank  Rank that sent the notification
+ * @param filename     Name of the file that was updated (NULL-terminated UTF-8)
+ * @param file_size    Current file size in bytes
+ * @param timestamp    Unix timestamp of the update
+ */
+typedef void (*NotificationCallback_C)(uint32_t message_type,
+                                        int32_t source_rank,
+                                        const char* filename,
+                                        uint64_t file_size,
+                                        uint64_t timestamp);
+
+/**
+ * Register callback for broker push notifications (NOTIFY_FILE_UPDATE, NOTIFY_COMMIT_COMPLETE)
+ * Only one notification callback can be registered at a time.
+ *
+ * @param callback Function pointer to call on notifications (NULL to unregister)
+ */
+ANARI_USD_MIDDLEWARE_C_API void RegisterNotificationCallback_C(NotificationCallback_C callback);
+
+// ============================================================================
 // UTILITY AND DEBUG FUNCTIONS
 // ============================================================================
 
