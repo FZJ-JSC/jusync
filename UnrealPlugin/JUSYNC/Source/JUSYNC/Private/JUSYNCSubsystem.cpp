@@ -42,6 +42,7 @@ static std::atomic<UJUSYNCSubsystem*> g_SubsystemInstance = nullptr;
 #ifdef WITH_ANARI_USD_MIDDLEWARE
 
 // Thread-safe set for tracking processed files to avoid duplicates
+// Keyed by "filename|rank" so same filename from different ranks is not deduplicated
 static TSet<FString> ProcessedFiles;
 static FCriticalSection ProcessedFilesCriticalSection;
 
@@ -49,24 +50,26 @@ static FCriticalSection ProcessedFilesCriticalSection;
 extern "C" void FileReceivedCallback_Static(const CFileData* file_data)
 {
     UE_LOG(LogJUSYNC, Log, TEXT("=== ZMQ CALLBACK TRIGGERED ==="));
-    
+
     if (!file_data)
     {
         UE_LOG(LogJUSYNC, Error, TEXT("FileReceivedCallback_Static: NULL file_data received"));
         return;
     }
-    
+
     FString Filename = UTF8_TO_TCHAR(file_data->filename);
-    
-    // Check for duplicate files (broadcast sends same file from multiple ranks)
+    int32 SourceRank = file_data->source_rank;
+    FString FileKey = Filename + TEXT("|") + FString::FromInt(SourceRank);
+
+    // Check for duplicate files (same filename from same rank)
     {
         FScopeLock Lock(&ProcessedFilesCriticalSection);
-        if (ProcessedFiles.Contains(Filename))
+        if (ProcessedFiles.Contains(FileKey))
         {
-            UE_LOG(LogJUSYNC, Log, TEXT("Skipping duplicate file: %s (already processed)"), *Filename);
+            UE_LOG(LogJUSYNC, Log, TEXT("Skipping duplicate file: %s from rank %d (already processed)"), *Filename, SourceRank);
             return;
         }
-        ProcessedFiles.Add(Filename);
+        ProcessedFiles.Add(FileKey);
     }
     
     UE_LOG(LogJUSYNC, Log, TEXT("ZMQ File Received:"));
