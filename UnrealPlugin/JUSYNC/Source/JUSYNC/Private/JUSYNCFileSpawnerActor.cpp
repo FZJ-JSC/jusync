@@ -1196,6 +1196,121 @@ void AJUSYNCFileSpawnerActor::HandleCommitCompleteNotification()
     });
 }
 
+void AJUSYNCFileSpawnerActor::ManualRefresh()
+{
+    UE_LOG(LogTemp, Display, TEXT("[ManualRefresh] Triggered manual refresh"));
+    GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Yellow, TEXT("[Spawner] Manual refresh started..."));
+
+    if (CurrentState != EJUSYNCSpawnerState::Complete)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[ManualRefresh] Not in Complete state (%d), cannot refresh"), (int32)CurrentState);
+        return;
+    }
+
+    UJUSYNCSubsystem* Subsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
+    if (!Subsystem || !Subsystem->IsBrokerConnected())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[ManualRefresh] Broker not connected"));
+        return;
+    }
+
+    bCommitDiffInProgress = true;
+
+    TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThis = this;
+    TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
+
+    Async(EAsyncExecution::Thread, [WeakSubsystem, WeakThis]()
+    {
+        if (!WeakSubsystem.IsValid() || !WeakThis.IsValid()) return;
+
+        TArray<FString> NewFiles;
+        TArray<int64> NewSizes;
+        TArray<int32> NewRanks;
+        bool bSuccess = WeakSubsystem->RequestFileListWithSizesAndRanks(-1, 15000, NewFiles, NewSizes, NewRanks);
+
+        FFunctionGraphTask::CreateAndDispatchWhenReady(
+            [WeakThis, NewFiles, NewSizes, NewRanks, bSuccess]()
+            {
+                if (!WeakThis.IsValid() || !bSuccess || NewFiles.Num() == 0)
+                {
+                    if (WeakThis.IsValid()) WeakThis->bCommitDiffInProgress = false;
+                    return;
+                }
+
+                TMap<FString, int64> OldSizes;
+                for (int32 i = 0; i < WeakThis->FilteredFiles.Num(); ++i)
+                {
+                    OldSizes.Add(WeakThis->FilteredFiles[i],
+                                 WeakThis->FilteredSizes.IsValidIndex(i) ? WeakThis->FilteredSizes[i] : 0);
+                }
+
+                int32 ChangedCount = 0;
+                int32 NewCount = 0;
+                int32 SkippedCount = 0;
+                TArray<FString> ChangedFiles;
+
+                for (int32 i = 0; i < NewFiles.Num(); ++i)
+                {
+                    const FString& F = NewFiles[i];
+                    int64 S = NewSizes.IsValidIndex(i) ? NewSizes[i] : 0;
+                    int32 R = NewRanks.IsValidIndex(i) ? NewRanks[i] : 0;
+
+                    // Skip non-USD
+                    if (!F.EndsWith(TEXT(".usd")) && !F.EndsWith(TEXT(".usda"))) continue;
+
+                    auto It = OldSizes.Find(F);
+                    if (It && *It == S)
+                    {
+                        SkippedCount++;
+                        continue;
+                    }
+
+                    if (!It)
+                    {
+                        NewCount++;
+                        UE_LOG(LogTemp, Display, TEXT("[ManualRefresh] New file detected: '%s' (rank %d, %lld bytes)"), *F, R, (long long)S);
+                    }
+                    else
+                    {
+                        ChangedCount++;
+                        UE_LOG(LogTemp, Display, TEXT("[ManualRefresh] Changed file: '%s' (rank %d, %lld -> %lld bytes)"), *F, R, (long long)*It, (long long)S);
+                    }
+
+                    ChangedFiles.Add(F);
+                }
+
+                FString Summary = FString::Printf(TEXT("[ManualRefresh] %d changed, %d new, %d skipped"), ChangedCount, NewCount, SkippedCount);
+                UE_LOG(LogTemp, Display, TEXT("*%s"), *Summary);
+                GEngine->AddOnScreenDebugMessage(-1, 4.0f, FColor::Green, Summary);
+
+                if (ChangedFiles.Num() > 0)
+                {
+                    // Update filtered lists
+                    WeakThis->FilteredFiles = NewFiles;
+                    WeakThis->FilteredSizes = NewSizes;
+                    WeakThis->FilteredRanks = NewRanks;
+
+                    for (const FString& F : ChangedFiles)
+                    {
+                        int32 TargetRank = 0;
+                        for (int32 i = 0; i < NewFiles.Num(); ++i)
+                        {
+                            if (NewFiles[i] == F)
+                            {
+                                TargetRank = NewRanks.IsValidIndex(i) ? NewRanks[i] : 0;
+                                break;
+                            }
+                        }
+                        WeakThis->RefreshSingleFile(F, TargetRank);
+                    }
+                }
+
+                WeakThis->bCommitDiffInProgress = false;
+            },
+            TStatId(), nullptr, ENamedThreads::GameThread);
+    });
+}
+
 void AJUSYNCFileSpawnerActor::StartLiveUpdatePolling()
 {
     if (!bEnableLiveUpdates || LiveUpdatePollInterval <= 0.0f)

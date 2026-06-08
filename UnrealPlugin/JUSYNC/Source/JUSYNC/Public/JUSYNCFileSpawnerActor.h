@@ -152,6 +152,10 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Spawner")
     void ClearSpawnedActors();
 
+    /** Manually trigger a full refresh: re-fetch file list, diff changes, and update spawned actors */
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Spawner|LiveUpdate", meta = (DisplayName = "Manual Refresh"))
+    void ManualRefresh();
+
     UFUNCTION(BlueprintPure, Category = "JUSYNC|Spawner")
     FVector GetNextSpawnLocation() const;
 
