@@ -101,6 +101,10 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|LiveUpdate", meta = (EditCondition = "bEnableLiveUpdates", EditConditionHides))
     bool bAutoRefreshMeshes;
 
+    /** Pipeline depth: how many files to download ahead while spawning previous ones (1 = sequential, higher = more overlap) */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pipeline", meta = (ClampMin = "1", ClampMax = "16"))
+    int32 PipelineDepth;
+
     // Point cloud settings
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud")
     float PointCloudSize;
@@ -175,6 +179,7 @@ private:
     void OnSingleFileDownloaded(const FString& Filename, const TArray<uint8>& FileData, bool bSuccess, int32 FileIndex);
     void OnFileDownloadError(const FString& ErrorMessage);
     void DownloadGradientPng(UJUSYNCSubsystem* Subsystem);
+    void PipelineDownloadNext(UJUSYNCSubsystem* Subsystem);
 
     int32 CalculateDynamicTimeout(int64 FileSizeBytes) const;
     void SpawnMeshFromData(const FString& Filename, bool bParsed, TArray<FJUSYNCMeshData>&& MeshData, TArray<FJUSYNCPointCloudData>&& PointCloudData, int32 FileIndex);
@@ -209,6 +214,9 @@ private:
     int32 NextSpawnIndex;
     int32 PendingDownloads;
     int32 PendingAsyncSpawns;
+    int32 PendingAsyncPCS;
+    int32 PipelineNextIndex;
+    int32 PipelineActive;
     bool bIsCancelled;
     int32 MaxRetries;
     int32 CurrentRetryCount;

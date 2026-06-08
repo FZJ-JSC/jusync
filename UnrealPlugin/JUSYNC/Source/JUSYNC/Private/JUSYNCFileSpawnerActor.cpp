@@ -36,6 +36,7 @@ AJUSYNCFileSpawnerActor::AJUSYNCFileSpawnerActor()
     GradientPngFilename = TEXT("");
     PointCloudSize = 1.0f;
     bGradientReady = false;
+    PipelineDepth = 3;
     MaxRetries = 2;
     CurrentRetryCount = 0;
     CurrentState = EJUSYNCSpawnerState::Idle;
@@ -44,6 +45,10 @@ AJUSYNCFileSpawnerActor::AJUSYNCFileSpawnerActor()
     ActorsSpawned = 0;
     NextSpawnIndex = 0;
     PendingDownloads = 0;
+    PendingAsyncSpawns = 0;
+    PendingAsyncPCS = 0;
+    PipelineNextIndex = 0;
+    PipelineActive = 0;
     bIsCancelled = false;
 }
 
@@ -342,64 +347,53 @@ void AJUSYNCFileSpawnerActor::ProcessAndDownloadFiles()
         return;
     }
 
-    // Throttle: limit concurrent downloads to 8 using atomic counter
-    // CAS-based semaphore: only kMaxConcurrentDownloads can proceed at once
-    static std::atomic<int32> ActiveDownloadCount{0};
-    const int32 kMaxConcurrent = 8;
+    // Pipelined download: start with PipelineDepth files, then chain next download after each completes
+    PipelineNextIndex = 0;
+    PipelineActive = 0;
 
-    for (int32 i = 0; i < FilteredFiles.Num(); ++i)
+    // Start initial batch of downloads (up to PipelineDepth)
+    int32 InitialBatch = FMath::Min(PipelineDepth, FilteredFiles.Num());
+    for (int32 i = 0; i < InitialBatch; ++i)
     {
-        if (bIsCancelled) break;
-
-        const FString& Filename = FilteredFiles[i];
-        int32 TargetRank = FilteredRanks[i];
-        int64 FileSize = FilteredSizes.IsValidIndex(i) ? FilteredSizes[i] : int64(1048576);
-        int32 DynamicTimeout = CalculateDynamicTimeout(FileSize);
-
-        TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThis = this;
-        int32 FileIndex = i;
-
-        TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
-        Async(EAsyncExecution::Thread, [WeakSubsystem, WeakThis, Filename, TargetRank, DynamicTimeout, FileIndex, kMaxConcurrent]()
-            {
-                // Spin until we can acquire a slot (on background thread, game thread free)
-                int32 Current = 0;
-                while (true)
-                {
-                    Current = ActiveDownloadCount.load(std::memory_order_acquire);
-                    if (Current >= kMaxConcurrent)
-                    {
-                        FPlatformProcess::Sleep(0.02f);
-                        continue;
-                    }
-                    if (ActiveDownloadCount.compare_exchange_weak(Current, Current + 1, std::memory_order_release))
-                    {
-                        break; // acquired slot
-                    }
-                    // CAS failed: Current was updated, retry loop
-                }
-
-                if (!WeakSubsystem.IsValid() || !WeakThis.IsValid())
-                {
-                    ActiveDownloadCount.fetch_sub(1, std::memory_order_release);
-                    return;
-                }
-
-                TArray<uint8> FileData;
-                bool bSuccess = WeakSubsystem->RequestFile(Filename, TargetRank, DynamicTimeout, FileData);
-
-                ActiveDownloadCount.fetch_sub(1, std::memory_order_release);
-
-                TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThisCopy = WeakThis;
-                FFunctionGraphTask::CreateAndDispatchWhenReady(
-                    [WeakThisCopy, Filename, FileData, bSuccess, FileIndex]()
-                    {
-                        if (!WeakThisCopy.IsValid()) return;
-                        WeakThisCopy->OnSingleFileDownloaded(Filename, FileData, bSuccess, FileIndex);
-                    },
-                    TStatId(), nullptr, ENamedThreads::GameThread);
-            });
+        PipelineDownloadNext(Subsystem);
     }
+}
+
+void AJUSYNCFileSpawnerActor::PipelineDownloadNext(UJUSYNCSubsystem* Subsystem)
+{
+    if (!Subsystem || bIsCancelled) return;
+    if (PipelineNextIndex >= FilteredFiles.Num()) return;
+
+    int32 i = PipelineNextIndex++;
+    const FString& Filename = FilteredFiles[i];
+    int32 TargetRank = FilteredRanks[i];
+    int64 FileSize = FilteredSizes.IsValidIndex(i) ? FilteredSizes[i] : int64(1048576);
+    int32 DynamicTimeout = CalculateDynamicTimeout(FileSize);
+
+    PipelineActive++;
+    TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThis = this;
+    int32 FileIndex = i;
+    TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
+
+    Async(EAsyncExecution::Thread, [WeakSubsystem, WeakThis, Filename, TargetRank, DynamicTimeout, FileIndex]()
+        {
+            if (!WeakSubsystem.IsValid() || !WeakThis.IsValid())
+            {
+                return;
+            }
+
+            TArray<uint8> FileData;
+            bool bSuccess = WeakSubsystem->RequestFile(Filename, TargetRank, DynamicTimeout, FileData);
+
+            TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThisCopy = WeakThis;
+            FFunctionGraphTask::CreateAndDispatchWhenReady(
+                [WeakThisCopy, Filename, FileData, bSuccess, FileIndex]()
+                {
+                    if (!WeakThisCopy.IsValid()) return;
+                    WeakThisCopy->OnSingleFileDownloaded(Filename, FileData, bSuccess, FileIndex);
+                },
+                TStatId(), nullptr, ENamedThreads::GameThread);
+        });
 }
 
 void AJUSYNCFileSpawnerActor::OnSingleFileDownloaded(const FString& Filename, const TArray<uint8>& FileData, bool bSuccess, int32 FileIndex)
@@ -413,6 +407,11 @@ void AJUSYNCFileSpawnerActor::OnSingleFileDownloaded(const FString& Filename, co
             FailedFileIndices.Add(FileIndex);
         FilesDownloaded++;
         OnFileProgress.Broadcast(FilesDownloaded, FilesTotal);
+        PipelineActive--;
+        // Chain next download even on failure
+        UJUSYNCSubsystem* S = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
+        if (S)
+            PipelineDownloadNext(S);
         CheckAllDownloadsComplete();
         return;
     }
@@ -441,6 +440,12 @@ void AJUSYNCFileSpawnerActor::OnSingleFileDownloaded(const FString& Filename, co
                 {
                     if (!WeakCopy.IsValid()) return;
                     WeakCopy->SpawnMeshFromData(Filename, bParsed, MoveTemp(MeshData), MoveTemp(PointCloudData), FileIndex);
+
+                    // Chain next download in pipeline (overlap download with spawn)
+                    WeakCopy->PipelineActive--;
+                    UJUSYNCSubsystem* S = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
+                    if (S)
+                        WeakCopy->PipelineDownloadNext(S);
                 },
                 TStatId(), nullptr, ENamedThreads::GameThread);
         });
@@ -561,6 +566,7 @@ void AJUSYNCFileSpawnerActor::DownloadGradientPng(UJUSYNCSubsystem* Subsystem)
                             UE_LOG(LogTemp, Log, TEXT("[Spawner] Dispatching %d buffered point clouds with gradient"), Pending.Num());
                             for (FJUSYNCPointCloudData& PC : Pending)
                             {
+                                WeakThis->PendingAsyncPCS++;
                                 Sp->EnqueuePointCloud(PC);
                             }
                             Pending.Empty();
@@ -599,6 +605,7 @@ void AJUSYNCFileSpawnerActor::SpawnMeshFromData(const FString& Filename, bool bP
                     UE_LOG(LogTemp, Log, TEXT("[Spawner] Dispatching %d buffered PCs with gradient"), Pending.Num());
                     for (FJUSYNCPointCloudData& PC : Pending)
                     {
+                        PendingAsyncPCS++;
                         S->GetPointCloudSpawner()->EnqueuePointCloud(PC);
                     }
                     Pending.Empty();
@@ -661,6 +668,9 @@ void AJUSYNCFileSpawnerActor::SpawnMeshFromData(const FString& Filename, bool bP
 
                 PendingAsyncSpawns--;
                 if (PendingAsyncSpawns <= 0) PendingAsyncSpawns = 0;
+
+                // Re-check completion after async mesh spawn finishes
+                CheckAllDownloadsComplete();
 
                 FString ResultMsg = FString::Printf(TEXT("[Spawner] %s: spawned %d meshes"), *FCopy, SpawnCount);
                 GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Green, ResultMsg);
@@ -752,6 +762,7 @@ void AJUSYNCFileSpawnerActor::FlushBufferedPointClouds()
     UE_LOG(LogTemp, Warning, TEXT("[Spawner] Flushing %d buffered PCs (gradient LUT unavailable, using white)"), PendingPointClouds.Num());
     for (FJUSYNCPointCloudData& PC : PendingPointClouds)
     {
+        PendingAsyncPCS++;
         Spawner->EnqueuePointCloud(PC);
     }
     PendingPointClouds.Empty();
@@ -777,6 +788,12 @@ void AJUSYNCFileSpawnerActor::OnPointCloudSpawnedHandler(const FString& EleName,
         UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: loaded point cloud '%s' (actor #%d)"),
                *EleName, ActorsSpawned);
     }
+
+    PendingAsyncPCS--;
+    if (PendingAsyncPCS < 0) PendingAsyncPCS = 0;
+
+    // Re-check completion after async PC spawn finishes
+    CheckAllDownloadsComplete();
 }
 
 void AJUSYNCFileSpawnerActor::CheckAllDownloadsComplete()
@@ -799,6 +816,7 @@ void AJUSYNCFileSpawnerActor::CheckAllDownloadsComplete()
                 bGradientReady = true;
                 for (const auto& PC : PendingPointClouds)
                 {
+                    PendingAsyncPCS++;
                     S->GetPointCloudSpawner()->EnqueuePointCloud(PC);
                 }
                 PendingPointClouds.Empty();
@@ -828,6 +846,7 @@ void AJUSYNCFileSpawnerActor::CheckAllDownloadsComplete()
                                 WeakThis->PendingPointClouds.Num());
                             for (const auto& PC : WeakThis->PendingPointClouds)
                             {
+                                WeakThis->PendingAsyncPCS++;
                                 S2->GetPointCloudSpawner()->EnqueuePointCloud(PC);
                             }
                             WeakThis->PendingPointClouds.Empty();
@@ -876,6 +895,26 @@ void AJUSYNCFileSpawnerActor::CheckAllDownloadsComplete()
 
         // Only set delayed drain timer if there might be in-flight conversions still landing
         bool bHasPendingWork = PendingPointClouds.Num() > 0;
+
+        // Wait for pending async spawns (meshes + point clouds) to finish
+        if (!bHasPendingWork && (PendingAsyncSpawns > 0 || PendingAsyncPCS > 0))
+        {
+            UE_LOG(LogTemp, Log, TEXT("[Spawner] Waiting for async spawns to complete (meshes: %d, PCs: %d)"), PendingAsyncSpawns, PendingAsyncPCS);
+            TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThis = this;
+            FTimerHandle WaitSpawnHandle;
+            FTimerDelegate WaitSpawnDelay;
+            WaitSpawnDelay.BindLambda([WeakThis]()
+            {
+                TWeakObjectPtr<AJUSYNCFileSpawnerActor> Wt = WeakThis;
+                FFunctionGraphTask::CreateAndDispatchWhenReady(
+                    [Wt]() { if (Wt.IsValid()) Wt->CheckAllDownloadsComplete(); },
+                    TStatId(), nullptr, ENamedThreads::GameThread);
+            });
+            if (GWorld)
+                GWorld->GetTimerManager().SetTimer(WaitSpawnHandle, WaitSpawnDelay, 0.2f, false);
+            return;
+        }
+
         if (bHasPendingWork && GWorld)
         {
             TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThis = this;
@@ -1470,6 +1509,7 @@ bool AJUSYNCFileSpawnerActor::RefreshSingleFile(const FString& Filename, int32 T
                         {
                             if (PC.IsValid())
                             {
+                                WeakCopy->PendingAsyncPCS++;
                                 Spawner->EnqueuePointCloud(PC);
                             }
                         }

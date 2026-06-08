@@ -440,6 +440,9 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
         uint32_t broadcastRequestId = request.request_id;
         bool receivedAtLeastOneResponse = false;
 
+        // Track which ranks have responded for broadcast requests
+        std::vector<bool> respondedRanks(totalWorkers, false);
+
         do {
             auto currentTime = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(currentTime - startTime);
@@ -450,6 +453,18 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
 
             int remainingTimeout = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(timeoutDuration - elapsed).count());
             if (remainingTimeout <= 0) break;
+
+            // For broadcast: check if all ranks have responded
+            if (isBroadcast) {
+                int respondedCount = 0;
+                for (int32_t rank = 0; rank < static_cast<int32_t>(totalWorkers); ++rank) {
+                    if (respondedRanks[rank]) respondedCount++;
+                }
+                if (respondedCount >= static_cast<int32_t>(totalWorkers)) {
+                    MIDDLEWARE_LOG_INFO("All %d ranks have responded - stopping broadcast loop", totalWorkers);
+                    break;
+                }
+            }
 
             // Receive chunk header (filtered by request_id)
             std::vector<uint8_t> dummyDelim1, dataFrame1;
@@ -522,6 +537,13 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
                     }
                 }
                 MIDDLEWARE_LOG_INFO("Parsed files from rank %d", jsonRank);
+
+                // Mark this rank as responded
+                if (isBroadcast && jsonRank >= 0 && jsonRank < static_cast<int32_t>(totalWorkers)) {
+                    respondedRanks[jsonRank] = true;
+                    MIDDLEWARE_LOG_INFO("Rank %d responded (%d/%d total)", jsonRank,
+                        std::count(respondedRanks.begin(), respondedRanks.end(), true), totalWorkers);
+                }
             } catch (const std::exception& e) {
                 MIDDLEWARE_LOG_ERROR("Failed to parse file list JSON: %s", e.what());
                 continue;
@@ -562,27 +584,25 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
         // For broadcast: implement retry logic for missing ranks (MPI mode only)
         // In single-rank mode (non-MPI), there's only rank 0, so no retry needed
         if (isBroadcast && allFileInfos.size() > 0) {
-            // Track which ranks responded - use dynamic size based on totalWorkers
-            std::vector<bool> responded(totalWorkers, false);
+            // Use the respondedRanks vector that was already populated during the main loop
             int32_t maxRank = -1;
             int32_t minRank = static_cast<int32_t>(totalWorkers);
             
-            for (const auto& fileInfo : allFileInfos) {
-                if (fileInfo.source_rank >= 0 && fileInfo.source_rank < static_cast<int32_t>(totalWorkers)) {
-                    responded[fileInfo.source_rank] = true;
-                    if (fileInfo.source_rank > maxRank) maxRank = fileInfo.source_rank;
-                    if (fileInfo.source_rank < minRank) minRank = fileInfo.source_rank;
+            for (int32_t rank = 0; rank < static_cast<int32_t>(totalWorkers); ++rank) {
+                if (respondedRanks[rank]) {
+                    if (rank > maxRank) maxRank = rank;
+                    if (rank < minRank) minRank = rank;
                 }
             }
             
             // Count responded ranks
             int32_t respondedCount = 0;
             for (int32_t rank = 0; rank < static_cast<int32_t>(totalWorkers); ++rank) {
-                if (responded[rank]) respondedCount++;
+                if (respondedRanks[rank]) respondedCount++;
             }
             
             MIDDLEWARE_LOG_INFO("Broadcast response summary: %d/%d ranks responded (ranks %d-%d)",
-                               respondedCount, totalWorkers, minRank, maxRank);
+                                respondedCount, totalWorkers, minRank, maxRank);
             
             // Only retry missing ranks if we're in multi-rank MPI mode
             // In single-rank mode (totalWorkers == 1), don't retry
@@ -590,7 +610,7 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
             
             if (!isSingleRankMode && respondedCount < static_cast<int32_t>(totalWorkers)) {
                 MIDDLEWARE_LOG_INFO("Multi-rank mode detected - retrying %d missing ranks...",
-                                   totalWorkers - respondedCount);
+                                    totalWorkers - respondedCount);
                 
                 // Retry each missing rank
                 int32_t retryTimeout = timeoutMs / 3; // Shorter timeout for retries
@@ -600,7 +620,7 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
                 std::vector<FileInfo> retryResults = allFileInfos;
                 
                 for (int32_t rank = 0; rank < static_cast<int32_t>(totalWorkers); ++rank) {
-                    if (!responded[rank]) {
+                    if (!respondedRanks[rank]) {
                         MIDDLEWARE_LOG_INFO("Retrying rank %d with %d ms timeout", rank, retryTimeout);
                         
                         // Inline retry logic (simplified version of requestFileListForSingleRank)
@@ -1288,6 +1308,8 @@ void AnariUsdClient::handleNotification(const std::vector<uint8_t>& data) {
         } catch (...) {
             MIDDLEWARE_LOG_ERROR("Unknown exception in notification callback");
         }
+    } else {
+        MIDDLEWARE_LOG_WARNING("Notification callback is NULL - notifications will not reach client!");
     }
 }
 

@@ -65,7 +65,7 @@ set(WITH_DOCS OFF CACHE BOOL "Disable docs" FORCE)
 # Add ZMQ subdirectory to build static library
 # ZMQ's CMakeLists.txt defines `option(BUILD_TESTS ...)` which creates a cache entry
 # that shadows our project-level option. Remove it so our option() below takes effect.
-add_subdirectory(external/zmq)
+add_subdirectory(external/zmq ${CMAKE_BINARY_DIR}/zmq_build)
 unset(BUILD_TESTS CACHE)
 
 # Set static ZMQ target

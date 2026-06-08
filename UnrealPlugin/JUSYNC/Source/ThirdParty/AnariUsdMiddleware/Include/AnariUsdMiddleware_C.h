@@ -551,6 +551,30 @@ ANARI_USD_MIDDLEWARE_C_API void RegisterUpdateCallback_C(FileReceivedCallback_C 
  */
 ANARI_USD_MIDDLEWARE_C_API void RegisterMessageCallback_C(MessageReceivedCallback_C callback);
 
+/**
+ * Callback function type for broker push notifications
+ * Called when NOTIFY_FILE_UPDATE or NOTIFY_COMMIT_COMPLETE is received from broker
+ *
+ * @param message_type 300 = NOTIFY_FILE_UPDATE, 301 = NOTIFY_COMMIT_COMPLETE
+ * @param source_rank  Rank that sent the notification
+ * @param filename     Name of the file that was updated (NULL-terminated UTF-8)
+ * @param file_size    Current file size in bytes
+ * @param timestamp    Unix timestamp of the update
+ */
+typedef void (*NotificationCallback_C)(uint32_t message_type,
+                                        int32_t source_rank,
+                                        const char* filename,
+                                        uint64_t file_size,
+                                        uint64_t timestamp);
+
+/**
+ * Register callback for broker push notifications (NOTIFY_FILE_UPDATE, NOTIFY_COMMIT_COMPLETE)
+ * Only one notification callback can be registered at a time.
+ *
+ * @param callback Function pointer to call on notifications (NULL to unregister)
+ */
+ANARI_USD_MIDDLEWARE_C_API void RegisterNotificationCallback_C(NotificationCallback_C callback);
+
 // ============================================================================
 // UTILITY AND DEBUG FUNCTIONS
 // ============================================================================

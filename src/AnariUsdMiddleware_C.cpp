@@ -1521,15 +1521,18 @@ void RegisterMessageCallback_C(MessageReceivedCallback_C callback) {
  */
 void RegisterNotificationCallback_C(NotificationCallback_C callback) {
     if (!g_middleware) {
+        MIDDLEWARE_LOG_WARNING("RegisterNotificationCallback_C: g_middleware is NULL!");
         return;
     }
     if (callback) {
+        MIDDLEWARE_LOG_INFO("RegisterNotificationCallback_C: registering notification callback");
         g_middleware->setNotificationCallback([callback](uint32_t messageType, int32_t sourceRank,
-                                                          const std::string& filename,
-                                                          uint64_t fileSize, uint64_t timestamp) {
+                                                           const std::string& filename,
+                                                           uint64_t fileSize, uint64_t timestamp) {
             callback(messageType, sourceRank, filename.c_str(), fileSize, timestamp);
         });
     } else {
+        MIDDLEWARE_LOG_INFO("RegisterNotificationCallback_C: clearing notification callback");
         g_middleware->setNotificationCallback(nullptr);
     }
 }
