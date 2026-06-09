@@ -19,9 +19,14 @@ struct FPointCloudReadyEntry
     int32 Rank;
     float PointSize;
     bool bSpawned;
+    bool bNeedsRecolor;
+
+    // Kept for gradient recoloring when LUT arrives after white fallback
+    TArray<FVector> Positions;
+    TArray<float> Widths;
 
     FPointCloudReadyEntry()
-        : Rank(0), PointSize(1.0f), bSpawned(false)
+        : Rank(0), PointSize(1.0f), bSpawned(false), bNeedsRecolor(false)
     {}
 };
 
@@ -45,6 +50,11 @@ public:
     /** Set a 256-entry gradient color LUT from a decoded PNG row. Attribute0 values map to these colors. */
     void SetGradientLUT(const TArray<FColor>& InLUT) { FScopeLock Lock(&GradientMutex); GradientLUT = InLUT; }
     TArray<FColor> GetGradientLUT() const { FScopeLock Lock(&GradientMutex); return GradientLUT; }
+
+    /** Recolor all actors spawned with white fallback (no gradient at spawn time). Call after SetGradientLUT. */
+    void RecolorGradientPendingActors();
+
+    int32 GetGradientPendingCount() const { return GradientPendingData.Num(); }
 
     int32 GetReadyQueueCount() const { return ReadyQueue.Num(); }
     int32 GetActiveActorCount() const { return ActiveActors.Num(); }
@@ -79,6 +89,9 @@ private:
     float SpawnScale;
     float BudgetMs;
     TArray<FColor> GradientLUT;
+    TSet<AActor*> GradientPendingActors;
+    struct FRecolorData { TArray<FVector> Positions; TArray<float> Widths; };
+    TMap<AActor*, FRecolorData> GradientPendingData;
 
     AActor* AllocateActor();
     void ReleaseActor(AActor*);

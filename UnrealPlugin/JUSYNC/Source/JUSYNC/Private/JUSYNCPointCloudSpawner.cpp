@@ -5,6 +5,7 @@
 #include "Async/ParallelFor.h"
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
+#include "LidarPointCloud.h"
 #include "LidarPointCloudComponent.h"
 #include "LidarPointCloudActor.h"
 #endif
@@ -84,6 +85,12 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(const FJUSYNCPointCloudData& PC
         Entry.Rank = InRank;
         Entry.PointSize = 1.0f;
         Entry.bSpawned = false;
+        Entry.bNeedsRecolor = !bUseGradient && !bHasColors;
+        if (Entry.bNeedsRecolor)
+        {
+            Entry.Positions = Positions;
+            Entry.Widths = Widths;
+        }
 
         FFunctionGraphTask::CreateAndDispatchWhenReady(
             [this, Entry = MoveTemp(Entry)]() mutable
@@ -260,6 +267,12 @@ void FJUSYNCPointCloudSpawner::DrainReadyQueue()
         Actor->SetActorHiddenInGame(false);
         Actor->SetActorEnableCollision(false);
 
+        if (Entry.bNeedsRecolor)
+        {
+            GradientPendingActors.Add(Actor);
+            GradientPendingData.Add(Actor, FRecolorData{ MoveTemp(Entry.Positions), MoveTemp(Entry.Widths) });
+        }
+
         FString EntryName = Entry.ElementName;
         int32 EntryPoints = Entry.Points.Num();
         Entry.bSpawned = true;
@@ -287,4 +300,59 @@ void FJUSYNCPointCloudSpawner::ClearAllActors()
         Actor->Destroy();
     }
     AvailablePool.Empty();
+}
+
+void FJUSYNCPointCloudSpawner::RecolorGradientPendingActors()
+{
+    if (GradientPendingActors.Num() == 0) return;
+
+    TArray<FColor> LocalLUT;
+    {
+        FScopeLock Lock(&GradientMutex);
+        LocalLUT = GradientLUT;
+    }
+    if (LocalLUT.Num() == 0) return;
+
+    int32 Recolored = 0;
+    for (AActor* Actor : GradientPendingActors.Array())
+    {
+        if (!Actor || !Actor->IsValidLowLevel()) continue;
+
+        ALidarPointCloudActor* LidarActor = Cast<ALidarPointCloudActor>(Actor);
+        if (!LidarActor) continue;
+
+        ULidarPointCloudComponent* Comp = LidarActor->GetPointCloudComponent();
+        if (!Comp) continue;
+
+        FRecolorData* RD = GradientPendingData.Find(Actor);
+        if (!RD || RD->Positions.Num() == 0) continue;
+
+        int32 N = FMath::Min(RD->Positions.Num(), RD->Widths.Num());
+        TArray64<FLidarPointCloudPoint> NewPoints;
+        NewPoints.SetNum(N);
+        for (int32 i = 0; i < N; ++i)
+        {
+            FVector3f Pos(RD->Positions[i].X, RD->Positions[i].Y, RD->Positions[i].Z);
+            float Attr0 = RD->Widths[i];
+            int32 LUTIdx = FMath::Clamp(FMath::RoundToInt(Attr0 * (LocalLUT.Num() - 1)), 0, LocalLUT.Num() - 1);
+            FColor Col = LocalLUT[LUTIdx];
+            NewPoints[i] = FLidarPointCloudPoint(Pos, Col, true, 0);
+        }
+
+        ULidarPointCloud* NewCloud = ULidarPointCloud::CreateFromData(NewPoints, false);
+        if (NewCloud)
+        {
+            NewCloud->RefreshBounds();
+            Comp->SetPointCloud(NewCloud);
+            Recolored++;
+        }
+    }
+
+    GradientPendingActors.Empty();
+    GradientPendingData.Empty();
+
+    if (Recolored > 0)
+    {
+        UE_LOG(LogTemp, Display, TEXT("[Spawner] Recolored %d point cloud actors with gradient"), Recolored);
+    }
 }

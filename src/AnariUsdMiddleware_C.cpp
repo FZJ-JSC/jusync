@@ -292,6 +292,57 @@ int RequestWorkerListStringCallback_C(WorkerListCallback_C callback, int timeout
 }
 
 /**
+ * Request worker list returning raw data buffer (synchronous, no callback needed)
+ * Returns worker list as a flat string "rank:hostname:ip;rank:hostname:ip;..."
+ * Signature: int RequestWorkerListString_C(uint32_t* out_worker_count, unsigned char** out_data, size_t* out_size, int timeout_ms)
+ */
+int RequestWorkerListString_C(uint32_t* out_worker_count, unsigned char** out_data, size_t* out_size, int timeout_ms) {
+    if (!g_middleware || !out_worker_count || !out_data || !out_size) {
+        return 0;
+    }
+
+    *out_worker_count = 0;
+    *out_data = nullptr;
+    *out_size = 0;
+
+    try {
+        std::vector<std::tuple<int32_t, std::string, std::string>> workerList;
+        bool success = g_middleware->requestWorkerListString(workerList, timeout_ms);
+        if (!success) {
+            return 0;
+        }
+
+        *out_worker_count = static_cast<uint32_t>(workerList.size());
+
+        if (workerList.empty()) {
+            return 1;
+        }
+
+        // Build a flat string: "rank:hostname:ip;rank:hostname:ip;..."
+        std::string result;
+        for (auto& worker : workerList) {
+            if (result.empty() == false) {
+                result += ';';
+            }
+            result += std::to_string(std::get<0>(worker));
+            result += ':';
+            result += std::get<1>(worker);
+            result += ':';
+            result += std::get<2>(worker);
+        }
+
+        *out_size = result.size();
+        *out_data = static_cast<unsigned char*>(std::malloc(*out_size));
+        if (*out_data) {
+            std::memcpy(*out_data, result.data(), *out_size);
+        }
+        return (*out_data) ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+/**
  * Request worker count EXCLUDING rank 0 (computational workers only)
  * Uses existing requestWorkerCount method
  * Signature: int RequestWorkerCountExcludingRank0_C(uint32_t* out_count, int timeout_ms)

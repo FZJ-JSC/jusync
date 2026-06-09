@@ -17,7 +17,7 @@
 		{
 			"Name": "JUSYNC",
 			"Type": "Runtime",
-			"LoadingPhase": "Default",
+			"LoadingPhase": "PostConfigInit",
 			"PlatformAllowList": [
 				"Win64",
 				"Linux"
@@ -27,11 +27,11 @@
 	"Plugins": [
 		{
 			"Name": "RealtimeMeshComponent",
-			"Enabled": true
-		},
-		{
-			"Name": "LidarPointCloud",
-			"Enabled": true
+			"Enabled": false,
+			"TargetAllowList": [
+				"UE5.4",
+				"UE5.5"
+			]
 		}
 	]
 }

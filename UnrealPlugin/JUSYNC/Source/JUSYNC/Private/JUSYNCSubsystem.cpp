@@ -40,6 +40,21 @@ extern "C" {
 static std::atomic<UJUSYNCSubsystem*> g_SubsystemInstance = nullptr;
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
+static TArray<FJUSYNCWorkerStatus> g_CapturedWorkers;
+static void WorkerListCallback(uint32_t count, const int32_t* ranks, const char** hostnames, const char** ips)
+{
+    g_CapturedWorkers.Empty(count);
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        FJUSYNCWorkerStatus Status;
+        Status.Rank = ranks[i];
+        Status.Hostname = hostnames[i] ? FString(UTF8_TO_TCHAR(hostnames[i])) : TEXT("");
+        Status.GpuInfo = TEXT("");
+        Status.LastHeartbeat = 0;
+        Status.Status = 1;
+        g_CapturedWorkers.Add(Status);
+    }
+}
 
 // Thread-safe set for tracking processed files to avoid duplicates
 static TSet<FString> ProcessedFiles;
@@ -107,24 +122,24 @@ extern "C" void FileReceivedCallback_Static(const CFileData* file_data)
     LocalFileData LocalData;
     
     // Copy filename (C string)
-    if (file_data->filename && file_data->filename[0] != '\0') {
+    if (file_data->filename[0] != '\0') {
         size_t filename_len = strlen(file_data->filename) + 1;
         LocalData.filename = new char[filename_len];
-        strcpy_s(LocalData.filename, filename_len, file_data->filename);
+        strncpy(LocalData.filename, file_data->filename, filename_len);
     }
     
     // Copy hash (C string)
-    if (file_data->hash && file_data->hash[0] != '\0') {
+    if (file_data->hash[0] != '\0') {
         size_t hash_len = strlen(file_data->hash) + 1;
         LocalData.hash = new char[hash_len];
-        strcpy_s(LocalData.hash, hash_len, file_data->hash);
+        strncpy(LocalData.hash, file_data->hash, hash_len);
     }
     
     // Copy file_type (C string)
-    if (file_data->file_type && file_data->file_type[0] != '\0') {
+    if (file_data->file_type[0] != '\0') {
         size_t file_type_len = strlen(file_data->file_type) + 1;
         LocalData.file_type = new char[file_type_len];
-        strcpy_s(LocalData.file_type, file_type_len, file_data->file_type);
+        strncpy(LocalData.file_type, file_data->file_type, file_type_len);
     }
     
     // Copy binary data
@@ -544,11 +559,12 @@ bool UJUSYNCSubsystem::InitializeMiddleware(const FString& Endpoint)
         UE_LOG(LogJUSYNC, Log, TEXT("âœ… Ready to connect to broker via DEALER socket"));
         
         // Register callbacks AFTER initialization (g_middleware must exist)
-        UE_LOG(LogJUSYNC, Log, TEXT("Registering ZMQ callbacks..."));
+        // NOTE: Notification callback is registered AFTER ConnectToBroker because the AnariUsdClient
+        // is created lazily inside connectToBroker(). Registering it here would be a no-op.
+        UE_LOG(LogJUSYNC, Log, TEXT("Registering ZMQ callbacks (deferred)..."));
         RegisterUpdateCallback_C(FileReceivedCallback_Static);
         RegisterMessageCallback_C(MessageReceivedCallback_Static);
-        RegisterNotificationCallback_C(NotificationCallback_Static);
-        UE_LOG(LogJUSYNC, Log, TEXT(" Callbacks registered (file, message, notification)"));
+        UE_LOG(LogJUSYNC, Log, TEXT(" File & message callbacks registered"));
         
         // Test connection status
         int ConnectionStatus = IsConnected_C();
@@ -2952,9 +2968,16 @@ bool UJUSYNCSubsystem::ConnectToBroker(const FString& BrokerEndpoint, int32 Time
     
     if (Result == 1)
     {
-        UE_LOG(LogJUSYNC, Log, TEXT("âœ… Connected to ANARI USD broker at %s"), *BrokerEndpoint);
-        UE_LOG(LogJUSYNC, Log, TEXT("âœ… DEALER socket connected through SSH tunnel"));
-        UE_LOG(LogJUSYNC, Log, TEXT("âœ… Ready for synchronous file requests"));
+        UE_LOG(LogJUSYNC, Log, TEXT("Connected to ANARI USD broker at %s"), *BrokerEndpoint);
+        UE_LOG(LogJUSYNC, Log, TEXT(" DEALER socket connected through SSH tunnel"));
+        UE_LOG(LogJUSYNC, Log, TEXT(" Ready for synchronous file requests"));
+
+        // Register notification callback AFTER ConnectToBroker because AnariUsdClient is
+        // only created lazily inside connectToBroker(). Before then, setNotificationCallback
+        // would find nullptr client and return early.
+        RegisterNotificationCallback_C(NotificationCallback_Static);
+        UE_LOG(LogJUSYNC, Log, TEXT(" Notification callback registered on live client"));
+
         return true;
     }
     else
@@ -3664,36 +3687,23 @@ bool UJUSYNCSubsystem::RequestWorkerStatus(int32 TargetRank, int32 TimeoutMs, TA
         UE_LOG(LogJUSYNC, Error, TEXT("âŒ Cannot request worker status - not connected to broker"));
         return false;
     }
-    
-    // Request worker list using string protocol (compatible with Python broker)
-    std::vector<std::tuple<int32_t, std::string, std::string>> workerList;
-    bool bSuccess = Middleware->requestWorkerListString(workerList, TimeoutMs);
-    
-    if (bSuccess)
+
+    // Request worker list using C callback wrapper (avoids C++ ABI mismatch between libstdc++ .so and libc++ UE)
+    g_CapturedWorkers.Empty();
+    int bResult = RequestWorkerListStringCallback_C(WorkerListCallback, TimeoutMs);
+
+    if (bResult == 1 && g_CapturedWorkers.Num() > 0)
     {
-        OutWorkerStatus.Empty();
-        for (const auto& worker : workerList)
-        {
-            FJUSYNCWorkerStatus Status;
-            Status.Rank = std::get<0>(worker);
-            Status.Hostname = FString(UTF8_TO_TCHAR(std::get<1>(worker).c_str()));
-            Status.GpuInfo = TEXT(""); // Not available in string protocol
-            Status.LastHeartbeat = 0;  // Not available in string protocol
-            
-            // Set default status (1 = idle) since string protocol doesn't provide status
-            Status.Status = 1;
-            
-            OutWorkerStatus.Add(Status);
-        }
+        OutWorkerStatus = MoveTemp(g_CapturedWorkers);
         UE_LOG(LogJUSYNC, Log, TEXT("âœ… Successfully retrieved worker list: %d workers"), OutWorkerStatus.Num());
+        return true;
     }
     else
     {
         UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to retrieve worker list from middleware"));
         OutWorkerStatus.Empty();
+        return false;
     }
-    
-    return bSuccess;
 #endif
     return false;
 }
@@ -3718,13 +3728,13 @@ bool UJUSYNCSubsystem::RequestWorkerCount(int32 TimeoutMs, int32& OutWorkerCount
         return false;
     }
     
-    // Get worker count by requesting worker list (string protocol)
-    std::vector<std::tuple<int32_t, std::string, std::string>> workerList;
-    bool bSuccess = Middleware->requestWorkerListString(workerList, TimeoutMs);
-    
-    if (bSuccess)
+    // Get worker count by requesting worker list (string protocol) via C callback
+    g_CapturedWorkers.Empty();
+    int bResult = RequestWorkerListStringCallback_C(WorkerListCallback, TimeoutMs);
+
+    if (bResult == 1)
     {
-        OutWorkerCount = static_cast<int32>(workerList.size());
+        OutWorkerCount = g_CapturedWorkers.Num();
         UE_LOG(LogJUSYNC, Log, TEXT("âœ… Successfully retrieved worker count: %d workers"), OutWorkerCount);
     }
     else
@@ -3732,8 +3742,8 @@ bool UJUSYNCSubsystem::RequestWorkerCount(int32 TimeoutMs, int32& OutWorkerCount
         UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to retrieve worker count from middleware"));
         OutWorkerCount = 0;
     }
-    
-    return bSuccess;
+
+    return bResult == 1;
 #endif
     return false;
 }
@@ -4282,7 +4292,7 @@ int32 UJUSYNCSubsystem::CountInstancedRMCComponents() const
                     ComponentName.Contains(TEXT("Segment")) ||
                     ComponentName.Contains(TEXT("Slice")) ||
                     ComponentName.Contains(TEXT("_C")) ||  // Common suffix for chunks
-                    ComponentName.Contains(TEXT("_")) && ComponentName.Contains(TEXT("of"))) // "Mesh_1_of_4"
+                    (ComponentName.Contains(TEXT("_")) && ComponentName.Contains(TEXT("of")))) // "Mesh_1_of_4"
                 {
                     Count++;
                 }
