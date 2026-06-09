@@ -551,11 +551,23 @@ ANARI_USD_MIDDLEWARE_C_API void RegisterUpdateCallback_C(FileReceivedCallback_C 
  */
 ANARI_USD_MIDDLEWARE_C_API void RegisterMessageCallback_C(MessageReceivedCallback_C callback);
 
+// ============================================================================
+// NOTIFICATION CALLBACK (LIVE UPDATE SUPPORT)
+// ============================================================================
+
 /**
- * Callback function type for broker push notifications
- * Called when NOTIFY_FILE_UPDATE or NOTIFY_COMMIT_COMPLETE is received from broker
+ * Notification types for live update callbacks
+ */
+typedef enum {
+    CNotificationType_FileUpdate = 300,     // A file has been updated on the broker
+    CNotificationType_CommitComplete = 301  // A scene commit is complete
+} CNotificationType;
+
+/**
+ * Callback function type for broker notifications (file updates, commit complete)
+ * Called from the ZMQ dispatcher thread - keep processing minimal
  *
- * @param message_type 300 = NOTIFY_FILE_UPDATE, 301 = NOTIFY_COMMIT_COMPLETE
+ * @param message_type CNotificationType_FileUpdate or CNotificationType_CommitComplete
  * @param source_rank  Rank that sent the notification
  * @param filename     Name of the file that was updated (NULL-terminated UTF-8)
  * @param file_size    Current file size in bytes
@@ -699,6 +711,8 @@ ANARI_USD_MIDDLEWARE_C_API int RequestFileListWithSizesAndRanks_C(
     char*** out_names,
     uint64_t** out_sizes,
     int32_t** out_ranks,
+    uint64_t** out_hash_lo,
+    uint64_t** out_hash_hi,
     size_t* out_count,
     int timeout_ms);
 
@@ -736,6 +750,8 @@ ANARI_USD_MIDDLEWARE_C_API void FreeFileListWithSizesAndRanks_C(
     char** names,
     uint64_t* sizes,
     int32_t* ranks,
+    uint64_t* hash_lo,
+    uint64_t* hash_hi,
     size_t count);
 
 /**

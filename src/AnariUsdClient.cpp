@@ -525,14 +525,25 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
                 if (json.contains("files") && json["files"].is_array()) {
                     for (const auto& fileObj : json["files"]) {
                         if (fileObj.contains("name") && fileObj["name"].is_string()) {
-                            std::string fname = fileObj["name"].get<std::string>();
-                            if (!fname.empty()) {
-                                uint64_t fsize = 0;
-                                if (fileObj.contains("size") && fileObj["size"].is_number()) {
-                                    fsize = fileObj["size"].get<uint64_t>();
+                                std::string fname = fileObj["name"].get<std::string>();
+                                if (!fname.empty()) {
+                                    uint64_t fsize = 0;
+                                    uint64_t hashLo = 0;
+                                    uint64_t hashHi = 0;
+                                    if (fileObj.contains("size") && fileObj["size"].is_number()) {
+                                        fsize = fileObj["size"].get<uint64_t>();
+                                    }
+                                    if (fileObj.contains("hash_lo") && fileObj["hash_lo"].is_number()) {
+                                        hashLo = fileObj["hash_lo"].get<uint64_t>();
+                                    }
+                                    if (fileObj.contains("hash_hi") && fileObj["hash_hi"].is_number()) {
+                                        hashHi = fileObj["hash_hi"].get<uint64_t>();
+                                    }
+                                    FileInfo fi(fname, fsize, jsonRank);
+                                    fi.hash128[0] = hashLo;
+                                    fi.hash128[1] = hashHi;
+                                    allFileInfos.push_back(std::move(fi));
                                 }
-                                allFileInfos.push_back({fname, fsize, jsonRank});
-                            }
                         }
                     }
                 }

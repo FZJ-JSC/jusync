@@ -449,8 +449,8 @@ int RequestFileListWithSizes_C(int32_t target_rank, char*** out_names, uint64_t*
 /**
  * Request file list with sizes and source ranks from worker rank(s)
  */
-int RequestFileListWithSizesAndRanks_C(int32_t target_rank, char*** out_names, uint64_t** out_sizes, int32_t** out_ranks, size_t* out_count, int timeout_ms) {
-    if (!g_middleware || !out_names || !out_sizes || !out_ranks || !out_count) {
+int RequestFileListWithSizesAndRanks_C(int32_t target_rank, char*** out_names, uint64_t** out_sizes, int32_t** out_ranks, uint64_t** out_hash_lo, uint64_t** out_hash_hi, size_t* out_count, int timeout_ms) {
+    if (!g_middleware || !out_names || !out_sizes || !out_ranks || !out_hash_lo || !out_hash_hi || !out_count) {
         return 0;
     }
     
@@ -461,27 +461,31 @@ int RequestFileListWithSizesAndRanks_C(int32_t target_rank, char*** out_names, u
             *out_names = nullptr;
             *out_sizes = nullptr;
             *out_ranks = nullptr;
+            *out_hash_lo = nullptr;
+            *out_hash_hi = nullptr;
             return 0;
         }
         
-        // Allocate C string array, size array, and rank array
+        // Allocate C arrays
         *out_count = files.size();
         *out_names = new char*[*out_count];
         *out_sizes = new uint64_t[*out_count];
         *out_ranks = new int32_t[*out_count];
+        *out_hash_lo = new uint64_t[*out_count];
+        *out_hash_hi = new uint64_t[*out_count];
         
-        // Copy each filename, size, and rank
         for (size_t i = 0; i < files.size(); ++i) {
             size_t len = files[i].name.length() + 1;
             (*out_names)[i] = new char[len];
 #ifdef _WIN32
             strncpy_s((*out_names)[i], len, files[i].name.c_str(), _TRUNCATE);
 #else
-            // Use snprintf for guaranteed null termination
             snprintf((*out_names)[i], len, "%s", files[i].name.c_str());
 #endif
             (*out_sizes)[i] = files[i].size;
             (*out_ranks)[i] = files[i].source_rank;
+            (*out_hash_lo)[i] = files[i].hash128[0];
+            (*out_hash_hi)[i] = files[i].hash128[1];
         }
         
         return 1;
@@ -490,6 +494,8 @@ int RequestFileListWithSizesAndRanks_C(int32_t target_rank, char*** out_names, u
         *out_names = nullptr;
         *out_sizes = nullptr;
         *out_ranks = nullptr;
+        *out_hash_lo = nullptr;
+        *out_hash_hi = nullptr;
         return 0;
     }
 }
@@ -638,8 +644,8 @@ void FreeFileListWithSizes_C(char** names, uint64_t* sizes, size_t count) {
     }
 }
 
-void FreeFileListWithSizesAndRanks_C(char** names, uint64_t* sizes, int32_t* ranks, size_t count) {
-    if (!names && !sizes && !ranks) {
+void FreeFileListWithSizesAndRanks_C(char** names, uint64_t* sizes, int32_t* ranks, uint64_t* hash_lo, uint64_t* hash_hi, size_t count) {
+    if (!names && !sizes && !ranks && !hash_lo && !hash_hi) {
         return;
     }
     if (names) {
@@ -655,6 +661,12 @@ void FreeFileListWithSizesAndRanks_C(char** names, uint64_t* sizes, int32_t* ran
     }
     if (ranks) {
         delete[] ranks;
+    }
+    if (hash_lo) {
+        delete[] hash_lo;
+    }
+    if (hash_hi) {
+        delete[] hash_hi;
     }
 }
 

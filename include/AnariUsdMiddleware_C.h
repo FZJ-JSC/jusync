@@ -711,6 +711,8 @@ ANARI_USD_MIDDLEWARE_C_API int RequestFileListWithSizesAndRanks_C(
     char*** out_names,
     uint64_t** out_sizes,
     int32_t** out_ranks,
+    uint64_t** out_hash_lo,
+    uint64_t** out_hash_hi,
     size_t* out_count,
     int timeout_ms);
 
@@ -748,6 +750,8 @@ ANARI_USD_MIDDLEWARE_C_API void FreeFileListWithSizesAndRanks_C(
     char** names,
     uint64_t* sizes,
     int32_t* ranks,
+    uint64_t* hash_lo,
+    uint64_t* hash_hi,
     size_t count);
 
 /**

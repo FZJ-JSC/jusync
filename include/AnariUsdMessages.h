@@ -471,10 +471,11 @@ struct FileInfo {
     std::string name;
     uint64_t size;
     int32_t source_rank;
+    uint64_t hash128[2];           // XXH3-128 hash
 
-    FileInfo() : size(0), source_rank(-1) {}
-    FileInfo(const std::string& n, uint64_t s) : name(n), size(s), source_rank(-1) {}
-    FileInfo(const std::string& n, uint64_t s, int32_t r) : name(n), size(s), source_rank(r) {}
+    FileInfo() : size(0), source_rank(-1) { hash128[0] = 0; hash128[1] = 0; }
+    FileInfo(const std::string& n, uint64_t s) : name(n), size(s), source_rank(-1) { hash128[0] = 0; hash128[1] = 0; }
+    FileInfo(const std::string& n, uint64_t s, int32_t r) : name(n), size(s), source_rank(r) { hash128[0] = 0; hash128[1] = 0; }
 };
 
 } // namespace anari_usd_middleware
