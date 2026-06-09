@@ -350,6 +350,7 @@ struct ZmqFileNotification {
     char filename[256];        // Filename that was updated
     uint64_t file_size;        // Current file size
     uint64_t timestamp;        // Unix timestamp of update
+    uint64_t hash128[2];       // XXH3-128 hash of file data (from broker)
 
     ZmqFileNotification() {
         memset(this, 0, sizeof(ZmqFileNotification));

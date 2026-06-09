@@ -20,12 +20,12 @@ if(ENABLE_CUDA)
         set(CUDA_FOUND TRUE)
     else()
         message(WARNING "CUDA requested but nvcc not found - GPU acceleration disabled")
-        project(anari_usd_middleware VERSION 1.0.0 LANGUAGES CXX)
+        project(anari_usd_middleware VERSION 1.0.0 LANGUAGES C CXX)
         set(ENABLE_CUDA OFF)
         set(CUDA_FOUND FALSE)
     endif()
 else()
-    project(anari_usd_middleware VERSION 1.0.0 LANGUAGES CXX)
+    project(anari_usd_middleware VERSION 1.0.0 LANGUAGES C CXX)
     set(CUDA_FOUND FALSE)
 endif()
 
@@ -127,6 +127,7 @@ add_library(${PROJECT_NAME} SHARED
     src/MemoryMonitor.cpp
     src/GpuContext.cpp
     src/GpuValidation.cpp
+    external/xxhash/xxhash.c
 )
 
 # Add CUDA source files if CUDA is enabled
@@ -153,6 +154,7 @@ target_include_directories(${PROJECT_NAME}
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
         ${CMAKE_CURRENT_SOURCE_DIR}/external/glm
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/xxhash
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/external/tinyusdz/src
