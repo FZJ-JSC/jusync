@@ -780,10 +780,15 @@ void AJUSYNCFileSpawnerActor::OnPointCloudSpawnedHandler(const FString& EleName,
             AActor* OldActor = FileToActorMap.FindRef(EleName);
             if (OldActor && OldActor != Spawned && OldActor->IsValidLowLevel())
             {
-                // Same element name re-spawned — destroy orphaned old actor
-                SpawnedActors.Remove(OldActor);
+                // Stale async spawn — new actor already exists, destroy this one
+                SpawnedActors.Remove(Spawned);
                 ActorsSpawned--;
-                OldActor->Destroy();
+                Spawned->Destroy();
+                UE_LOG(LogTemp, Warning, TEXT("[Spawner] Destroying stale async spawn '%s' (actor #+%d)"), *EleName, ActorsSpawned);
+                PendingAsyncPCS--;
+                if (PendingAsyncPCS < 0) PendingAsyncPCS = 0;
+                CheckAllDownloadsComplete();
+                return;
             }
             FileToActorMap.Add(EleName, Spawned);
         }
@@ -1294,29 +1299,45 @@ bool AJUSYNCFileSpawnerActor::RefreshSingleFile(const FString& Filename, int32 T
         return false;
     }
 
-    // Remove old actors: mesh key = "ElementName|Filename", PC key = "ElementName_r{rank}"
+    // Remove old actors from tracking — they'll be re-added when new ones spawn
     FString MeshKeySuffix = TEXT("|") + Filename;
-    FString PCKeySuffix = FString::Printf(TEXT("_r%d"), TargetRank);
-    TArray<AActor*> ActorsToRemove;
+    
+    // Extract element name from clip filename: "clips/NAME_Geom__rRANK_TIMESTAMP.usda"
+    FString PCKey;
+    {
+        FString NoExt = Filename;
+        if (NoExt.EndsWith(TEXT(".usda"))) NoExt = NoExt.LeftChop(5);
+        else if (NoExt.EndsWith(TEXT(".usd"))) NoExt = NoExt.LeftChop(4);
+        
+        int32 GeomIdx = NoExt.Find(TEXT("_Geom_"), ESearchCase::CaseSensitive);
+        if (GeomIdx > 0)
+        {
+            // Strip leading path
+            FString BaseName = FPaths::GetCleanFilename(NoExt.Left(GeomIdx));
+            PCKey = FString::Printf(TEXT("%s_r%d"), *BaseName, TargetRank);
+        }
+    }
+    
+    TArray<AActor*> ActorsToDestroy;
 
     for (auto It = FileToActorMap.CreateIterator(); It; ++It)
     {
         bool bMatch = It->Key.EndsWith(MeshKeySuffix, ESearchCase::CaseSensitive);
-        if (!bMatch)
-            bMatch = It->Key.EndsWith(PCKeySuffix, ESearchCase::CaseSensitive);
+        if (!bMatch && !PCKey.IsEmpty())
+            bMatch = (It->Key == PCKey);
         if (bMatch)
         {
             if (It->Value && It->Value->IsValidLowLevel())
-                ActorsToRemove.Add(It->Value);
+                ActorsToDestroy.Add(It->Value);
             It.RemoveCurrent();
         }
     }
 
-    for (AActor* OldActor : ActorsToRemove)
+    for (AActor* OldActor : ActorsToDestroy)
     {
-        if (SpawnedActors.Remove(OldActor) > 0)
-            ActorsSpawned--;
-        if (OldActor) OldActor->Destroy();
+        SpawnedActors.Remove(OldActor);
+        ActorsSpawned--;
+        OldActor->Destroy();
     }
 
     // Download and re-spawn
