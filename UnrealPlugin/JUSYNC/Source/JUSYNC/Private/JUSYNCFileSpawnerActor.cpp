@@ -983,7 +983,7 @@ void AJUSYNCFileSpawnerActor::HandleFileUpdateNotification(const FString& Filena
         return;
     }
 
-    // Skip non-geometry files — only clip USD files are worth refreshing
+    // Skip non-geometry files — only geometry clip files are worth refreshing
     if (!Filename.EndsWith(TEXT(".usda")))
     {
         UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Skipping non-USDA file: '%s'"), *Filename);
@@ -991,9 +991,14 @@ void AJUSYNCFileSpawnerActor::HandleFileUpdateNotification(const FString& Filena
     }
     if (Filename.StartsWith(TEXT("Session_")) || Filename == TEXT("scene.usda") ||
         Filename.Contains(TEXT("manifest")) || Filename.Contains(TEXT("images/")) ||
-        Filename.Contains(TEXT("shared/")))
+        Filename.Contains(TEXT("shared/")) ||
+        Filename.Contains(TEXT("primstages/")) ||
+        Filename.Contains(TEXT("_Light.usda")) ||
+        Filename.Contains(TEXT("_Material.usda")) ||
+        Filename.Contains(TEXT("_Camera.usda")) ||
+        Filename.Contains(TEXT("_Sampler.usda")))
     {
-        UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Skipping root/manifest file: '%s'"), *Filename);
+        UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Skipping non-clip USD file: '%s'"), *Filename);
         return;
     }
 

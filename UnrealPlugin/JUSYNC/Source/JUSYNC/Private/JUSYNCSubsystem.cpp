@@ -1,5 +1,6 @@
 ﻿#include "JUSYNCSubsystem.h"
 #include "JUSYNCBlueprintLibrary.h"
+#include <cfloat>
 #include "Engine/Engine.h"
 #include "Engine/Texture2D.h"
 #include "Engine/Texture.h"
@@ -2249,6 +2250,49 @@ AActor* UJUSYNCSubsystem::SpawnLidarPointCloudAtLocation(const FJUSYNCPointCloud
                 col = FColor::White;
             }
             Points[i] = FLidarPointCloudPoint(pos, col, true, 0);
+        }
+
+        // Validate and fix bounds BEFORE creating LidarPointCloud
+        // The LiDAR plugin rejects bounds where any axis has zero extent
+        {
+            if (Points.Num() > 1)
+            {
+                FVector3f MinBounds(FLT_MAX, FLT_MAX, FLT_MAX);
+                FVector3f MaxBounds(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+
+                for (const auto& P : Points)
+                {
+                    MinBounds.X = FMath::Min(MinBounds.X, P.Position.X);
+                    MinBounds.Y = FMath::Min(MinBounds.Y, P.Position.Y);
+                    MinBounds.Z = FMath::Min(MinBounds.Z, P.Position.Z);
+                    MaxBounds.X = FMath::Max(MaxBounds.X, P.Position.X);
+                    MaxBounds.Y = FMath::Max(MaxBounds.Y, P.Position.Y);
+                    MaxBounds.Z = FMath::Max(MaxBounds.Z, P.Position.Z);
+                }
+
+                FVector3f Extent = MaxBounds - MinBounds;
+
+                // If any axis has near-zero extent, expand it
+                if (Extent.X < 0.01f || Extent.Y < 0.01f || Extent.Z < 0.01f)
+                {
+                    float MaxExtent = FMath::Max3(Extent.X, Extent.Y, Extent.Z);
+                    float FallbackExtent = FMath::Max(MaxExtent, 1.0f);
+
+                    for (int32 i = 0; i < Points.Num(); ++i)
+                    {
+                        FVector3f& Pos = Points[i].Position;
+                        float Offset = ((float)i - (float)Points.Num() * 0.5f) * FallbackExtent / (float)FMath::Max(Points.Num(), 1);
+
+                        if (Extent.X < 0.01f) Pos.X += Offset;
+                        if (Extent.Y < 0.01f) Pos.Y += Offset;
+                        if (Extent.Z < 0.01f) Pos.Z += Offset;
+                    }
+
+                    UE_LOG(LogTemp, Warning,
+                        TEXT("JUSYNC: Fixed degenerate bounds for '%s' (extent: %.3f, %.3f, %.3f)"),
+                        *PointCloudData.ElementName, Extent.X, Extent.Y, Extent.Z);
+                }
+            }
         }
 
         // Create and set point cloud data

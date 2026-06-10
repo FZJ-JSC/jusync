@@ -175,8 +175,19 @@ public:
         }
 
         if (hasLargeGeometry) {
-            MIDDLEWARE_LOG_INFO("Large geometry detected via streaming scan - preserving original USD data");
-            return buffer;  // Return original content without any modifications
+            MIDDLEWARE_LOG_INFO("Large geometry detected via streaming scan - applying CRITICAL '0: None' fix only");
+            // MUST still fix "0: None" -> "0: []" even for geometry files, or TinyUSDZ will fail
+            // Only apply the single critical replacement that TinyUSDZ requires
+            std::string fileContent(reinterpret_cast<const char*>(buffer.data()), buffer.size());
+            const std::string nonePatternStr = "0: None";
+            const std::string noneReplacement = "0: []";
+            size_t pos = 0;
+            while ((pos = fileContent.find(nonePatternStr, pos)) != std::string::npos) {
+                fileContent.replace(pos, nonePatternStr.length(), noneReplacement);
+                pos += noneReplacement.length();
+            }
+            MIDDLEWARE_LOG_INFO("Geometry file preprocessing complete: %zu -> %zu bytes", buffer.size(), fileContent.size());
+            return std::vector<uint8_t>(fileContent.begin(), fileContent.end());
         }
 
         // Use streaming processing for large files, regular processing for small files
@@ -1027,16 +1038,30 @@ bool UsdProcessor::LoadUSDBuffer(const std::vector<uint8_t>& buffer,
         // CRITICAL FIX: Preserve full data for Unreal RealtimeMesh processing
         std::vector<uint8_t> processedBuffer;
 
-        // Convert buffer to string for geometry detection
+        // Convert buffer to string for processing
         std::string content(reinterpret_cast<const char*>(buffer.data()), buffer.size());
+
+        // ALWAY apply the '0: None' -> '0: []' fix for ALL files before any parsing.
+        // USD ArrayWriter emits '0: None' for empty timeSampled arrays, which TinyUSDZ
+        // fails to parse.  Without this fix, large geometry files intermittently fail
+        // with C_result=0, MeshCount=0, CloudCount=0.
+        {
+            const std::string nonePatternStr = "0: None";
+            const std::string noneReplacement = "0: []";
+            size_t pos = 0;
+            while ((pos = content.find(nonePatternStr, pos)) != std::string::npos) {
+                content.replace(pos, nonePatternStr.length(), noneReplacement);
+                pos += noneReplacement.length();
+            }
+        }
 
         // Check if this contains large geometry arrays
         if (content.find("int[] faceVertexIndices") != std::string::npos ||
             content.find("point3f[] points") != std::string::npos ||
             content.find("float3[] points") != std::string::npos) {
 
-            MIDDLEWARE_LOG_INFO("Large geometry detected - preserving original USD data for Unreal RealtimeMesh");
-            processedBuffer = buffer;  // Use original buffer without preprocessing
+            MIDDLEWARE_LOG_INFO("Large geometry detected - using '0: None' fixed buffer for Unreal RealtimeMesh");
+            processedBuffer.assign(content.begin(), content.end());
         } else {
             // Apply minimal preprocessing for non-geometry files
             processedBuffer = pImpl->preprocessUsdContent(buffer);
@@ -1086,13 +1111,18 @@ bool UsdProcessor::LoadUSDBuffer(const std::vector<uint8_t>& buffer,
         );
 
         if (!loadResult) {
-            MIDDLEWARE_LOG_ERROR("TinyUSDZ load error: %s", errors.c_str());
+            MIDDLEWARE_LOG_ERROR("TinyUSDZ_load_FAILED: file='%s' size=%zu errors='%s' warnings='%s'",
+                fileName.c_str(), processedBuffer.size(), errors.c_str(), warnings.c_str());
+            // Log first 300 chars of buffer to diagnose if it's actually USD content
+            size_t previewLen = std::min(processedBuffer.size(), static_cast<size_t>(300));
+            std::string preview(reinterpret_cast<const char*>(processedBuffer.data()), previewLen);
+            MIDDLEWARE_LOG_ERROR("TinyUSDZ_buffer_preview: '...%s'...", preview.c_str());
             stats.processingErrors.fetch_add(1);
             return false;
         }
 
         if (!warnings.empty()) {
-            MIDDLEWARE_LOG_WARNING("TinyUSDZ load warnings: %s", warnings.c_str());
+            MIDDLEWARE_LOG_WARNING("TinyUSDZ load warnings for '%s': %s", fileName.c_str(), warnings.c_str());
         }
 
         MIDDLEWARE_LOG_INFO("USD stage loaded successfully. Root prims: %zu", stage.root_prims().size());

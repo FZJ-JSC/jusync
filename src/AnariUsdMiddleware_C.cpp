@@ -2215,6 +2215,10 @@ int LoadUSDFull_C(const unsigned char* buffer,
         if (!result) {
             MIDDLEWARE_LOG_ERROR("LoadUSDFull_C: LoadUSDBuffer returned false for '%s' (size=%zu bytes)",
                 std_filename.c_str(), buffer_size);
+            // Show first 200 bytes of the buffer to diagnose
+            size_t previewLen = std::min(std_buffer.size(), static_cast<size_t>(200));
+            std::string preview(reinterpret_cast<const char*>(std_buffer.data()), previewLen);
+            MIDDLEWARE_LOG_ERROR("LoadUSDFull_C_raw_preview: '%.200s'...", preview.c_str());
             *out_mesh_count = 0;
             *out_meshes = nullptr;
             *out_cloud_count = 0;
