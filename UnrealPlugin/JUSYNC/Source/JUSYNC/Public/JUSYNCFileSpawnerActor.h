@@ -238,4 +238,8 @@ private:
     double LastCommitCompleteTime;
     double CommitCompleteCooldown;
     bool bCommitDiffInProgress;
+
+    // Live update guards
+    bool bInitialSpawnDone;
+    TSet<FString> RefreshedFiles;
 };

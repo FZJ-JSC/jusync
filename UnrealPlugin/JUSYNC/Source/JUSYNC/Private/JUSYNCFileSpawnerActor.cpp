@@ -31,6 +31,7 @@ AJUSYNCFileSpawnerActor::AJUSYNCFileSpawnerActor()
     LastCommitCompleteTime = 0.0;
     CommitCompleteCooldown = 5.0;
     bCommitDiffInProgress = false;
+    bInitialSpawnDone = false;
     bSpawnPointClouds = true;
     bUseGradientColors = true;
     GradientPngFilename = TEXT("");
@@ -105,6 +106,8 @@ void AJUSYNCFileSpawnerActor::StartSpawning()
     NextSpawnIndex = 0; PendingDownloads = 0; PendingAsyncSpawns = 0; bIsCancelled = false;
     CurrentRetryCount = 0;
     CurrentState = EJUSYNCSpawnerState::Connecting;
+    bInitialSpawnDone = false;
+    RefreshedFiles.Empty();
     UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: starting pipeline"));
     GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Green, FString::Printf(TEXT("[Spawner] Connecting to %s"), *BrokerEndpoint));
 
@@ -315,6 +318,7 @@ void AJUSYNCFileSpawnerActor::OnFileListReceived_Internal(const TArray<FString>&
     {
         UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: no files after filtering"));
         GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Yellow, TEXT("[Spawner] No files after filtering! Check filters."));
+        bInitialSpawnDone = true;
         CurrentState = EJUSYNCSpawnerState::Complete;
         OnAllComplete.Broadcast(0, false);
         return;
@@ -882,6 +886,10 @@ void AJUSYNCFileSpawnerActor::CheckAllDownloadsComplete()
         ParseFailedIndices.Empty();
         OnAllComplete.Broadcast(ActorsSpawned, bSuccess);
 
+        // Mark initial spawn as done so live updates can proceed
+        bInitialSpawnDone = true;
+        RefreshedFiles.Empty();
+
         // Start live update polling if enabled
         if (bEnableLiveUpdates)
         {
@@ -961,6 +969,20 @@ void AJUSYNCFileSpawnerActor::HandleFileUpdateNotification(const FString& Filena
         return;
     }
 
+    // Block live updates until initial spawn pipeline finishes
+    if (!bInitialSpawnDone)
+    {
+        UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Blocking: initial spawn not done yet (file='%s')"), *Filename);
+        return;
+    }
+
+    // Deduplicate: skip if we already refreshed this file this cycle
+    if (RefreshedFiles.Contains(Filename))
+    {
+        UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Dedup: already refreshed '%s' this cycle"), *Filename);
+        return;
+    }
+
     // Skip non-geometry files — only clip USD files are worth refreshing
     if (!Filename.EndsWith(TEXT(".usda")))
     {
@@ -1032,6 +1054,7 @@ void AJUSYNCFileSpawnerActor::HandleCommitCompleteNotification()
 
     LastCommitCompleteTime = Now;
     bCommitDiffInProgress = true;
+    RefreshedFiles.Empty();
     UE_LOG(LogTemp, Display, TEXT("[LiveUpdate] Commit complete - re-fetching file list"));
 
     // Capture subsystem on game thread (lookup fails on background threads)
@@ -1299,6 +1322,11 @@ bool AJUSYNCFileSpawnerActor::RefreshSingleFile(const FString& Filename, int32 T
         return false;
     }
 
+    // Mark as refreshed to deduplicate
+    RefreshedFiles.Add(Filename);
+
+    UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] RefreshSingleFile START: '%s' (rank %d)"), *Filename, TargetRank);
+
     // Remove old actors from tracking — they'll be re-added when new ones spawn
     FString MeshKeySuffix = TEXT("|") + Filename;
     
@@ -1320,6 +1348,8 @@ bool AJUSYNCFileSpawnerActor::RefreshSingleFile(const FString& Filename, int32 T
     
     TArray<AActor*> ActorsToDestroy;
 
+    UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] PCKey='%s', MeshKeySuffix='%s'"), *PCKey, *MeshKeySuffix);
+
     for (auto It = FileToActorMap.CreateIterator(); It; ++It)
     {
         bool bMatch = It->Key.EndsWith(MeshKeySuffix, ESearchCase::CaseSensitive);
@@ -1328,7 +1358,10 @@ bool AJUSYNCFileSpawnerActor::RefreshSingleFile(const FString& Filename, int32 T
         if (bMatch)
         {
             if (It->Value && It->Value->IsValidLowLevel())
+            {
                 ActorsToDestroy.Add(It->Value);
+                UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Destroying old actor for key='%s'"), *(It->Key));
+            }
             It.RemoveCurrent();
         }
     }
@@ -1339,6 +1372,8 @@ bool AJUSYNCFileSpawnerActor::RefreshSingleFile(const FString& Filename, int32 T
         ActorsSpawned--;
         OldActor->Destroy();
     }
+
+    UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Destroyed %d old actors (ActorsSpawned now %d)"), ActorsToDestroy.Num(), ActorsSpawned);
 
     // Download and re-spawn
     TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThis = this;
