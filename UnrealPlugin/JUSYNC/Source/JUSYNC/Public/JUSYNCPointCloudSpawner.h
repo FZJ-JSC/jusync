@@ -47,6 +47,9 @@ public:
     void SetSpawnScale(float In) { SpawnScale = In; }
     void ClearAllActors();
 
+    /** Destroy ALL actors including pooled ones (for full scene cleanup) */
+    void DestroyAllActors();
+
     /** Set a 256-entry gradient color LUT from a decoded PNG row. Attribute0 values map to these colors. */
     void SetGradientLUT(const TArray<FColor>& InLUT) { FScopeLock Lock(&GradientMutex); GradientLUT = InLUT; }
     TArray<FColor> GetGradientLUT() const { FScopeLock Lock(&GradientMutex); return GradientLUT; }

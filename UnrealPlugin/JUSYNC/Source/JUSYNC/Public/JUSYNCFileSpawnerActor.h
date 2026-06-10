@@ -174,15 +174,17 @@ private:
 
     void OnFileListReceived(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<int32>& FileRanks);
     void OnFileListReceived_Internal(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<int32>& FileRanks, bool bSuccess);
+    void OnFileListReceived_Internal(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<int32>& FileRanks, bool bSuccess, const TArray<uint64>& HashLo, const TArray<uint64>& HashHi);
+    void OnFileListReceived_Internal_Common(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<int32>& FileRanks, bool bSuccess);
     void OnFileListError(const FString& ErrorMessage);
     void OnFileDownloaded(const FString& Filename, const TArray<uint8>& FileData);
-    void OnSingleFileDownloaded(const FString& Filename, const TArray<uint8>& FileData, bool bSuccess, int32 FileIndex);
+    void OnSingleFileDownloaded(const FString& Filename, const TArray<uint8>& FileData, bool bSuccess, int32 FileIndex, int32 TargetRank);
     void OnFileDownloadError(const FString& ErrorMessage);
     void DownloadGradientPng(UJUSYNCSubsystem* Subsystem);
     void PipelineDownloadNext(UJUSYNCSubsystem* Subsystem);
 
     int32 CalculateDynamicTimeout(int64 FileSizeBytes) const;
-    void SpawnMeshFromData(const FString& Filename, bool bParsed, TArray<FJUSYNCMeshData>&& MeshData, TArray<FJUSYNCPointCloudData>&& PointCloudData, int32 FileIndex);
+    void SpawnMeshFromData(const FString& Filename, bool bParsed, TArray<FJUSYNCMeshData>&& MeshData, TArray<FJUSYNCPointCloudData>&& PointCloudData, int32 FileIndex, int32 TargetRank);
     void ApplyDynamicMaterial(UPrimitiveComponent* Comp, const FString& Filename);
     void CheckAllDownloadsComplete();
     void RetryFailedDownloads();
@@ -202,10 +204,14 @@ private:
     TArray<FString> RawFileList;
     TArray<int64> RawFileSizes;
     TArray<int32> RawFileRanks;
+    TArray<uint64> RawHashLo;
+    TArray<uint64> RawHashHi;
 
     TArray<FString> FilteredFiles;
     TArray<int64> FilteredSizes;
     TArray<int32> FilteredRanks;
+    TArray<uint64> FilteredHashLo;
+    TArray<uint64> FilteredHashHi;
     TMap<FString, int32> GradientPngRankMap;
     TMap<int32, TArray<FColor>> RankGradients;
     std::atomic<bool> bGradientReady;
@@ -226,6 +232,8 @@ private:
     // Live update state
     FTimerHandle LiveUpdateTimerHandle;
     TMap<FString, AActor*> FileToActorMap;
+    TMap<FString, uint64> FileHashLo;
+    TMap<FString, uint64> FileHashHi;
     TMap<FString, int64> FileLastSize;
     double LastCommitCompleteTime;
     double CommitCompleteCooldown;

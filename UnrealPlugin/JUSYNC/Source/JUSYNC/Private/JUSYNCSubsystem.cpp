@@ -903,8 +903,9 @@ bool UJUSYNCSubsystem::LoadUSDFullFromBuffer(const TArray<uint8>& Buffer, const 
             pc.PointCount = static_cast<int32>(cpc.points_count);
             pc.bHasColors = cpc.has_colors != 0;
             pc.bHasNormals = cpc.has_normals != 0;
-            pc.BoundingBoxMin = FVector(cpc.bounding_box_min[0], cpc.bounding_box_min[1], cpc.bounding_box_min[2]);
-            pc.BoundingBoxMax = FVector(cpc.bounding_box_max[0], cpc.bounding_box_max[1], cpc.bounding_box_max[2]);
+            // Transform bounds from USD-space → UE-space, matching position transform
+            pc.BoundingBoxMin = FVector(cpc.bounding_box_min[0], cpc.bounding_box_min[2], -cpc.bounding_box_min[1]);
+            pc.BoundingBoxMax = FVector(cpc.bounding_box_max[0], cpc.bounding_box_max[2], -cpc.bounding_box_max[1]);
 
             if (cpc.points_count > 0 && cpc.positions)
             {
@@ -2110,8 +2111,9 @@ bool UJUSYNCSubsystem::LoadPointCloudFromBuffer(const TArray<uint8>& Buffer, con
         pc.bHasColors = cpc.has_colors != 0;
         pc.bHasNormals = cpc.has_normals != 0;
 
-        pc.BoundingBoxMin = FVector(cpc.bounding_box_min[0], cpc.bounding_box_min[1], cpc.bounding_box_min[2]);
-        pc.BoundingBoxMax = FVector(cpc.bounding_box_max[0], cpc.bounding_box_max[1], cpc.bounding_box_max[2]);
+        // Transform bounds from USD-space to UE-space, matching position transform (x, z, -y)
+        pc.BoundingBoxMin = FVector(cpc.bounding_box_min[0], cpc.bounding_box_min[2], -cpc.bounding_box_min[1]);
+        pc.BoundingBoxMax = FVector(cpc.bounding_box_max[0], cpc.bounding_box_max[2], -cpc.bounding_box_max[1]);
 
         // Convert positions: right-handed Z-up (USD) â†’ left-handed Y-up (UE)
         // UE transform: X stays, Y becomes Z, Z becomes -Y
@@ -3236,12 +3238,14 @@ bool UJUSYNCSubsystem::RequestFileListWithSizesAndRanks(int32 TargetRank, int32 
     char** FileList = nullptr;
     uint64_t* FileSizes = nullptr;
     int32_t* FileRanks = nullptr;
+    uint64_t* FileHashLo = nullptr;
+    uint64_t* FileHashHi = nullptr;
     size_t FileCount = 0;
-    
+
     UE_LOG(LogJUSYNC, Log, TEXT("Calling RequestFileListWithSizesAndRanks_C..."));
-    int Result = RequestFileListWithSizesAndRanks_C(TargetRank, &FileList, &FileSizes, &FileRanks, &FileCount, AdjustedTimeoutMs);
+    int Result = RequestFileListWithSizesAndRanks_C(TargetRank, &FileList, &FileSizes, &FileRanks, &FileHashLo, &FileHashHi, &FileCount, AdjustedTimeoutMs);
     
-    UE_LOG(LogJUSYNC, Log, TEXT("RequestFileListWithSizesAndRanks_C returned: %d, FileCount: %d"), Result, FileCount);
+    UE_LOG(LogJUSYNC, Log, TEXT("RequestFileListWithSizesAndRanks_C returned: %d, FileCount: %zu"), Result, FileCount);
     
     if (Result == 1 && FileList && FileSizes && FileRanks && FileCount > 0)
     {
@@ -3263,7 +3267,7 @@ bool UJUSYNCSubsystem::RequestFileListWithSizesAndRanks(int32 TargetRank, int32 
         }
         
         // Free C memory
-        FreeFileListWithSizesAndRanks_C(FileList, FileSizes, FileRanks, FileCount);
+        FreeFileListWithSizesAndRanks_C(FileList, FileSizes, FileRanks, nullptr, nullptr, FileCount);
         
         UE_LOG(LogJUSYNC, Log, TEXT("âœ… Retrieved %d files with sizes and ranks from broker"), OutFiles.Num());
         return true;
@@ -3273,7 +3277,7 @@ bool UJUSYNCSubsystem::RequestFileListWithSizesAndRanks(int32 TargetRank, int32 
         UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to request file list with sizes and ranks (Result: %d)"), Result);
         if (FileList || FileSizes || FileRanks)
         {
-            FreeFileListWithSizesAndRanks_C(FileList, FileSizes, FileRanks, FileCount);
+            FreeFileListWithSizesAndRanks_C(FileList, FileSizes, FileRanks, nullptr, nullptr, FileCount);
         }
     }
 #endif

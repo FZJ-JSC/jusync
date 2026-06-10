@@ -273,7 +273,7 @@ void FJUSYNCPointCloudSpawner::DrainReadyQueue()
             GradientPendingData.Add(Actor, FRecolorData{ MoveTemp(Entry.Positions), MoveTemp(Entry.Widths) });
         }
 
-        FString EntryName = Entry.ElementName;
+        FString EntryName = FString::Printf(TEXT("%s_r%d"), *Entry.ElementName, Entry.Rank);
         int32 EntryPoints = Entry.Points.Num();
         Entry.bSpawned = true;
         ReadyQueue.Pop();
@@ -294,12 +294,24 @@ void FJUSYNCPointCloudSpawner::ClearAllActors()
         ReleaseActor(Actor);
     }
     ActiveActors.Empty();
+}
+
+void FJUSYNCPointCloudSpawner::DestroyAllActors()
+{
+    for (AActor* Actor : ActiveActors)
+    {
+        if (Actor) Actor->Destroy();
+    }
+    ActiveActors.Empty();
 
     for (AActor* Actor : AvailablePool)
     {
-        Actor->Destroy();
+        if (Actor) Actor->Destroy();
     }
     AvailablePool.Empty();
+
+    GradientPendingActors.Empty();
+    GradientPendingData.Empty();
 }
 
 void FJUSYNCPointCloudSpawner::RecolorGradientPendingActors()
