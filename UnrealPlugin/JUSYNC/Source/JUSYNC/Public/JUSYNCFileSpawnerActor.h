@@ -69,6 +69,10 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Placement")
     float SpawnSpacing;
 
+    /** Number of columns in the spawn grid (default: 10) */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Placement", meta = (ClampMin = "1", ClampMax = "100"))
+    int32 SpawnGridColumns;
+
     /** Base material — a dynamic instance is created per mesh. If blank, default material is used. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Material")
     UMaterialInterface* SpawnMaterial;
@@ -200,6 +204,7 @@ private:
     void StopLiveUpdatePolling();
     void OnLiveUpdateTimer();
     bool RefreshSingleFile(const FString& Filename, int32 TargetRank);
+    void DiffAndRefreshFileList(const TArray<FString>& NewFiles, const TArray<int64>& NewSizes, const TArray<int32>& NewRanks, bool bIsManual);
 
     TArray<FString> RawFileList;
     TArray<int64> RawFileSizes;
@@ -242,4 +247,12 @@ private:
     // Live update guards
     bool bInitialSpawnDone;
     TSet<FString> RefreshedFiles;
+
+    // Depth-gated refresh queue (reuses PipelineDepth)
+    int32 RefreshActive;
+    TArray<TPair<FString, int32>> RefreshRemainingFiles;
+    
+    // Forward-declare helper
+    void ChainRefreshNext();
+    void RetryRemainingFiles();
 };

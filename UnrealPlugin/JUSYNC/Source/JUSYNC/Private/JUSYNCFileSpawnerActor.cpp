@@ -20,6 +20,7 @@ AJUSYNCFileSpawnerActor::AJUSYNCFileSpawnerActor()
     SpawnTargetActor = nullptr;
     BaseSpawnLocation = FVector::ZeroVector;
     SpawnSpacing = 0.0f;
+    SpawnGridColumns = 10;
     SpawnMaterial = nullptr;
     TextureSampleParameterName = TEXT("");
     SpawnScale = FVector::OneVector;
@@ -51,6 +52,7 @@ AJUSYNCFileSpawnerActor::AJUSYNCFileSpawnerActor()
     PipelineNextIndex = 0;
     PipelineActive = 0;
     bIsCancelled = false;
+    RefreshActive = 0;
 }
 
 void AJUSYNCFileSpawnerActor::BeginPlay()
@@ -166,8 +168,8 @@ FVector AJUSYNCFileSpawnerActor::GetNextSpawnLocation() const
     else if (GetWorld() && !HasAnyFlags(RF_ClassDefaultObject))
         Origin = GetActorLocation();
 
-    int32 Col = NextSpawnIndex % 10;
-    int32 Row = NextSpawnIndex / 10;
+    int32 Col = NextSpawnIndex % SpawnGridColumns;
+    int32 Row = NextSpawnIndex / SpawnGridColumns;
     return Origin + FVector(Col * SpawnSpacing, Row * SpawnSpacing, 0.0f);
 }
 
@@ -232,7 +234,7 @@ void AJUSYNCFileSpawnerActor::RequestFileList()
     TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
     TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThis = this;
 
-    Async(EAsyncExecution::Thread, [WeakSubsystem, WeakThis]()
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, WeakThis]()
         {
             if (!WeakSubsystem.IsValid() || !WeakThis.IsValid()) return;
 
@@ -271,43 +273,56 @@ void AJUSYNCFileSpawnerActor::OnFileListReceived_Internal(const TArray<FString>&
     UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: received %d files"), FileList.Num());
     GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Green, FString::Printf(TEXT("[Spawner] Got %d files, filtering..."), FileList.Num()));
 
-    TArray<FString> OutFiles;
-    TArray<int64> OutSizes;
-    TArray<int32> OutRanks;
-
-    // Separate PNG files (for gradient LUT) from USD files
+    // Single-pass categorization: bucket files by type, apply all filters in one pass
     TArray<FString> PngFiles;
-    TArray<int64> PngSizes;
     TArray<int32> PngRanks;
+    TArray<FString> LocalFiles;
+    TArray<int64> LocalSizes;
+    TArray<int32> LocalRanks;
+    LocalFiles.Reserve(FileList.Num());
+    LocalSizes.Reserve(FileList.Num());
+    LocalRanks.Reserve(FileList.Num());
 
-    if (bFilterUSDOnly)
+    for (int32 i = 0; i < FileList.Num(); ++i)
     {
-        UJUSYNCBlueprintLibrary::FilterFileListByExtensionEnumWithSizesAndRanks(RawFileList, RawFileSizes, RawFileRanks, EJUSYNCExtension::USD, OutFiles, OutSizes, OutRanks);
-        UJUSYNCBlueprintLibrary::FilterFileListByExtensionEnumWithSizesAndRanks(RawFileList, RawFileSizes, RawFileRanks, EJUSYNCExtension::PNG, PngFiles, PngSizes, PngRanks);
-        // Store PNG → rank mapping for later gradient download
-        for (int32 i = 0; i < PngFiles.Num(); ++i)
+        const FString& Fname = FileList[i];
+        int64 Fsize = FileSizes.IsValidIndex(i) ? FileSizes[i] : 0;
+        int32 Frank = FileRanks.IsValidIndex(i) ? FileRanks[i] : 0;
+
+        if (Fname.EndsWith(TEXT(".png")) || Fname.EndsWith(TEXT(".PNG")))
         {
-            GradientPngRankMap.Add(PngFiles[i], PngRanks.IsValidIndex(i) ? PngRanks[i] : 0);
+            PngFiles.Add(Fname);
+            PngRanks.Add(Frank);
+            continue;
         }
-        RawFileList = MoveTemp(OutFiles); RawFileSizes = MoveTemp(OutSizes); RawFileRanks = MoveTemp(OutRanks);
-        UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: after USD filter: %d files, %d PNGs"), RawFileList.Num(), PngFiles.Num());
+
+        if (bFilterUSDOnly)
+        {
+            FString Ext = FPaths::GetExtension(Fname).ToLower();
+            if (Ext != TEXT("usd") && Ext != TEXT("usda") && Ext != TEXT("usdc") && Ext != TEXT("usdz"))
+                continue;
+        }
+
+        if (MinimumFileSizeBytes > 0 && Fsize < MinimumFileSizeBytes)
+            continue;
+
+        if (bClipsOnly && !Fname.StartsWith(TEXT("clips/")))
+            continue;
+
+        LocalFiles.Add(Fname);
+        LocalSizes.Add(Fsize);
+        LocalRanks.Add(Frank);
     }
 
-    if (MinimumFileSizeBytes > 0)
+    for (int32 i = 0; i < PngFiles.Num(); ++i)
     {
-        OutFiles.Empty(); OutSizes.Empty(); OutRanks.Empty();
-        UJUSYNCBlueprintLibrary::FilterFileListBySizeWithRanks(RawFileList, RawFileSizes, RawFileRanks, MinimumFileSizeBytes, OutFiles, OutSizes, OutRanks);
-        RawFileList = MoveTemp(OutFiles); RawFileSizes = MoveTemp(OutSizes); RawFileRanks = MoveTemp(OutRanks);
-        UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: after size filter: %d files"), RawFileList.Num());
+        GradientPngRankMap.Add(PngFiles[i], PngRanks[i]);
     }
 
-    if (bClipsOnly)
-    {
-        OutFiles.Empty(); OutSizes.Empty(); OutRanks.Empty();
-        UJUSYNCBlueprintLibrary::ExtractGeometryClips(RawFileList, RawFileSizes, RawFileRanks, OutFiles, OutSizes, OutRanks);
-        RawFileList = MoveTemp(OutFiles); RawFileSizes = MoveTemp(OutSizes); RawFileRanks = MoveTemp(OutRanks);
-        UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: after clips filter: %d files"), RawFileList.Num());
-    }
+    RawFileList = LocalFiles;
+    RawFileSizes = LocalSizes;
+    RawFileRanks = LocalRanks;
+    UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: single-pass filter: %d geometry files, %d PNGs"), RawFileList.Num(), PngFiles.Num());
 
     FilteredFiles = RawFileList;
     FilteredSizes = RawFileSizes;
@@ -394,7 +409,7 @@ void AJUSYNCFileSpawnerActor::PipelineDownloadNext(UJUSYNCSubsystem* Subsystem)
     int32 FileIndex = i;
     TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
 
-    Async(EAsyncExecution::Thread, [WeakSubsystem, WeakThis, Filename, TargetRank, DynamicTimeout, FileIndex]()
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, WeakThis, Filename, TargetRank, DynamicTimeout, FileIndex]()
         {
             if (!WeakSubsystem.IsValid() || !WeakThis.IsValid())
             {
@@ -427,10 +442,14 @@ void AJUSYNCFileSpawnerActor::OnSingleFileDownloaded(const FString& Filename, co
         FilesDownloaded++;
         OnFileProgress.Broadcast(FilesDownloaded, FilesTotal);
         PipelineActive--;
-        // Chain next download even on failure
-        UJUSYNCSubsystem* S = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
-        if (S)
-            PipelineDownloadNext(S);
+        // Chain pending work that was depth-gated
+        if (RefreshRemainingFiles.Num() > 0) ChainRefreshNext();
+        else if (FailedFileIndices.Num() > 0 && CurrentRetryCount < MaxRetries) RetryRemainingFiles();
+        else if (PipelineNextIndex < FilteredFiles.Num()) {
+            UJUSYNCSubsystem* S = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
+            if (S)
+                PipelineDownloadNext(S);
+        }
         CheckAllDownloadsComplete();
         return;
     }
@@ -462,9 +481,14 @@ void AJUSYNCFileSpawnerActor::OnSingleFileDownloaded(const FString& Filename, co
 
                     // Chain next download in pipeline (overlap download with spawn)
                     WeakCopy->PipelineActive--;
-                    UJUSYNCSubsystem* S = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
-                    if (S)
-                        WeakCopy->PipelineDownloadNext(S);
+                    // Chain pending work that was depth-gated
+                    if (WeakCopy->RefreshRemainingFiles.Num() > 0) WeakCopy->ChainRefreshNext();
+                    else if (WeakCopy->FailedFileIndices.Num() > 0 && WeakCopy->CurrentRetryCount < WeakCopy->MaxRetries) WeakCopy->RetryRemainingFiles();
+                    else if (WeakCopy->PipelineNextIndex < WeakCopy->FilteredFiles.Num()) {
+                        UJUSYNCSubsystem* S = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
+                        if (S)
+                            WeakCopy->PipelineDownloadNext(S);
+                    }
                 },
                 TStatId(), nullptr, ENamedThreads::GameThread);
         });
@@ -526,7 +550,7 @@ void AJUSYNCFileSpawnerActor::DownloadGradientPng(UJUSYNCSubsystem* Subsystem)
     TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThis = this;
     FString PngCopy = PngPath;
 
-    Async(EAsyncExecution::Thread, [WeakSub, WeakThis, PngCopy, PngRank]()
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSub, WeakThis, PngCopy, PngRank]()
     {
         if (!WeakSub.IsValid() || !WeakThis.IsValid()) return;
 
@@ -616,7 +640,7 @@ void AJUSYNCFileSpawnerActor::SpawnMeshFromData(const FString& Filename, bool bP
     bool bHadMeshes = false;
     bool bHadPointClouds = false;
 
-    // Async spawn meshes if any
+    // Spawn meshes directly (already on game thread)
     if (bParsed && MeshData.Num() > 0)
     {
         int32 ValidMeshCount = 0;
@@ -626,54 +650,41 @@ void AJUSYNCFileSpawnerActor::SpawnMeshFromData(const FString& Filename, bool bP
         {
             bHadMeshes = true;
 
-            PendingAsyncSpawns++;
-            FString FCopy = Filename;
-            AsyncTask(ENamedThreads::GameThread, [this, FCopy, MeshData]()
+            FString MeshKeySuffix = TEXT("|") + Filename;
+            int32 SpawnCount = 0;
+            for (int32 i = 0; i < MeshData.Num(); ++i)
             {
-                int32 SpawnCount = 0;
-                for (int32 i = 0; i < MeshData.Num(); ++i)
+                if (!MeshData[i].IsValid()) continue;
+
+                FVector SpawnLoc = GetNextSpawnLocation();
+                AActor* Spawned = UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(MeshData[i], SpawnLoc);
+
+                if (Spawned)
                 {
-                    if (!MeshData[i].IsValid()) continue;
+                    SpawnedActors.Add(Spawned);
+                    ActorsSpawned++;
 
-                    FVector SpawnLoc = GetNextSpawnLocation();
-                    AActor* Spawned = UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(MeshData[i], SpawnLoc);
+                    // Track for live updates (pre-concatenated key)
+                    FileToActorMap.Add(MeshData[i].ElementName + MeshKeySuffix, Spawned);
+                    Spawned->SetActorEnableCollision(false);
 
-                    if (Spawned)
+                    if (SpawnScale != FVector::ZeroVector)
                     {
-                        SpawnedActors.Add(Spawned);
-                        ActorsSpawned++;
-
-                        // Track for live updates
-                        FileToActorMap.Add(MeshData[i].ElementName + TEXT("|") + FCopy, Spawned);
-
-                        // Disable collision on spawned mesh
-                        Spawned->SetActorEnableCollision(false);
-
-                        if (SpawnScale != FVector::ZeroVector)
-                        {
-                            FVector FinalScale = bUseUniformScaling ? FVector(SpawnScale.X) : SpawnScale;
-                            Spawned->SetActorScale3D(FinalScale);
-                        }
-
-                        ApplyDynamicMaterial(Cast<UPrimitiveComponent>(Spawned->GetRootComponent()), FCopy);
-                        OnFileComplete.Broadcast(FCopy, Spawned);
-                        NextSpawnIndex++;
-                        SpawnCount++;
-
-                        UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: spawned mesh '%s' from '%s' (actor #%d)"),
-                               *MeshData[i].ElementName, *FCopy, ActorsSpawned);
+                        FVector FinalScale = bUseUniformScaling ? FVector(SpawnScale.X) : SpawnScale;
+                        Spawned->SetActorScale3D(FinalScale);
                     }
+
+                    ApplyDynamicMaterial(Cast<UPrimitiveComponent>(Spawned->GetRootComponent()), Filename);
+                    OnFileComplete.Broadcast(Filename, Spawned);
+                    NextSpawnIndex++;
+                    SpawnCount++;
                 }
+            }
 
-                PendingAsyncSpawns--;
-                if (PendingAsyncSpawns <= 0) PendingAsyncSpawns = 0;
+            CheckAllDownloadsComplete();
 
-                // Re-check completion after async mesh spawn finishes
-                CheckAllDownloadsComplete();
-
-                FString ResultMsg = FString::Printf(TEXT("[Spawner] %s: spawned %d meshes"), *FCopy, SpawnCount);
-                GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Green, ResultMsg);
-            });
+            FString ResultMsg = FString::Printf(TEXT("[Spawner] %s: spawned %d meshes"), *Filename, SpawnCount);
+            GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Green, ResultMsg);
         }
     }
 
@@ -909,19 +920,28 @@ void AJUSYNCFileSpawnerActor::RetryFailedDownloads()
     UJUSYNCSubsystem* Subsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
     if (!Subsystem) return;
 
-    TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
+    TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystemCopy = Subsystem;
+    int32 AvailableSpots = FMath::Max(0, PipelineDepth - PipelineActive);
+    int32 Spawned = 0;
 
-    for (int32 idx : FailedFileIndices)
+    for (int32 i = 0; i < FailedFileIndices.Num() && Spawned < AvailableSpots; ++i)
     {
+        int32 idx = FailedFileIndices[i];
         if (bIsCancelled || !FilteredFiles.IsValidIndex(idx)) continue;
 
         const FString& Filename = FilteredFiles[idx];
         int32 TargetRank = FilteredRanks[idx];
-        int32 DynamicTimeout = CalculateDynamicTimeout(FilteredSizes.IsValidIndex(idx) ? FilteredSizes[idx] : int64(2097152));
-        DynamicTimeout = FMath::Min(DynamicTimeout * 2, 120000); // Double timeout on retry
+        int64 FileSize = FilteredSizes.IsValidIndex(idx) ? FilteredSizes[idx] : int64(2097152);
+        int32 DynamicTimeout = FMath::Min(CalculateDynamicTimeout(FileSize) * 2, 120000);
+
+        FailedFileIndices.RemoveAt(i);
+        --i;
+        PipelineActive++;
+        Spawned++;
 
         TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThis = this;
-        Async(EAsyncExecution::Thread, [WeakSubsystem, WeakThis, Filename, TargetRank, DynamicTimeout, idx]()
+        TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = WeakSubsystemCopy;
+        AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, WeakThis, Filename, TargetRank, DynamicTimeout, idx]()
             {
                 if (!WeakSubsystem.IsValid() || !WeakThis.IsValid()) return;
 
@@ -936,6 +956,61 @@ void AJUSYNCFileSpawnerActor::RetryFailedDownloads()
                     },
                     TStatId(), nullptr, ENamedThreads::GameThread);
             });
+    }
+}
+
+// ============================================================================
+// DEPTH-GATED CHAIN HELPERS
+// ============================================================================
+
+void AJUSYNCFileSpawnerActor::RetryRemainingFiles()
+{
+    if (FailedFileIndices.Num() == 0) return;
+    if (CurrentRetryCount >= MaxRetries) return;
+
+    RetryFailedDownloads();
+}
+
+void AJUSYNCFileSpawnerActor::ChainRefreshNext()
+{
+    if (RefreshRemainingFiles.Num() == 0) return;
+
+    int32 AvailableSpots = FMath::Max(0, PipelineDepth - PipelineActive);
+    int32 Spawned = 0;
+
+    for (int32 i = 0; i < RefreshRemainingFiles.Num() && Spawned < AvailableSpots; ++i)
+    {
+        const auto& Entry = RefreshRemainingFiles[i];
+        RefreshRemainingFiles.RemoveAt(i);
+        --i;
+
+        PipelineActive++;
+        RefreshActive++;
+
+        UJUSYNCSubsystem* Subsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
+        if (!Subsystem) return;
+
+        TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThis = this;
+        TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
+        FString Fname = Entry.Key;
+        int32 Rank = Entry.Value;
+
+        AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, WeakThis, Fname, Rank]()
+            {
+                if (!WeakSubsystem.IsValid() || !WeakThis.IsValid()) return;
+
+                TArray<uint8> FileData;
+                bool bSuccess = WeakSubsystem->RequestFile(Fname, Rank, 30000, FileData);
+
+                FFunctionGraphTask::CreateAndDispatchWhenReady(
+                    [WeakThis, Fname, FileData, bSuccess, Rank]()
+                    {
+                        if (!WeakThis.IsValid()) return;
+                        WeakThis->OnSingleFileDownloaded(Fname, FileData, bSuccess, -1, Rank);
+                    },
+                    TStatId(), nullptr, ENamedThreads::GameThread);
+            });
+        Spawned++;
     }
 }
 
@@ -1062,7 +1137,6 @@ void AJUSYNCFileSpawnerActor::HandleCommitCompleteNotification()
     RefreshedFiles.Empty();
     UE_LOG(LogTemp, Display, TEXT("[LiveUpdate] Commit complete - re-fetching file list"));
 
-    // Capture subsystem on game thread (lookup fails on background threads)
     UJUSYNCSubsystem* Subsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
     if (!Subsystem || !Subsystem->IsBrokerConnected())
     {
@@ -1074,7 +1148,7 @@ void AJUSYNCFileSpawnerActor::HandleCommitCompleteNotification()
     TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThis = this;
     TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
 
-    Async(EAsyncExecution::Thread, [WeakSubsystem, WeakThis]()
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, WeakThis]()
     {
         if (!WeakSubsystem.IsValid() || !WeakThis.IsValid()) return;
 
@@ -1087,87 +1161,72 @@ void AJUSYNCFileSpawnerActor::HandleCommitCompleteNotification()
             [WeakThis, NewFiles, NewSizes, NewRanks, bSuccess]()
             {
                 if (!WeakThis.IsValid() || !bSuccess || NewFiles.Num() == 0)
-            {
-                if (WeakThis.IsValid()) WeakThis->bCommitDiffInProgress = false;
-                return;
-            }
-
-                // Find files that are new or changed
-                TMap<FString, int64> OldSizes;
-                for (int32 i = 0; i < WeakThis->FilteredFiles.Num(); ++i)
                 {
-                    OldSizes.Add(WeakThis->FilteredFiles[i],
-                                 WeakThis->FilteredSizes.IsValidIndex(i) ? WeakThis->FilteredSizes[i] : 0);
+                    if (WeakThis.IsValid()) WeakThis->bCommitDiffInProgress = false;
+                    return;
                 }
 
-                int32 ChangedCount = 0;
-                int32 NewCount = 0;
-                int32 SkippedCount = 0;
-                TArray<FString> ChangedFiles;
-
-                for (int32 i = 0; i < NewFiles.Num(); ++i)
-                {
-                    const FString& Fname = NewFiles[i];
-                    int64 NewSize = NewSizes.IsValidIndex(i) ? NewSizes[i] : 0;
-                    int32 Rank = NewRanks.IsValidIndex(i) ? NewRanks[i] : 0;
-
-                    // Only refresh USD clip files — skip manifests, root scenes, images, etc.
-                    if (!Fname.EndsWith(TEXT(".usda")))
-                    {
-                        SkippedCount++;
-                        continue;
-                    }
-                    if (Fname.StartsWith(TEXT("Session_")) || Fname == TEXT("scene.usda") ||
-                        Fname.Contains(TEXT("manifest")) || Fname.Contains(TEXT("images/")) ||
-                        Fname.Contains(TEXT("shared/")))
-                    {
-                        SkippedCount++;
-                        continue;
-                    }
-
-                    int64 OldSize = 0;
-                    int64* pOldSize = OldSizes.Find(Fname);
-                    bool bFound = pOldSize != nullptr;
-                    if (bFound) OldSize = *pOldSize;
-
-                    if (!bFound || NewSize != OldSize)
-                    {
-                        if (!bFound) NewCount++;
-                        else ChangedCount++;
-                        ChangedFiles.Add(Fname);
-                        UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Detected change: '%s' (old: %lld, new: %lld)"),
-                               *Fname, static_cast<long long>(OldSize), static_cast<long long>(NewSize));
-                        WeakThis->RefreshSingleFile(Fname, Rank);
-                    }
-                }
-
-                // Show summary on screen
-                int32 TotalChanges = ChangedCount + NewCount;
-                if (TotalChanges > 0)
-                {
-                    FString Summary = FString::Printf(TEXT("[LiveUpdate] %d changed, %d new, %d skipped"), ChangedCount, NewCount, SkippedCount);
-                    if (ChangedFiles.Num() <= 3)
-                    {
-                        for (const FString& F : ChangedFiles)
-                            Summary += FString::Printf(TEXT("\n  - %s"), *F);
-                    }
-                    else
-                    {
-                        for (int32 i = 0; i < 3 && i < ChangedFiles.Num(); ++i)
-                            Summary += FString::Printf(TEXT("\n  - %s"), *ChangedFiles[i]);
-                        Summary += FString::Printf(TEXT("\n  ... and %d more"), ChangedFiles.Num() - 3);
-                    }
-                    GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Orange, Summary);
-                }
-
-                // Update stored file lists
-                WeakThis->RawFileList = NewFiles;
-                WeakThis->RawFileSizes = NewSizes;
-                WeakThis->RawFileRanks = NewRanks;
-                WeakThis->bCommitDiffInProgress = false;
+                WeakThis->DiffAndRefreshFileList(NewFiles, NewSizes, NewRanks, false);
             },
             TStatId(), nullptr, ENamedThreads::GameThread);
     });
+}
+
+void AJUSYNCFileSpawnerActor::DiffAndRefreshFileList(const TArray<FString>& NewFiles, const TArray<int64>& NewSizes, const TArray<int32>& NewRanks, bool bIsManual)
+{
+    TMap<FString, int64> OldSizes;
+    for (int32 i = 0; i < FilteredFiles.Num(); ++i)
+    {
+        OldSizes.Add(FilteredFiles[i], FilteredSizes.IsValidIndex(i) ? FilteredSizes[i] : 0);
+    }
+
+    int32 ChangedCount = 0;
+    int32 NewCount = 0;
+    int32 SkippedCount = 0;
+    TArray<FString> ChangedFiles;
+
+    for (int32 i = 0; i < NewFiles.Num(); ++i)
+    {
+        const FString& Fname = NewFiles[i];
+        int64 NewSize = NewSizes.IsValidIndex(i) ? NewSizes[i] : 0;
+        int32 Rank = NewRanks.IsValidIndex(i) ? NewRanks[i] : 0;
+
+        if (!Fname.EndsWith(TEXT(".usda"))) { SkippedCount++; continue; }
+        if (bIsManual == false && (Fname.StartsWith(TEXT("Session_")) || Fname == TEXT("scene.usda") ||
+            Fname.Contains(TEXT("manifest")) || Fname.Contains(TEXT("images/")) || Fname.Contains(TEXT("shared/"))))
+        { SkippedCount++; continue; }
+
+        int64 OldSize = 0;
+        int64* pOldSize = OldSizes.Find(Fname);
+        bool bFound = pOldSize != nullptr;
+        if (bFound) OldSize = *pOldSize;
+
+        if (!bFound || NewSize != OldSize)
+        {
+            if (!bFound) NewCount++; else ChangedCount++;
+            ChangedFiles.Add(Fname);
+            RefreshRemainingFiles.Add(TPair<FString, int32>(Fname, Rank));
+        }
+    }
+
+    FString Tag = bIsManual ? TEXT("[ManualRefresh]") : TEXT("[LiveUpdate]");
+    FString Summary = FString::Printf(TEXT("%s %d changed, %d new, %d skipped"), *Tag, ChangedCount, NewCount, SkippedCount);
+    UE_LOG(LogTemp, Display, TEXT("%s"), *Summary);
+    GEngine->AddOnScreenDebugMessage(-1, 4.0f, bIsManual ? FColor::Green : FColor::Orange, Summary);
+
+    if (ChangedFiles.Num() > 0)
+    {
+        RawFileList = NewFiles;
+        RawFileSizes = NewSizes;
+        RawFileRanks = NewRanks;
+        FilteredFiles = NewFiles;
+        FilteredSizes = NewSizes;
+        FilteredRanks = NewRanks;
+    }
+
+    RefreshActive = 0;
+    ChainRefreshNext();
+    bCommitDiffInProgress = false;
 }
 
 void AJUSYNCFileSpawnerActor::ManualRefresh()
@@ -1189,11 +1248,12 @@ void AJUSYNCFileSpawnerActor::ManualRefresh()
     }
 
     bCommitDiffInProgress = true;
+    RefreshedFiles.Empty();
 
     TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThis = this;
     TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
 
-    Async(EAsyncExecution::Thread, [WeakSubsystem, WeakThis]()
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, WeakThis]()
     {
         if (!WeakSubsystem.IsValid() || !WeakThis.IsValid()) return;
 
@@ -1211,74 +1271,7 @@ void AJUSYNCFileSpawnerActor::ManualRefresh()
                     return;
                 }
 
-                TMap<FString, int64> OldSizes;
-                for (int32 i = 0; i < WeakThis->FilteredFiles.Num(); ++i)
-                {
-                    OldSizes.Add(WeakThis->FilteredFiles[i],
-                                 WeakThis->FilteredSizes.IsValidIndex(i) ? WeakThis->FilteredSizes[i] : 0);
-                }
-
-                int32 ChangedCount = 0;
-                int32 NewCount = 0;
-                int32 SkippedCount = 0;
-                TArray<FString> ChangedFiles;
-
-                for (int32 i = 0; i < NewFiles.Num(); ++i)
-                {
-                    const FString& F = NewFiles[i];
-                    int64 S = NewSizes.IsValidIndex(i) ? NewSizes[i] : 0;
-                    int32 R = NewRanks.IsValidIndex(i) ? NewRanks[i] : 0;
-
-                    if (!F.EndsWith(TEXT(".usda"))) continue;
-
-                    auto It = OldSizes.Find(F);
-                    if (It && *It == S)
-                    {
-                        SkippedCount++;
-                        continue;
-                    }
-
-                    if (!It)
-                    {
-                        NewCount++;
-                        UE_LOG(LogTemp, Display, TEXT("[ManualRefresh] New file detected: '%s' (rank %d, %lld bytes)"), *F, R, (long long)S);
-                    }
-                    else
-                    {
-                        ChangedCount++;
-                        UE_LOG(LogTemp, Display, TEXT("[ManualRefresh] Changed file: '%s' (rank %d, %lld -> %lld bytes)"), *F, R, (long long)*It, (long long)S);
-                    }
-
-                    ChangedFiles.Add(F);
-                }
-
-                FString Summary = FString::Printf(TEXT("[ManualRefresh] %d changed, %d new, %d skipped"), ChangedCount, NewCount, SkippedCount);
-                UE_LOG(LogTemp, Display, TEXT("*%s"), *Summary);
-                GEngine->AddOnScreenDebugMessage(-1, 4.0f, FColor::Green, Summary);
-
-                if (ChangedFiles.Num() > 0)
-                {
-                    // Update filtered lists
-                    WeakThis->FilteredFiles = NewFiles;
-                    WeakThis->FilteredSizes = NewSizes;
-                    WeakThis->FilteredRanks = NewRanks;
-
-                    for (const FString& F : ChangedFiles)
-                    {
-                        int32 TargetRank = 0;
-                        for (int32 i = 0; i < NewFiles.Num(); ++i)
-                        {
-                            if (NewFiles[i] == F)
-                            {
-                                TargetRank = NewRanks.IsValidIndex(i) ? NewRanks[i] : 0;
-                                break;
-                            }
-                        }
-                        WeakThis->RefreshSingleFile(F, TargetRank);
-                    }
-                }
-
-                WeakThis->bCommitDiffInProgress = false;
+                WeakThis->DiffAndRefreshFileList(NewFiles, NewSizes, NewRanks, true);
             },
             TStatId(), nullptr, ENamedThreads::GameThread);
     });
@@ -1386,7 +1379,7 @@ bool AJUSYNCFileSpawnerActor::RefreshSingleFile(const FString& Filename, int32 T
     FString FilenameCopy = Filename;
     int32 RankCopy = TargetRank;
 
-    Async(EAsyncExecution::Thread, [WeakSubsystem, WeakThis, FilenameCopy, RankCopy]()
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, WeakThis, FilenameCopy, RankCopy]()
     {
         if (!WeakSubsystem.IsValid() || !WeakThis.IsValid()) return;
 
