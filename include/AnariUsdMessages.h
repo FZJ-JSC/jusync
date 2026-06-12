@@ -41,7 +41,8 @@ enum class ZmqMessageType : uint32_t {
     
     // Push notifications (Worker → Broker → Laptop)
     NOTIFY_FILE_UPDATE = 300,  // Notification that a file has been updated
-    NOTIFY_COMMIT_COMPLETE = 301  // Notification that scene commit is complete
+    NOTIFY_COMMIT_COMPLETE = 301,  // Notification that scene commit is complete
+    NOTIFY_FILE_UPDATE_V2 = 302  // V2: includes hashPrev128 + hasOldData for diff streaming
 };
 
 /**
@@ -340,7 +341,9 @@ struct ZmqPropertyResponse {
 
 /**
  * File Notification Message Structure
- * Sent from broker to client as push notification (NOTIFY_FILE_UPDATE=300, NOTIFY_COMMIT_COMPLETE=301)
+ * Sent from broker to client as push notification.
+ * V1 (type 300/301): fields above hashPrev128 are valid.
+ * V2 (type 302): hashPrev128[2] + hasOldData also populated for diff streaming.
  */
 #pragma pack(push, 1)
 struct ZmqFileNotification {
@@ -350,7 +353,9 @@ struct ZmqFileNotification {
     char filename[256];        // Filename that was updated
     uint64_t file_size;        // Current file size
     uint64_t timestamp;        // Unix timestamp of update
-    uint64_t hash128[2];       // XXH3-128 hash of file data (from broker)
+    uint64_t hash128[2];       // XXH3-128 hash of new file data (from broker)
+    uint64_t hashPrev128[2];   // XXH3-128 hash of old file data (0 if first time)
+    bool hasOldData;           // true if hashPrev128 is valid (for delta streaming)
 
     ZmqFileNotification() {
         memset(this, 0, sizeof(ZmqFileNotification));
@@ -434,6 +439,7 @@ namespace MessageUtils {
 
     inline bool isNotificationType(uint32_t type) {
         return type == static_cast<uint32_t>(ZmqMessageType::NOTIFY_FILE_UPDATE) ||
+               type == static_cast<uint32_t>(ZmqMessageType::NOTIFY_FILE_UPDATE_V2) ||
                type == static_cast<uint32_t>(ZmqMessageType::NOTIFY_COMMIT_COMPLETE);
     }
     
@@ -459,6 +465,7 @@ namespace MessageUtils {
             case ZmqMessageType::RESP_ERROR: return "RESP_ERROR";
             case ZmqMessageType::RESP_PROPERTY: return "RESP_PROPERTY";
             case ZmqMessageType::NOTIFY_FILE_UPDATE: return "NOTIFY_FILE_UPDATE";
+            case ZmqMessageType::NOTIFY_FILE_UPDATE_V2: return "NOTIFY_FILE_UPDATE_V2";
             case ZmqMessageType::NOTIFY_COMMIT_COMPLETE: return "NOTIFY_COMMIT_COMPLETE";
             default: return "UNKNOWN";
         }

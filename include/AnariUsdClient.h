@@ -59,12 +59,17 @@ public:
     using FileListWithSizesCallback = std::function<void(const std::vector<FileInfo>& files)>;
     using ErrorCallback = std::function<void(const std::string& error)>;
     
-    // Notification callback types (for live update support)
+    // Notification callback types (for live update support, V2-aware)
     using NotificationCallback = std::function<void(uint32_t messageType,
                                                      int32_t sourceRank,
                                                      const std::string& filename,
                                                      uint64_t fileSize,
-                                                     uint64_t timestamp)>;
+                                                     uint64_t timestamp,
+                                                     uint64_t hashLo,
+                                                     uint64_t hashHi,
+                                                     uint64_t hashPrevLo,
+                                                     uint64_t hashPrevHi,
+                                                     bool hasOldData)>;
 
     // Worker status callback types
     using WorkerStatusCallback = std::function<void(int32_t rank,

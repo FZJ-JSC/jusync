@@ -1640,7 +1640,7 @@ void RegisterMessageCallback_C(MessageReceivedCallback_C callback) {
 }
 
 /**
- * Register callback for broker push notifications (NOTIFY_FILE_UPDATE, NOTIFY_COMMIT_COMPLETE)
+ * Register callback for broker push notifications (NOTIFY_FILE_UPDATE, NOTIFY_COMMIT_COMPLETE, V2)
  */
 void RegisterNotificationCallback_C(NotificationCallback_C callback) {
     if (!g_middleware) {
@@ -1648,11 +1648,15 @@ void RegisterNotificationCallback_C(NotificationCallback_C callback) {
         return;
     }
     if (callback) {
-        MIDDLEWARE_LOG_INFO("RegisterNotificationCallback_C: registering notification callback");
+        MIDDLEWARE_LOG_INFO("RegisterNotificationCallback_C: registering notification callback (V2-aware)");
         g_middleware->setNotificationCallback([callback](uint32_t messageType, int32_t sourceRank,
-                                                           const std::string& filename,
-                                                           uint64_t fileSize, uint64_t timestamp) {
-            callback(messageType, sourceRank, filename.c_str(), fileSize, timestamp);
+                                                            const std::string& filename,
+                                                            uint64_t fileSize, uint64_t timestamp,
+                                                            uint64_t hashLo, uint64_t hashHi,
+                                                            uint64_t hashPrevLo, uint64_t hashPrevHi,
+                                                            bool hasOldData) {
+            callback(messageType, sourceRank, filename.c_str(), fileSize, timestamp,
+                     hashLo, hashHi, hashPrevLo, hashPrevHi, hasOldData);
         });
     } else {
         MIDDLEWARE_LOG_INFO("RegisterNotificationCallback_C: clearing notification callback");

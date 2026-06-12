@@ -171,12 +171,17 @@ public:
     int  registerMessageCallback(MessageCallback cb);
     void unregisterMessageCallback(int id);
 
-    /* NEW: Notification callback for live updates (NOTIFY_FILE_UPDATE, NOTIFY_COMMIT_COMPLETE) */
+    /* Notification callback for live updates (NOTIFY_FILE_UPDATE, NOTIFY_COMMIT_COMPLETE, V2 types) */
     using NotificationCallback = std::function<void(uint32_t messageType,
                                                      int32_t sourceRank,
                                                      const std::string& filename,
                                                      uint64_t fileSize,
-                                                     uint64_t timestamp)>;
+                                                     uint64_t timestamp,
+                                                     uint64_t hashLo,       // hash128[0] of new data
+                                                     uint64_t hashHi,       // hash128[1] of new data
+                                                     uint64_t hashPrevLo,   // hashPrev128[0] of old data
+                                                     uint64_t hashPrevHi,   // hashPrev128[1] of old data
+                                                     bool hasOldData)>;     // true if hashPrev128 is valid
     void setNotificationCallback(NotificationCallback cb);
 
     /* receiver thread */

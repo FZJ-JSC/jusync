@@ -176,16 +176,29 @@ extern "C" void MessageReceivedCallback_Static(const char* message)
 }
 
 extern "C" void NotificationCallback_Static(uint32_t messageType, int32_t sourceRank,
-                                             const char* filename, uint64_t fileSize, uint64_t timestamp)
+                                              const char* filename, uint64_t fileSize, uint64_t timestamp,
+                                              uint64_t hashLo, uint64_t hashHi,
+                                              uint64_t hashPrevLo, uint64_t hashPrevHi,
+                                              bool hasOldData)
 {
-    FString NotifType = (messageType == 301) ? TEXT("NOTIFY_COMMIT_COMPLETE") : TEXT("NOTIFY_FILE_UPDATE");
-    UE_LOG(LogJUSYNC, Display, TEXT("=== ZMQ NOTIFICATION: %s (rank %d, file '%s', %llu bytes) ==="),
+    FString NotifType = TEXT("NOTIFY_UNKNOWN");
+    if (messageType == 302)      NotifType = TEXT("NOTIFY_FILE_UPDATE_V2");
+    else if (messageType == 301) NotifType = TEXT("NOTIFY_COMMIT_COMPLETE");
+    else if (messageType == 300) NotifType = TEXT("NOTIFY_FILE_UPDATE");
+
+    UE_LOG(LogJUSYNC, Display, TEXT("=== ZMQ NOTIFICATION: %s (rank %d, file '%s', %llu bytes, hash %llx:%llx, old %llx:%llx, diff=%d) ==="),
            *NotifType, sourceRank, filename ? UTF8_TO_TCHAR(filename) : TEXT("(none)"),
-           static_cast<unsigned long long>(timestamp));
+           static_cast<unsigned long long>(fileSize),
+           static_cast<unsigned long long>(hashLo),
+           static_cast<unsigned long long>(hashHi),
+           static_cast<unsigned long long>(hashPrevLo),
+           static_cast<unsigned long long>(hashPrevHi),
+           hasOldData ? 1 : 0);
 
     FString FilenameCopy = filename ? FString(UTF8_TO_TCHAR(filename)) : TEXT("");
 
-    AsyncTask(ENamedThreads::GameThread, [FilenameCopy, messageType, sourceRank, fileSize, timestamp]()
+    AsyncTask(ENamedThreads::GameThread, [FilenameCopy, messageType, sourceRank, fileSize, timestamp,
+                                           hashLo, hashHi, hashPrevLo, hashPrevHi, hasOldData]()
     {
         UJUSYNCSubsystem* Subsystem = g_SubsystemInstance.load();
         if (!Subsystem)
@@ -194,15 +207,30 @@ extern "C" void NotificationCallback_Static(uint32_t messageType, int32_t source
             return;
         }
 
+        // Determine notification type
+        EJUSYNCNotificationType NotifType;
+        switch (messageType)
+        {
+            case 302:  NotifType = EJUSYNCNotificationType::FileUpdateV2; break;
+            case 301:  NotifType = EJUSYNCNotificationType::CommitComplete; break;
+            case 300:  default:  NotifType = EJUSYNCNotificationType::FileUpdate; break;
+        }
+
         FJUSYNCNotification Notification;
-        Notification.Type = (messageType == 301) ? EJUSYNCNotificationType::CommitComplete : EJUSYNCNotificationType::FileUpdate;
-        Notification.SourceRank = sourceRank;
-        Notification.Filename = FilenameCopy;
-        Notification.FileSize = static_cast<int64>(fileSize);
-        Notification.Timestamp = static_cast<int64>(timestamp);
+        Notification.Type         = NotifType;
+        Notification.SourceRank   = sourceRank;
+        Notification.Filename     = FilenameCopy;
+        Notification.FileSize     = static_cast<int64>(fileSize);
+        Notification.Timestamp    = static_cast<int64>(timestamp);
+        Notification.HashLo       = hashLo;
+        Notification.HashHi       = hashHi;
+        Notification.HashPrevLo   = hashPrevLo;
+        Notification.HashPrevHi   = hashPrevHi;
+        Notification.bHasOldData  = hasOldData;
 
         UE_LOG(LogJUSYNC, Log, TEXT("Broadcasting notification to Blueprint: %s '%s'"),
-               (Notification.Type == EJUSYNCNotificationType::CommitComplete) ? TEXT("CommitComplete") : TEXT("FileUpdate"),
+               (NotifType == EJUSYNCNotificationType::FileUpdateV2) ? TEXT("FileUpdateV2") :
+               (NotifType == EJUSYNCNotificationType::CommitComplete) ? TEXT("CommitComplete") : TEXT("FileUpdate"),
                *Notification.Filename);
         Subsystem->OnNotificationReceived.Broadcast(Notification);
     });

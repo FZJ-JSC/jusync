@@ -1302,18 +1302,36 @@ void AnariUsdClient::handleNotification(const std::vector<uint8_t>& data) {
         return;
     }
 
-    std::string typeName = (notif->message_type == static_cast<uint32_t>(ZmqMessageType::NOTIFY_COMMIT_COMPLETE))
-        ? "NOTIFY_COMMIT_COMPLETE" : "NOTIFY_FILE_UPDATE";
-    MIDDLEWARE_LOG_INFO("Received %s from rank %d: '%s' (%llu bytes, timestamp %llu)",
+    std::string typeName = "NOTIFY_UNKNOWN";
+    if (notif->message_type == static_cast<uint32_t>(ZmqMessageType::NOTIFY_COMMIT_COMPLETE))
+        typeName = "NOTIFY_COMMIT_COMPLETE";
+    else if (notif->message_type == static_cast<uint32_t>(ZmqMessageType::NOTIFY_FILE_UPDATE_V2))
+        typeName = "NOTIFY_FILE_UPDATE_V2";
+    else if (notif->message_type == static_cast<uint32_t>(ZmqMessageType::NOTIFY_FILE_UPDATE))
+        typeName = "NOTIFY_FILE_UPDATE";
+
+    uint64_t hashLo          = notif->hash128[0];
+    uint64_t hashHi          = notif->hash128[1];
+    uint64_t hashPrevLo      = (notif->hashPrev128 && notif->hasOldData) ? notif->hashPrev128[0] : 0;
+    uint64_t hashPrevHi      = (notif->hashPrev128 && notif->hasOldData) ? notif->hashPrev128[1] : 0;
+    bool     hasOldDataFlag  = notif->hasOldData;
+
+    MIDDLEWARE_LOG_INFO("Received %s from rank %d: '%s' (%llu bytes, hash %llx:%llx, old %llx:%llx, diff=%d)",
                         typeName.c_str(), notif->source_rank, notif->getFilename().c_str(),
                         static_cast<unsigned long long>(notif->file_size),
-                        static_cast<unsigned long long>(notif->timestamp));
+                        static_cast<unsigned long long>(notif->timestamp),
+                        static_cast<unsigned long long>(hashLo),
+                        static_cast<unsigned long long>(hashHi),
+                        static_cast<unsigned long long>(hashPrevLo),
+                        static_cast<unsigned long long>(hashPrevHi),
+                        notif->hasOldData ? 1 : 0);
 
     std::lock_guard<std::mutex> lock(notificationCallbackMutex);
     if (notificationCallback) {
         try {
             notificationCallback(notif->message_type, notif->source_rank,
-                                 notif->getFilename(), notif->file_size, notif->timestamp);
+                                  notif->getFilename(), notif->file_size, notif->timestamp,
+                                  hashLo, hashHi, hashPrevLo, hashPrevHi, hasOldDataFlag);
         } catch (const std::exception& e) {
             MIDDLEWARE_LOG_ERROR("Exception in notification callback: %s", e.what());
         } catch (...) {

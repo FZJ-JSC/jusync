@@ -315,12 +315,13 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCWorkerStatusReceived, const T
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCWorkerCountReceived, int32, WorkerCount);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCPointCloudReceived, const TArray<FJUSYNCPointCloudData>&, PointCloudData);
 
-// Live update notification from broker (NOTIFY_FILE_UPDATE=300, NOTIFY_COMMIT_COMPLETE=301)
+// Live update notification from broker (NOTIFY_FILE_UPDATE=300, NOTIFY_COMMIT_COMPLETE=301, V2=302)
 UENUM(BlueprintType)
 enum class EJUSYNCNotificationType : uint8
 {
-    FileUpdate    UMETA(DisplayName = "File Updated"),
-    CommitComplete UMETA(DisplayName = "Commit Complete")
+    FileUpdate     UMETA(DisplayName = "File Updated"),
+    CommitComplete UMETA(DisplayName = "Commit Complete"),
+    FileUpdateV2   UMETA(DisplayName = "File Updated V2 (with old hash)")
 };
 
 USTRUCT(BlueprintType)
@@ -343,8 +344,25 @@ struct JUSYNC_API FJUSYNCNotification
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
     int64 Timestamp;
 
+    // V2 fields: hash tracking for diff streaming
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Hash")
+    uint64 HashLo;          // hash128[0] of new data
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Hash")
+    uint64 HashHi;          // hash128[1] of new data
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Hash")
+    uint64 HashPrevLo;      // hashPrev128[0] of old data (0 if first time)
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Hash")
+    uint64 HashPrevHi;      // hashPrev128[1] of old data (0 if first time)
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Hash")
+    bool bHasOldData;       // true if HashPrev128 is valid
+
     FJUSYNCNotification()
-        : Type(EJUSYNCNotificationType::FileUpdate), SourceRank(-1), FileSize(0), Timestamp(0) {}
+        : Type(EJUSYNCNotificationType::FileUpdate), SourceRank(-1), FileSize(0), Timestamp(0),
+          HashLo(0), HashHi(0), HashPrevLo(0), HashPrevHi(0), bHasOldData(false) {}
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCNotificationReceived, const FJUSYNCNotification&, Notification);

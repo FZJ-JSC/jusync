@@ -567,17 +567,27 @@ typedef enum {
  * Callback function type for broker notifications (file updates, commit complete)
  * Called from the ZMQ dispatcher thread - keep processing minimal
  *
- * @param message_type CNotificationType_FileUpdate or CNotificationType_CommitComplete
+ * @param message_type CNotificationType_FileUpdate, _CommitComplete, or _FileUpdateV2
  * @param source_rank  Rank that sent the notification
  * @param filename     Name of the file that was updated (NULL-terminated UTF-8)
  * @param file_size    Current file size in bytes
  * @param timestamp    Unix timestamp of the update
+ * @param hashLo       hash128[0] of new data
+ * @param hashHi       hash128[1] of new data
+ * @param hashPrevLo   hashPrev128[0] of old data (0 if no old data)
+ * @param hashPrevHi   hashPrev128[1] of old data (0 if no old data)
+ * @param hasOldData   true if hashPrev128 is valid
  */
 typedef void (*NotificationCallback_C)(uint32_t message_type,
-                                        int32_t source_rank,
-                                        const char* filename,
-                                        uint64_t file_size,
-                                        uint64_t timestamp);
+                                         int32_t source_rank,
+                                         const char* filename,
+                                         uint64_t file_size,
+                                         uint64_t timestamp,
+                                         uint64_t hashLo,
+                                         uint64_t hashHi,
+                                         uint64_t hashPrevLo,
+                                         uint64_t hashPrevHi,
+                                         bool hasOldData);
 
 /**
  * Register callback for broker push notifications (NOTIFY_FILE_UPDATE, NOTIFY_COMMIT_COMPLETE)
