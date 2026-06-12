@@ -20,24 +20,10 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(const FJUSYNCPointCloudData& PC
 {
     if (!PCData.IsValid() || !Owner.IsValid()) return;
 
-    FConversionEntry Entry;
-    Entry.Positions = PCData.Positions;
-    Entry.Colors = PCData.Colors;
-    Entry.Widths = PCData.Widths;
-    Entry.bHasColors = PCData.HasColors();
-    Entry.PointCount = PCData.PointCount;
-    Entry.ElementName = PCData.ElementName;
-    Entry.Rank = InRank;
-
-    {
-        FScopeLock Lock(&QueueMutex);
-        ConversionQueue.Add(MoveTemp(Entry));
-    }
-
     UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: queued PC '%s' for async conversion (%d points)"),
            *PCData.ElementName, PCData.PointCount);
 
-    // Spawn async task — doesn't block the game thread
+    // Spawn async task — doesn't block the game thread (copy once, cannot MoveTemp on const&)
     AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
         [this, PointCount = PCData.PointCount, Positions = PCData.Positions,
           Colors = PCData.Colors, bHasColors = PCData.HasColors(),
@@ -75,7 +61,7 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(const FJUSYNCPointCloudData& PC
             {
                 Col = FColor::White;
             }
-            Points[i] = FLidarPointCloudPoint(Pos, Col, true, 0);
+            Points[i] = FLidarPointCloudPoint(Pos.X, Pos.Y, Pos.Z, Col.R / 255.f, Col.G / 255.f, Col.B / 255.f, Col.A / 255.f);
         }
 
         // Marshal to game thread
@@ -300,13 +286,13 @@ void FJUSYNCPointCloudSpawner::DestroyAllActors()
 {
     for (AActor* Actor : ActiveActors)
     {
-        if (Actor) Actor->Destroy();
+        if (Actor && Actor->IsValidLowLevel()) Actor->Destroy();
     }
     ActiveActors.Empty();
 
     for (AActor* Actor : AvailablePool)
     {
-        if (Actor) Actor->Destroy();
+        if (Actor && Actor->IsValidLowLevel()) Actor->Destroy();
     }
     AvailablePool.Empty();
 
@@ -348,7 +334,7 @@ void FJUSYNCPointCloudSpawner::RecolorGradientPendingActors()
             float Attr0 = RD->Widths[i];
             int32 LUTIdx = FMath::Clamp(FMath::RoundToInt(Attr0 * (LocalLUT.Num() - 1)), 0, LocalLUT.Num() - 1);
             FColor Col = LocalLUT[LUTIdx];
-            NewPoints[i] = FLidarPointCloudPoint(Pos, Col, true, 0);
+            NewPoints[i] = FLidarPointCloudPoint(Pos.X, Pos.Y, Pos.Z, Col.R / 255.f, Col.G / 255.f, Col.B / 255.f, Col.A / 255.f);
         }
 
         ULidarPointCloud* NewCloud = ULidarPointCloud::CreateFromData(NewPoints, false);

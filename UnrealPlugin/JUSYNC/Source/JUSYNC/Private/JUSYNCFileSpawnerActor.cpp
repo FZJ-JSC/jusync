@@ -153,7 +153,7 @@ void AJUSYNCFileSpawnerActor::ClearSpawnedActors()
     }
 
     for (AActor* Actor : SpawnedActors)
-        if (Actor) Actor->Destroy();
+        if (Actor && Actor->IsValidLowLevel()) Actor->Destroy();
     SpawnedActors.Empty();
     ActorsSpawned = 0;
     FileToActorMap.Empty();
