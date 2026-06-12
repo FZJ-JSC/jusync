@@ -344,18 +344,18 @@ struct JUSYNC_API FJUSYNCNotification
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
     int64 Timestamp;
 
-    // V2 fields: hash tracking for diff streaming
+    // V2 fields: hash tracking for diff streaming (int64 for UHT BlueprintType compat)
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Hash")
-    uint64 HashLo;          // hash128[0] of new data
+    int64 HashLo;           // hash128[0] of new data
 
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Hash")
-    uint64 HashHi;          // hash128[1] of new data
+    int64 HashHi;           // hash128[1] of new data
 
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Hash")
-    uint64 HashPrevLo;      // hashPrev128[0] of old data (0 if first time)
+    int64 HashPrevLo;       // hashPrev128[0] of old data (0 if first time)
 
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Hash")
-    uint64 HashPrevHi;      // hashPrev128[1] of old data (0 if first time)
+    int64 HashPrevHi;       // hashPrev128[1] of old data (0 if first time)
 
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Hash")
     bool bHasOldData;       // true if HashPrev128 is valid
