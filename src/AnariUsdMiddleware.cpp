@@ -390,7 +390,7 @@ public:
             outMeshData.clear();
             outMeshData.reserve(processorMeshData.size());
 
-            for (const auto& processorMesh : processorMeshData) {
+            for (auto& processorMesh : processorMeshData) {
                 MeshData publicMesh;
                 if (!convertMeshDataWithCollision(processorMesh, complexity, publicMesh)) {
                     MIDDLEWARE_LOG_WARNING("Failed to convert mesh data with collision: %s",
@@ -595,22 +595,22 @@ public:
 
 private:
     // ✅ NEW: Enhanced mesh conversion with collision support
-    bool convertMeshDataWithCollision(const UsdProcessor::MeshData& processorMeshData,
-                                     ECollisionComplexity complexity,
-                                     MeshData& publicMeshData) {
+    bool convertMeshDataWithCollision(UsdProcessor::MeshData& processorMeshData,
+                                      ECollisionComplexity complexity,
+                                      MeshData& publicMeshData) {
         try {
-            // Convert basic mesh data
-            publicMeshData.elementName = processorMeshData.elementName;
-            publicMeshData.typeName = processorMeshData.typeName;
+            // Convert basic mesh data — move strings (source consumed after conversion)
+            publicMeshData.elementName = std::move(processorMeshData.elementName);
+            publicMeshData.typeName = std::move(processorMeshData.typeName);
 
             // Convert points (glm::vec3 → flat float array)
             size_t pointCount = processorMeshData.points.size();
             publicMeshData.points.clear();
-            publicMeshData.points.reserve(pointCount * 3);
-            for (const auto& point : processorMeshData.points) {
-                publicMeshData.points.push_back(point.x);
-                publicMeshData.points.push_back(point.y);
-                publicMeshData.points.push_back(point.z);
+            publicMeshData.points.resize(pointCount * 3);
+            for (size_t i = 0; i < pointCount; ++i) {
+                const auto& p = processorMeshData.points[i];
+                float* out = publicMeshData.points.data() + i * 3;
+                out[0] = p.x; out[1] = p.y; out[2] = p.z;
             }
 
             // Direct copy for indices
@@ -618,19 +618,26 @@ private:
 
             // Convert normals (glm::vec3 → flat float array)
             publicMeshData.normals.clear();
-            publicMeshData.normals.reserve(processorMeshData.normals.size() * 3);
-            for (const auto& normal : processorMeshData.normals) {
-                publicMeshData.normals.push_back(normal.x);
-                publicMeshData.normals.push_back(normal.y);
-                publicMeshData.normals.push_back(normal.z);
+            {
+                size_t normalCount = processorMeshData.normals.size();
+                publicMeshData.normals.resize(normalCount * 3);
+                for (size_t i = 0; i < normalCount; ++i) {
+                    const auto& n = processorMeshData.normals[i];
+                    float* out = publicMeshData.normals.data() + i * 3;
+                    out[0] = n.x; out[1] = n.y; out[2] = n.z;
+                }
             }
 
             // Convert UVs (glm::vec2 → flat float array)
             publicMeshData.uvs.clear();
-            publicMeshData.uvs.reserve(processorMeshData.uvs.size() * 2);
-            for (const auto& uv : processorMeshData.uvs) {
-                publicMeshData.uvs.push_back(uv.x);
-                publicMeshData.uvs.push_back(uv.y);
+            {
+                size_t uvCount = processorMeshData.uvs.size();
+                publicMeshData.uvs.resize(uvCount * 2);
+                for (size_t i = 0; i < uvCount; ++i) {
+                    const auto& u = processorMeshData.uvs[i];
+                    float* out = publicMeshData.uvs.data() + i * 2;
+                    out[0] = u.x; out[1] = u.y;
+                }
             }
 
             // Convert vertex colors (glm::vec4 → flat float array)
@@ -647,57 +654,44 @@ private:
 
                 if (isVertexInterp) {
                     // Direct per-vertex mapping
-                    publicMeshData.vertex_colors.reserve(colorCount * 4);
-                    for (const auto& color : processorMeshData.vertex_colors) {
-                        publicMeshData.vertex_colors.push_back(color.r);
-                        publicMeshData.vertex_colors.push_back(color.g);
-                        publicMeshData.vertex_colors.push_back(color.b);
-                        publicMeshData.vertex_colors.push_back(color.a);
+                    publicMeshData.vertex_colors.resize(colorCount * 4);
+                    for (size_t i = 0; i < colorCount; ++i) {
+                        const auto& c = processorMeshData.vertex_colors[i];
+                        float* out = publicMeshData.vertex_colors.data() + i * 4;
+                        out[0] = c.r; out[1] = c.g; out[2] = c.b; out[3] = c.a;
                     }
                 } else if (isUniformInterp) {
                     // Expand uniform (per-face) colors to per-vertex
-                    publicMeshData.vertex_colors.reserve(pointCount * 4);
                     std::vector<glm::vec4> vertexColors(pointCount, glm::vec4(1.0f));
-
                     for (size_t faceIdx = 0; faceIdx < faceCount; ++faceIdx) {
                         if (faceIdx >= colorCount) break;
                         const auto& faceColor = processorMeshData.vertex_colors[faceIdx];
-
-                        // Get the three vertex indices for this face
                         size_t i0 = processorMeshData.indices[faceIdx * 3 + 0];
                         size_t i1 = processorMeshData.indices[faceIdx * 3 + 1];
                         size_t i2 = processorMeshData.indices[faceIdx * 3 + 2];
-
-                        // Assign face color to all three vertices
                         if (i0 < pointCount) vertexColors[i0] = faceColor;
                         if (i1 < pointCount) vertexColors[i1] = faceColor;
                         if (i2 < pointCount) vertexColors[i2] = faceColor;
                     }
-
-                    // Flatten to float array
-                    for (const auto& color : vertexColors) {
-                        publicMeshData.vertex_colors.push_back(color.r);
-                        publicMeshData.vertex_colors.push_back(color.g);
-                        publicMeshData.vertex_colors.push_back(color.b);
-                        publicMeshData.vertex_colors.push_back(color.a);
+                    // Flatten to float array (direct index writes)
+                    publicMeshData.vertex_colors.resize(pointCount * 4);
+                    for (size_t i = 0; i < pointCount; ++i) {
+                        const auto& c = vertexColors[i];
+                        float* out = publicMeshData.vertex_colors.data() + i * 4;
+                        out[0] = c.r; out[1] = c.g; out[2] = c.b; out[3] = c.a;
                     }
                 } else {
                     // Fallback: treat as vertex colors with padding/truncation
                     MIDDLEWARE_LOG_WARNING("Color count mismatch - using fallback vertex mapping");
-                    publicMeshData.vertex_colors.reserve(pointCount * 4);
+                    publicMeshData.vertex_colors.resize(pointCount * 4);
+                    float* outData = publicMeshData.vertex_colors.data();
                     for (size_t i = 0; i < pointCount; ++i) {
+                        float* out = outData + i * 4;
                         if (i < colorCount) {
-                            const auto& color = processorMeshData.vertex_colors[i];
-                            publicMeshData.vertex_colors.push_back(color.r);
-                            publicMeshData.vertex_colors.push_back(color.g);
-                            publicMeshData.vertex_colors.push_back(color.b);
-                            publicMeshData.vertex_colors.push_back(color.a);
+                            const auto& c = processorMeshData.vertex_colors[i];
+                            out[0] = c.r; out[1] = c.g; out[2] = c.b; out[3] = c.a;
                         } else {
-                            // Default white for missing colors
-                            publicMeshData.vertex_colors.push_back(1.0f);
-                            publicMeshData.vertex_colors.push_back(1.0f);
-                            publicMeshData.vertex_colors.push_back(1.0f);
-                            publicMeshData.vertex_colors.push_back(1.0f);
+                            out[0] = 1.0f; out[1] = 1.0f; out[2] = 1.0f; out[3] = 1.0f;
                         }
                     }
                 }

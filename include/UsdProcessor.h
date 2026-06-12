@@ -527,10 +527,11 @@ private:
      * @return True if successful
      */
     bool resolveReferences(const tinyusdz::Stage& stage,
-                          const std::vector<uint8_t>& buffer,
-                          const std::string& fileName,
-                          std::vector<MeshData>& outMeshData,
-                          ProgressCallback progressCallback);
+                           const std::vector<uint8_t>& buffer,
+                           const std::string& fileName,
+                           std::vector<MeshData>& outMeshData,
+                           ProgressCallback progressCallback,
+                           const std::string* preExistingContent = nullptr);
 
     /**
      * Load referenced file and extract meshes

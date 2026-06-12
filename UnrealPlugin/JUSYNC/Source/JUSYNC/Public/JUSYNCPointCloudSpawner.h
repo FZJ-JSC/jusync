@@ -69,19 +69,7 @@ public:
     explicit FJUSYNCPointCloudSpawner(TWeakObjectPtr<UObject> InOwner);
 
 private:
-    struct FConversionEntry
-    {
-        TArray<FVector> Positions;
-        TArray<FColor> Colors;
-        TArray<float> Widths;
-        FString ElementName;
-        int32 PointCount;
-        bool bHasColors;
-        int32 Rank;
-    };
-
     TWeakObjectPtr<UObject> Owner;
-    TArray<FConversionEntry> ConversionQueue;
     TArray<FPointCloudReadyEntry> ReadyQueue;
     FCriticalSection QueueMutex;
     mutable FCriticalSection GradientMutex;

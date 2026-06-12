@@ -2,6 +2,7 @@
 
 #include "JUSYNCModule.h"
 #include "JUSYNCSubsystem.h"
+#include <cstring>
 #include "Engine/Engine.h"
 #include "Engine/Texture2D.h"
 #include "HAL/FileManager.h"
@@ -450,52 +451,24 @@ void UJUSYNCBlueprintLibrary::RequestTotalWorkerCountAsync(int32 TimeoutMs, cons
         return;
     }
 
-    // Capture subsystem pointer for validity checking
     TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
 
-    // Launch async request on a background thread using Unreal's Async system
-    Async(EAsyncExecution::Thread, [WeakSubsystem, TimeoutMs, OnComplete, OnError]()
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, TimeoutMs, OnComplete, OnError]()
         {
-            // Check if subsystem is still valid before making the request
-            if (!WeakSubsystem.IsValid())
-            {
-                UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem no longer valid, cancelling async request"));
-                return; // Game stopped, exit early
-            }
+            if (!WeakSubsystem.IsValid()) return;
 
             int32 TotalCount = 0;
-            bool bSuccess = false;
+            bool bSuccess = WeakSubsystem->RequestTotalWorkerCount(TimeoutMs, TotalCount);
 
-            // Make the broker request
-            if (WeakSubsystem.IsValid())
-            {
-                bSuccess = WeakSubsystem->RequestTotalWorkerCount(TimeoutMs, TotalCount);
-            }
+            if (!WeakSubsystem.IsValid()) return;
 
-            // Check again before calling back (game might have stopped during request)
-            if (!WeakSubsystem.IsValid())
-            {
-                UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem destroyed during async request, cancelling callback"));
-                return; // Game stopped, don't call callbacks
-            }
-
-            // Execute callback on game thread
-            if (IsInGameThread())
-            {
-                if (bSuccess) OnComplete.ExecuteIfBound(TotalCount);
-                else OnError.ExecuteIfBound(TEXT("Failed to retrieve total worker count"));
-            }
-            else
-            {
-                // Schedule on game thread
-                FFunctionGraphTask::CreateAndDispatchWhenReady(
-                    [bSuccess, TotalCount, OnComplete, OnError]()
-                    {
-                        if (bSuccess) OnComplete.ExecuteIfBound(TotalCount);
-                        else OnError.ExecuteIfBound(TEXT("Failed to retrieve total worker count"));
-                    },
-                    TStatId(), nullptr, ENamedThreads::GameThread);
-            }
+            FFunctionGraphTask::CreateAndDispatchWhenReady(
+                [bSuccess, TotalCount, OnComplete, OnError]()
+                {
+                    if (bSuccess) OnComplete.ExecuteIfBound(TotalCount);
+                    else OnError.ExecuteIfBound(TEXT("Failed to retrieve total worker count"));
+                },
+                TStatId(), nullptr, ENamedThreads::GameThread);
         });
 }
 
@@ -509,51 +482,24 @@ void UJUSYNCBlueprintLibrary::RequestWorkerCountAsync(int32 TimeoutMs, const FOn
         return;
     }
 
-    // Capture subsystem pointer for validity checking
     TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
 
-    // Launch async request on a background thread using Unreal's Async system
-    Async(EAsyncExecution::Thread, [WeakSubsystem, TimeoutMs, OnComplete, OnError]()
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, TimeoutMs, OnComplete, OnError]()
         {
-            // Check if subsystem is still valid before making the request
-            if (!WeakSubsystem.IsValid())
-            {
-                UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem no longer valid, cancelling async request"));
-                return; // Game stopped, exit early
-            }
+            if (!WeakSubsystem.IsValid()) return;
 
             int32 WorkerCount = 0;
-            bool bSuccess = false;
+            bool bSuccess = WeakSubsystem->RequestWorkerCount(TimeoutMs, WorkerCount);
 
-            // Make the broker request
-            if (WeakSubsystem.IsValid())
-            {
-                bSuccess = WeakSubsystem->RequestWorkerCount(TimeoutMs, WorkerCount);
-            }
+            if (!WeakSubsystem.IsValid()) return;
 
-            // Check again before calling back (game might have stopped during request)
-            if (!WeakSubsystem.IsValid())
-            {
-                UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem destroyed during async request, cancelling callback"));
-                return; // Game stopped, don't call callbacks
-            }
-
-            // Execute callback on game thread
-            if (IsInGameThread())
-            {
-                if (bSuccess) OnComplete.ExecuteIfBound(WorkerCount);
-                else OnError.ExecuteIfBound(TEXT("Failed to retrieve worker count"));
-            }
-            else
-            {
-                FFunctionGraphTask::CreateAndDispatchWhenReady(
-                    [bSuccess, WorkerCount, OnComplete, OnError]()
-                    {
-                        if (bSuccess) OnComplete.ExecuteIfBound(WorkerCount);
-                        else OnError.ExecuteIfBound(TEXT("Failed to retrieve worker count"));
-                    },
-                    TStatId(), nullptr, ENamedThreads::GameThread);
-            }
+            FFunctionGraphTask::CreateAndDispatchWhenReady(
+                [bSuccess, WorkerCount, OnComplete, OnError]()
+                {
+                    if (bSuccess) OnComplete.ExecuteIfBound(WorkerCount);
+                    else OnError.ExecuteIfBound(TEXT("Failed to retrieve worker count"));
+                },
+                TStatId(), nullptr, ENamedThreads::GameThread);
         });
 }
 
@@ -567,51 +513,24 @@ void UJUSYNCBlueprintLibrary::RequestWorkerStatusAsync(int32 TargetRank, int32 T
         return;
     }
 
-    // Capture subsystem pointer for validity checking
     TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
 
-    // Launch async request on a background thread using Unreal's Async system
-    Async(EAsyncExecution::Thread, [WeakSubsystem, TargetRank, TimeoutMs, OnComplete, OnError]()
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, TargetRank, TimeoutMs, OnComplete, OnError]()
         {
-            // Check if subsystem is still valid before making the request
-            if (!WeakSubsystem.IsValid())
-            {
-                UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem no longer valid, cancelling async request"));
-                return; // Game stopped, exit early
-            }
+            if (!WeakSubsystem.IsValid()) return;
 
             TArray<FJUSYNCWorkerStatus> WorkerStatus;
-            bool bSuccess = false;
+            bool bSuccess = WeakSubsystem->RequestWorkerStatus(TargetRank, TimeoutMs, WorkerStatus);
 
-            // Make the broker request
-            if (WeakSubsystem.IsValid())
-            {
-                bSuccess = WeakSubsystem->RequestWorkerStatus(TargetRank, TimeoutMs, WorkerStatus);
-            }
+            if (!WeakSubsystem.IsValid()) return;
 
-            // Check again before calling back (game might have stopped during request)
-            if (!WeakSubsystem.IsValid())
-            {
-                UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem destroyed during async request, cancelling callback"));
-                return; // Game stopped, don't call callbacks
-            }
-
-            // Execute callback on game thread
-            if (IsInGameThread())
-            {
-                if (bSuccess) OnComplete.ExecuteIfBound(WorkerStatus);
-                else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve worker status for rank %d"), TargetRank));
-            }
-            else
-            {
-                FFunctionGraphTask::CreateAndDispatchWhenReady(
-                    [bSuccess, WorkerStatus, TargetRank, OnComplete, OnError]()
-                    {
-                        if (bSuccess) OnComplete.ExecuteIfBound(WorkerStatus);
-                        else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve worker status for rank %d"), TargetRank));
-                    },
-                    TStatId(), nullptr, ENamedThreads::GameThread);
-            }
+            FFunctionGraphTask::CreateAndDispatchWhenReady(
+                [bSuccess, WorkerStatus, TargetRank, OnComplete, OnError]()
+                {
+                    if (bSuccess) OnComplete.ExecuteIfBound(WorkerStatus);
+                    else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve worker status for rank %d"), TargetRank));
+                },
+                TStatId(), nullptr, ENamedThreads::GameThread);
         });
 }
 
@@ -625,59 +544,30 @@ void UJUSYNCBlueprintLibrary::RequestFileListAsync(int32 TargetRank, int32 Timeo
         return;
     }
 
-    // Capture subsystem pointer for validity checking
     TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
 
-    // Launch async request on a background thread using Unreal's Async system
-    Async(EAsyncExecution::Thread, [WeakSubsystem, TargetRank, TimeoutMs, OnComplete, OnError]()
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, TargetRank, TimeoutMs, OnComplete, OnError]()
         {
-            // Check if subsystem is still valid before making the request
-            if (!WeakSubsystem.IsValid())
-            {
-                UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem no longer valid, cancelling async request"));
-                return; // Game stopped, exit early
-            }
+            if (!WeakSubsystem.IsValid()) return;
 
             TArray<FString> FileList;
-            bool bSuccess = false;
+            bool bSuccess = WeakSubsystem->RequestFileList(TargetRank, TimeoutMs, FileList);
 
-            // Make the broker request
-            if (WeakSubsystem.IsValid())
-            {
-                bSuccess = WeakSubsystem->RequestFileList(TargetRank, TimeoutMs, FileList);
-            }
-
-            // Store the retrieved file list for later retrieval (if successful)
             if (bSuccess && FileList.Num() > 0)
             {
                 FScopeLock Lock(&UJUSYNCBlueprintLibrary::LastFileListMutex);
                 UJUSYNCBlueprintLibrary::LastFileList = FileList;
-                UE_LOG(LogJUSYNC, Log, TEXT("Stored %d files in LastFileList"), FileList.Num());
             }
 
-            // Check again before calling back (game might have stopped during request)
-            if (!WeakSubsystem.IsValid())
-            {
-                UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem destroyed during async request, cancelling callback"));
-                return; // Game stopped, don't call callbacks
-            }
+            if (!WeakSubsystem.IsValid()) return;
 
-            // Execute callback on game thread
-            if (IsInGameThread())
-            {
-                if (bSuccess) OnComplete.ExecuteIfBound(FileList);
-                else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve file list from rank %d"), TargetRank));
-            }
-            else
-            {
-                FGraphEventRef Task = FFunctionGraphTask::CreateAndDispatchWhenReady(
-                    [bSuccess, FileList, TargetRank, OnComplete, OnError]()
-                    {
-                        if (bSuccess) OnComplete.ExecuteIfBound(FileList);
-                        else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve file list from rank %d"), TargetRank));
-                    },
-                    TStatId(), nullptr, ENamedThreads::GameThread);
-            }
+            FFunctionGraphTask::CreateAndDispatchWhenReady(
+                [bSuccess, FileList, TargetRank, OnComplete, OnError]()
+                {
+                    if (bSuccess) OnComplete.ExecuteIfBound(FileList);
+                    else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve file list from rank %d"), TargetRank));
+                },
+                TStatId(), nullptr, ENamedThreads::GameThread);
         });
 }
 
@@ -691,61 +581,32 @@ void UJUSYNCBlueprintLibrary::RequestFileListWithSizesAsync(int32 TargetRank, in
         return;
     }
 
-    // Capture subsystem pointer for validity checking
     TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
 
-    // Launch async request on a background thread using Unreal's Async system
-    Async(EAsyncExecution::Thread, [WeakSubsystem, TargetRank, TimeoutMs, OnComplete, OnError]()
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, TargetRank, TimeoutMs, OnComplete, OnError]()
         {
-            // Check if subsystem is still valid before making the request
-            if (!WeakSubsystem.IsValid())
-            {
-                UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem no longer valid, cancelling async request"));
-                return; // Game stopped, exit early
-            }
+            if (!WeakSubsystem.IsValid()) return;
 
             TArray<FString> FileList;
             TArray<int64> FileSizes;
-            bool bSuccess = false;
+            bool bSuccess = WeakSubsystem->RequestFileListWithSizes(TargetRank, TimeoutMs, FileList, FileSizes);
 
-            // Make the broker request
-            if (WeakSubsystem.IsValid())
-            {
-                bSuccess = WeakSubsystem->RequestFileListWithSizes(TargetRank, TimeoutMs, FileList, FileSizes);
-            }
-
-            // Store the retrieved file list for later retrieval (if successful)
             if (bSuccess && FileList.Num() > 0)
             {
                 FScopeLock Lock(&UJUSYNCBlueprintLibrary::LastFileListWithSizesMutex);
                 UJUSYNCBlueprintLibrary::LastFileListWithSizes_Names = FileList;
                 UJUSYNCBlueprintLibrary::LastFileListWithSizes_Sizes = FileSizes;
-                UE_LOG(LogJUSYNC, Log, TEXT("Stored %d files with sizes in LastFileListWithSizes"), FileList.Num());
             }
 
-            // Check again before calling back (game might have stopped during request)
-            if (!WeakSubsystem.IsValid())
-            {
-                UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem destroyed during async request, cancelling callback"));
-                return; // Game stopped, don't call callbacks
-            }
+            if (!WeakSubsystem.IsValid()) return;
 
-            // Execute callback on game thread
-            if (IsInGameThread())
-            {
-                if (bSuccess) OnComplete.ExecuteIfBound(FileList, FileSizes);
-                else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve file list with sizes from rank %d"), TargetRank));
-            }
-            else
-            {
-                FGraphEventRef Task = FFunctionGraphTask::CreateAndDispatchWhenReady(
-                    [bSuccess, FileList, FileSizes, TargetRank, OnComplete, OnError]()
-                    {
-                        if (bSuccess) OnComplete.ExecuteIfBound(FileList, FileSizes);
-                        else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve file list with sizes from rank %d"), TargetRank));
-                    },
-                    TStatId(), nullptr, ENamedThreads::GameThread);
-            }
+            FFunctionGraphTask::CreateAndDispatchWhenReady(
+                [bSuccess, FileList, FileSizes, TargetRank, OnComplete, OnError]()
+                {
+                    if (bSuccess) OnComplete.ExecuteIfBound(FileList, FileSizes);
+                    else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve file list with sizes from rank %d"), TargetRank));
+                },
+                TStatId(), nullptr, ENamedThreads::GameThread);
         });
 }
 
@@ -759,61 +620,32 @@ void UJUSYNCBlueprintLibrary::RequestFileListWithSizesAndRanksAsync(int32 Target
         return;
     }
 
-    // Capture subsystem pointer for validity checking
     TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
 
-    // Launch async request on a background thread using Unreal's Async system
-    Async(EAsyncExecution::Thread, [WeakSubsystem, TargetRank, TimeoutMs, OnComplete, OnError]()
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, TargetRank, TimeoutMs, OnComplete, OnError]()
         {
-            // Check if subsystem is still valid before making the request
-            if (!WeakSubsystem.IsValid())
-            {
-                UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem no longer valid, cancelling async request"));
-                return; // Game stopped, exit early
-            }
+            if (!WeakSubsystem.IsValid()) return;
 
             TArray<FString> FileList;
             TArray<int64> FileSizes;
             TArray<int32> FileRanks;
-            bool bSuccess = false;
+            bool bSuccess = WeakSubsystem->RequestFileListWithSizesAndRanks(TargetRank, TimeoutMs, FileList, FileSizes, FileRanks);
 
-            // Make the broker request
-            if (WeakSubsystem.IsValid())
-            {
-                bSuccess = WeakSubsystem->RequestFileListWithSizesAndRanks(TargetRank, TimeoutMs, FileList, FileSizes, FileRanks);
-            }
-
-            // Store the retrieved file list for later retrieval (if successful)
             if (bSuccess && FileList.Num() > 0)
             {
                 FScopeLock Lock(&UJUSYNCBlueprintLibrary::LastFileListMutex);
                 UJUSYNCBlueprintLibrary::LastFileList = FileList;
-                UE_LOG(LogJUSYNC, Log, TEXT("Stored %d files with ranks in LastFileList"), FileList.Num());
             }
 
-            // Check again before calling back (game might have stopped during request)
-            if (!WeakSubsystem.IsValid())
-            {
-                UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem destroyed during async request, cancelling callback"));
-                return; // Game stopped, don't call callbacks
-            }
+            if (!WeakSubsystem.IsValid()) return;
 
-            // Execute callback on game thread
-            if (IsInGameThread())
-            {
-                if (bSuccess) OnComplete.ExecuteIfBound(FileList, FileSizes, FileRanks);
-                else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve file list with sizes and ranks from rank %d"), TargetRank));
-            }
-            else
-            {
-                FGraphEventRef Task = FFunctionGraphTask::CreateAndDispatchWhenReady(
-                    [bSuccess, FileList, FileSizes, FileRanks, TargetRank, OnComplete, OnError]()
-                    {
-                        if (bSuccess) OnComplete.ExecuteIfBound(FileList, FileSizes, FileRanks);
-                        else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve file list with sizes and ranks from rank %d"), TargetRank));
-                    },
-                    TStatId(), nullptr, ENamedThreads::GameThread);
-            }
+            FFunctionGraphTask::CreateAndDispatchWhenReady(
+                [bSuccess, FileList, FileSizes, FileRanks, TargetRank, OnComplete, OnError]()
+                {
+                    if (bSuccess) OnComplete.ExecuteIfBound(FileList, FileSizes, FileRanks);
+                    else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve file list with sizes and ranks from rank %d"), TargetRank));
+                },
+                TStatId(), nullptr, ENamedThreads::GameThread);
         });
 }
 
@@ -850,51 +682,24 @@ void UJUSYNCBlueprintLibrary::RequestFileAsync(const FString& Filename, int32 Ta
         return;
     }
 
-    // Capture subsystem pointer for validity checking
     TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
 
-    // Launch async request on a background thread using Unreal's Async system
-    Async(EAsyncExecution::Thread, [WeakSubsystem, Filename, TargetRank, TimeoutMs, OnComplete, OnError]()
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, Filename, TargetRank, TimeoutMs, OnComplete, OnError]()
         {
-            // Check if subsystem is still valid before making the request
-            if (!WeakSubsystem.IsValid())
-            {
-                UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem no longer valid, cancelling async request"));
-                return; // Game stopped, exit early
-            }
+            if (!WeakSubsystem.IsValid()) return;
 
             TArray<uint8> FileData;
-            bool bSuccess = false;
+            bool bSuccess = WeakSubsystem->RequestFile(Filename, TargetRank, TimeoutMs, FileData);
 
-            // Make the broker request
-            if (WeakSubsystem.IsValid())
-            {
-                bSuccess = WeakSubsystem->RequestFile(Filename, TargetRank, TimeoutMs, FileData);
-            }
+            if (!WeakSubsystem.IsValid()) return;
 
-            // Check again before calling back (game might have stopped during request)
-            if (!WeakSubsystem.IsValid())
-            {
-                UE_LOG(LogJUSYNC, Warning, TEXT("Subsystem destroyed during async request, cancelling callback"));
-                return; // Game stopped, don't call callbacks
-            }
-
-            // Execute callback on game thread
-            if (IsInGameThread())
-            {
-                if (bSuccess) OnComplete.ExecuteIfBound(Filename, FileData);
-                else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve file '%s' from rank %d"), *Filename, TargetRank));
-            }
-            else
-            {
-                FGraphEventRef Task = FFunctionGraphTask::CreateAndDispatchWhenReady(
-                    [bSuccess, Filename, FileData, TargetRank, OnComplete, OnError]()
-                    {
-                        if (bSuccess) OnComplete.ExecuteIfBound(Filename, FileData);
-                        else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve file '%s' from rank %d"), *Filename, TargetRank));
-                    },
-                    TStatId(), nullptr, ENamedThreads::GameThread);
-            }
+            FFunctionGraphTask::CreateAndDispatchWhenReady(
+                [bSuccess, Filename, FileData, TargetRank, OnComplete, OnError]()
+                {
+                    if (bSuccess) OnComplete.ExecuteIfBound(Filename, FileData);
+                    else OnError.ExecuteIfBound(FString::Printf(TEXT("Failed to retrieve file '%s' from rank %d"), *Filename, TargetRank));
+                },
+                TStatId(), nullptr, ENamedThreads::GameThread);
         });
 }
 
@@ -1106,28 +911,34 @@ bool UJUSYNCBlueprintLibrary::ValidateUSDFormat(const TArray<uint8>& Buffer, con
     // Scan first 8KB for USD markers (more than enough)
     const int32 SCAN_SIZE = FMath::Min(Buffer.Num(), 8 * 1024);
 
-    // Convert to string for searching (but only the scanned portion)
-    FString FirstChunk;
-    FirstChunk.Reserve(SCAN_SIZE);
+    // Direct buffer scan for USD markers (no intermediate string allocation)
+    const char* Marker1 = "#usda";
+    const char* Marker2 = "PXR-USDC";
+    const char* Marker3 = "def ";
+    const char* Marker4 = "over ";
 
+    // Memchr-based search for each marker
     for (int32 i = 0; i < SCAN_SIZE; ++i)
     {
-        char Char = static_cast<char>(BufferData[i]);
-        if ((Char >= 32 && Char <= 126) || Char == '\n' || Char == '\r' || Char == '\t')
+        if (BufferData[i] == '#' && i + 4 <= SCAN_SIZE)
         {
-            FirstChunk.AppendChar(Char);
+            if (std::memcmp(BufferData + i, Marker1, 5) == 0) return true;
         }
-        else if (Char == 0)
+        if (BufferData[i] == 'P' && i + 8 <= SCAN_SIZE)
         {
-            FirstChunk.AppendChar(' ');
+            if (std::memcmp(BufferData + i, Marker2, 8) == 0) return true;
+        }
+        if (BufferData[i] == 'd' && i + 4 <= SCAN_SIZE)
+        {
+            if (std::memcmp(BufferData + i, Marker3, 4) == 0) return true;
+        }
+        if (BufferData[i] == 'o' && i + 5 <= SCAN_SIZE)
+        {
+            if (std::memcmp(BufferData + i, Marker4, 5) == 0) return true;
         }
     }
 
-    // Check for USD markers
-    return FirstChunk.Contains(TEXT("#usda")) ||
-        FirstChunk.Contains(TEXT("PXR-USDC")) ||
-        FirstChunk.Contains(TEXT("def ")) ||
-        FirstChunk.Contains(TEXT("over "));
+    return false;
 }
 
 // ========== POINT CLOUD PROCESSING ==========
@@ -3319,7 +3130,7 @@ void UJUSYNCBlueprintLibrary::RequestFilesParallelAsync(
 
     // Fall back to existing implementation
     TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
-    Async(EAsyncExecution::Thread, [WeakSubsystem, Filenames, TargetRanks, TimeoutMs, OnFileReceived, OnComplete, OnError]()
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, Filenames, TargetRanks, TimeoutMs, OnFileReceived, OnComplete, OnError]()
         {
             if (!WeakSubsystem.IsValid()) return;
 
@@ -4760,7 +4571,7 @@ void UJUSYNCBlueprintLibrary::RequestFileAsyncDynamic(
     TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
 
     // 4. Launch async retry logic with proper memory safety
-    Async(EAsyncExecution::Thread, [WeakSubsystem, RanksToTry, Filename, MaxRetries, OnComplete, OnError]()
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, RanksToTry, Filename, MaxRetries, OnComplete, OnError]()
         {
             // Check if subsystem still exists
             UJUSYNCSubsystem* SubsystemPtr = WeakSubsystem.Get();

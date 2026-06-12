@@ -60,22 +60,9 @@ bool ZmqConnector::initialize(const char* endpoint, int timeoutMs) {
             return false;
         }
 
-        // Initialize ZMQ context with enhanced cross-platform settings
-        zmqContext = std::make_unique<zmq::context_t>(1); // 1 I/O thread
-        if (!zmqContext) {
-            MIDDLEWARE_LOG_ERROR("Failed to create ZMQ context");
-            connectionStatus.store(ConnectionStatus::Error);
-            return false;
-        }
-
-        // Set context options for better performance and safety
-        zmqContext->set(zmq::ctxopt::max_sockets, 1024);
-        zmqContext->set(zmq::ctxopt::io_threads, 1);
-
-        // DEALER-ONLY ARCHITECTURE: No ROUTER socket creation
-        // In DEALER-only architecture, we don't create a ROUTER socket here
-        // Instead, we'll use the AnariUsdClient DEALER socket for all communication
-        zmqSocket.reset(); // No socket created
+        // DEALER-ONLY ARCHITECTURE: No ZMQ context or ROUTER socket is created here.
+        // All communication is handled by AnariUsdClient (DEALER socket).
+        // ZmqConnector in this mode is a stub for endpoint validation and health tracking.
         
         // Determine and validate endpoint (but don't bind)
         currentEndpoint = endpoint ? endpoint : getDefaultEndpoint();
@@ -87,12 +74,13 @@ bool ZmqConnector::initialize(const char* endpoint, int timeoutMs) {
             return false;
         }
 
-        MIDDLEWARE_LOG_INFO("ZmqConnector initialized in DEALER-only mode (no ROUTER socket)");
+        MIDDLEWARE_LOG_INFO("ZmqConnector initialized in DEALER-only stub mode");
 
         // Reset statistics
         messageStats.reset();
 
-        // Mark as connected
+        // In stub mode, socket is null so isConnected() will return false
+        // This is intentional - use AnariUsdClient for actual communication
         connectionStatus.store(ConnectionStatus::Connected);
         shutdownRequested.store(false);
 
@@ -223,7 +211,7 @@ bool ZmqConnector::validateEndpoint(const std::string& endpoint) const {
 
 bool ZmqConnector::validateTcpEndpoint(const std::string& endpoint) const {
     // TCP endpoint validation: tcp://host:port
-    std::regex tcpPattern(R"(^tcp://([^:]+|\*):(\d+)$)");
+    static const std::regex tcpPattern(R"(^tcp://([^:]+|\*):(\d+)$)");
     std::smatch matches;
 
     if (!std::regex_match(endpoint, matches, tcpPattern)) {
@@ -257,115 +245,9 @@ bool ZmqConnector::validateInprocEndpoint(const std::string& endpoint) const {
 
 bool ZmqConnector::receiveFile(std::string& filename, std::vector<uint8_t>& data,
                               std::string& hash, int timeoutMs) {
-    MIDDLEWARE_LOG_DEBUG("=== ZMQ RECEIVE FILE CALLED ===");
-    MIDDLEWARE_LOG_DEBUG("Timeout: %d ms", timeoutMs);
-
-    if (connectionStatus.load() != ConnectionStatus::Connected || !zmqSocket) {
-        MIDDLEWARE_LOG_ERROR("ZmqConnector not connected or socket invalid");
-        return false;
-    }
-
-    try {
-        // Only poll if timeout > 0 (not already polled by caller)
-        if (timeoutMs > 0) {
-            zmq::pollitem_t items[] = {{ zmqSocket->handle(), 0, ZMQ_POLLIN, 0 }};
-            int pollResult = zmq::poll(items, 1, std::chrono::milliseconds(timeoutMs));
-            if (pollResult <= 0) {
-                return false; // Timeout or error
-            }
-        } else {
-            MIDDLEWARE_LOG_DEBUG("Skipping poll (timeout=0) - assuming message already available");
-        }
-
-        // ROUTER receives: [Identity] [Filename] [Content] [Hash]
-        // Part 1: Receive client identity (automatic from ROUTER)
-        zmq::message_t identityMsg;
-        auto identityRes = zmqSocket->recv(identityMsg, zmq::recv_flags::none);
-        if (!identityRes || identityRes.value() == 0) {
-            return false;
-        }
-
-        std::string identityStr = std::string(static_cast<const char*>(identityMsg.data()), identityMsg.size());
-        MIDDLEWARE_LOG_INFO("✅ Receiving file from DEALER: %s", identityStr.c_str());
-
-        // Store identity for reply
-        zmq::message_t clientIdentity;
-        clientIdentity.copy(identityMsg);
-
-        // Part 2: Receive filename
-        zmq::message_t filenameMsg;
-        auto fileRes = zmqSocket->recv(filenameMsg, zmq::recv_flags::none);
-        if (!fileRes || fileRes.value() == 0) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive filename");
-            sendReply(clientIdentity, "ERROR: Missing filename");
-            return false;
-        }
-
-        filename = filenameMsg.to_string();
-        MIDDLEWARE_LOG_INFO("📁 Filename: %s", filename.c_str());
-
-        // Enhanced cross-platform filename validation
-        if (!validateFilename(filename)) {
-            MIDDLEWARE_LOG_ERROR("Invalid filename: %s", filename.c_str());
-            sendReply(clientIdentity, "ERROR: Invalid filename");
-            return false;
-        }
-
-        // Part 3: Receive content
-        zmq::message_t contentMsg;
-        auto contentRes = zmqSocket->recv(contentMsg, zmq::recv_flags::none);
-        if (!contentRes || contentRes.value() == 0) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive content");
-            sendReply(clientIdentity, "ERROR: Missing content");
-            return false;
-        }
-
-        // Copy data efficiently
-        const uint8_t* dataPtr = static_cast<const uint8_t*>(contentMsg.data());
-        data.assign(dataPtr, dataPtr + contentMsg.size());
-        MIDDLEWARE_LOG_INFO("📦 Content: %zu bytes", data.size());
-
-        // Part 4: Receive hash (final part)
-        zmq::message_t hashMsg;
-        auto hashRes = zmqSocket->recv(hashMsg, zmq::recv_flags::none);
-        if (!hashRes || hashRes.value() == 0) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive hash");
-            sendReply(clientIdentity, "ERROR: Missing hash");
-            return false;
-        }
-
-        hash = hashMsg.to_string();
-        MIDDLEWARE_LOG_INFO("🔒 Hash: %s", hash.c_str());
-
-        // Enhanced hash validation
-        if (!validateHashFormatPermissive(hash)) {
-            MIDDLEWARE_LOG_WARNING("Hash format validation failed: %s", hash.c_str());
-            // Don't fail completely, just warn
-        }
-
-        // Send reply
-        bool replyResult = sendReply(clientIdentity, "RECEIVED");
-        if (!replyResult) {
-            MIDDLEWARE_LOG_WARNING("Failed to send reply after file reception");
-        } else {
-            MIDDLEWARE_LOG_INFO("✅ Sent RECEIVED reply to DEALER: %s", identityStr.c_str());
-        }
-
-        // Update statistics
-        messageStats.totalFilesReceived.fetch_add(1);
-        messageStats.totalBytesReceived.fetch_add(data.size());
-        messageStats.lastMessageTime = std::chrono::steady_clock::now();
-
-        MIDDLEWARE_LOG_INFO("🎉 Successfully received file: %s (%zu bytes)", filename.c_str(), data.size());
-        return true;
-
-    } catch (const zmq::error_t& e) {
-        MIDDLEWARE_LOG_ERROR("ZeroMQ error in receiveFile: %s (errno: %d)", e.what(), e.num());
-        return false;
-    } catch (const std::exception& e) {
-        MIDDLEWARE_LOG_ERROR("Exception in receiveFile: %s", e.what());
-        return false;
-    }
+    MIDDLEWARE_LOG_WARNING("receiveFile is not supported in DEALER-only mode — use AnariUsdClient::requestFile()");
+    messageStats.failedReceives.fetch_add(1);
+    return false;
 }
 
 bool ZmqConnector::validateFilename(const std::string& filename) const {
@@ -460,126 +342,9 @@ bool ZmqConnector::validateHashFormatPermissive(const std::string& hash) const {
 }
 
 bool ZmqConnector::receiveAnyMessage(int timeoutMs) {
-    // Validate connection state
-    if (connectionStatus.load() != ConnectionStatus::Connected || !zmqSocket) {
-        MIDDLEWARE_LOG_ERROR("ZmqConnector not connected for message receive");
-        messageStats.failedReceives.fetch_add(1);
-        return false;
-    }
-
-    if (shutdownRequested.load()) {
-        MIDDLEWARE_LOG_DEBUG("Shutdown requested, aborting message receive");
-        return false;
-    }
-
-    try {
-        // Check for available messages
-        zmq::pollitem_t items[] = {{ zmqSocket->handle(), 0, ZMQ_POLLIN, 0 }};
-        int pollResult = zmq::poll(items, 1, std::chrono::milliseconds(timeoutMs));
-
-        if (pollResult == 0) {
-            return false; // Timeout
-        }
-
-        if (pollResult < 0 || !(items[0].revents & ZMQ_POLLIN)) {
-            MIDDLEWARE_LOG_ERROR("Poll error in receiveAnyMessage");
-            messageStats.failedReceives.fetch_add(1);
-            return false;
-        }
-
-        // Receive identity
-        zmq::message_t identityMsg;
-        if (!receiveMessagePart(identityMsg, timeoutMs, true)) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive identity in receiveAnyMessage");
-            messageStats.failedReceives.fetch_add(1);
-            return false;
-        }
-
-        // Validate identity
-        if (identityMsg.size() == 0 || identityMsg.size() > 256) {
-            MIDDLEWARE_LOG_ERROR("Invalid identity size in message: %zu", identityMsg.size());
-            messageStats.failedReceives.fetch_add(1);
-            return false;
-        }
-
-        std::string identityStr(static_cast<const char*>(identityMsg.data()), identityMsg.size());
-        MIDDLEWARE_LOG_DEBUG("Receiving message from client: %s", identityStr.c_str());
-
-        zmq::message_t clientIdentity = std::move(identityMsg);
-
-        // Receive message content
-        zmq::message_t contentMsg;
-        if (!receiveMessagePart(contentMsg, timeoutMs, false)) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive message content");
-            sendReply(clientIdentity, "ERROR: Missing content");
-            messageStats.failedReceives.fetch_add(1);
-            return false;
-        }
-
-        // Validate content size
-        if (contentMsg.size() > maxMessageSize.load()) {
-            MIDDLEWARE_LOG_ERROR("Message too large: %zu bytes (max: %zu)",
-                                contentMsg.size(), maxMessageSize.load());
-            sendReply(clientIdentity, "ERROR: Message too large");
-            messageStats.failedReceives.fetch_add(1);
-            return false;
-        }
-
-        // Check for multi-part file message (should be handled by receiveFile)
-        if (zmqSocket->get(zmq::sockopt::rcvmore)) {
-            MIDDLEWARE_LOG_DEBUG("Multi-part message detected, likely file transfer");
-            drainRemainingParts();
-            sendReply(clientIdentity, "RETRY_AS_FILE");
-            return false;
-        }
-
-        // Process as simple message
-        std::string messageContent = contentMsg.to_string();
-
-        // Validate message content
-        if (messageContent.empty() || messageContent.size() > safety::MAX_STRING_SIZE) {
-            MIDDLEWARE_LOG_ERROR("Invalid message content size: %zu", messageContent.size());
-            sendReply(clientIdentity, "ERROR: Invalid message");
-            messageStats.failedReceives.fetch_add(1);
-            return false;
-        }
-
-        // Store message safely
-        {
-            std::lock_guard<std::mutex> lock(messageMutex);
-            lastReceivedMessage = messageContent;
-        }
-
-        MIDDLEWARE_LOG_DEBUG("Received message: %s", messageContent.c_str());
-
-        // Send success reply
-        if (!sendReply(clientIdentity, "{\"status\": \"ok\", \"message\": \"Message received\"}", 1000)) {
-            MIDDLEWARE_LOG_WARNING("Failed to send message reply");
-        }
-
-        // Update statistics
-        messageStats.totalMessagesReceived.fetch_add(1);
-        messageStats.lastMessageTime = std::chrono::steady_clock::now();
-
-        return true;
-
-    } catch (const zmq::error_t& e) {
-        if (e.num() == ETERM || e.num() == ENOTSOCK) {
-            MIDDLEWARE_LOG_INFO("ZMQ context terminated during message receive");
-            connectionStatus.store(ConnectionStatus::Disconnected);
-        } else if (e.num() == EINTR) {
-            MIDDLEWARE_LOG_DEBUG("ZMQ message receive interrupted");
-        } else {
-            MIDDLEWARE_LOG_ERROR("ZeroMQ error in receiveAnyMessage: %s (errno: %d)", e.what(), e.num());
-        }
-
-        messageStats.failedReceives.fetch_add(1);
-        return false;
-    } catch (const std::exception& e) {
-        MIDDLEWARE_LOG_ERROR("Exception in receiveAnyMessage: %s", e.what());
-        messageStats.failedReceives.fetch_add(1);
-        return false;
-    }
+    MIDDLEWARE_LOG_WARNING("receiveAnyMessage is not supported in DEALER-only mode — use AnariUsdClient");
+    messageStats.failedReceives.fetch_add(1);
+    return false;
 }
 
 void ZmqConnector::disconnect(int gracefulTimeoutMs) {

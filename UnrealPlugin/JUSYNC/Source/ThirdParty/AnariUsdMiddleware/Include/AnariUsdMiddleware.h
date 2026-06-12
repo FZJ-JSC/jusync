@@ -171,6 +171,14 @@ public:
     int  registerMessageCallback(MessageCallback cb);
     void unregisterMessageCallback(int id);
 
+    /* NEW: Notification callback for live updates (NOTIFY_FILE_UPDATE, NOTIFY_COMMIT_COMPLETE) */
+    using NotificationCallback = std::function<void(uint32_t messageType,
+                                                     int32_t sourceRank,
+                                                     const std::string& filename,
+                                                     uint64_t fileSize,
+                                                     uint64_t timestamp)>;
+    void setNotificationCallback(NotificationCallback cb);
+
     /* receiver thread */
     bool startReceiving();
     void stopReceiving();

@@ -183,21 +183,6 @@ else()
     set(TBB_LIB "")
 endif()
 
-# Workaround tinyusdz macro strictness on GCC >= 15 (template-dependent lookup in is_array)
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
-    target_compile_options(tinyusdz_static PRIVATE -fpermissive)
-endif()
-
-# TBB - required for parallel processing (parallel_for, task_arena)
-find_package(TBB QUIET)
-if(TBB_FOUND)
-    message(STATUS "TBB: Found ${TBB_VERSION}")
-    set(TBB_LIB TBB::tbb)
-else()
-    message(STATUS "TBB: Not found - parallel processing will not use TBB")
-    set(TBB_LIB "")
-endif()
-
 # Link dependencies - STATIC ZMQ INSTEAD OF DYNAMIC
 target_link_libraries(${PROJECT_NAME}
     PRIVATE

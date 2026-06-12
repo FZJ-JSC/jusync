@@ -99,92 +99,47 @@ extern "C" void FileReceivedCallback_Static(const CFileData* file_data)
     }
     
     UE_LOG(LogJUSYNC, Log, TEXT("Creating async task for file processing..."));
-    
-    // Create a DEEP copy of the data for the lambda to avoid use-after-free
-    // We need to copy all C strings and binary data since the original may be freed
-    // Create a custom structure to hold the copied data
-    struct LocalFileData
+
+    // Single-copy: capture FString on-stack + TArray for binary data
+    // C strings are fixed-size arrays (char[1024]), check [0] != '\0' instead of pointer
+    FString CapturedFilename = file_data->filename[0] != '\0' ? FString(UTF8_TO_TCHAR(file_data->filename)) : TEXT("");
+    FString CapturedHash = file_data->hash[0] != '\0' ? FString(UTF8_TO_TCHAR(file_data->hash)) : TEXT("");
+    FString CapturedFileType = file_data->file_type[0] != '\0' ? FString(UTF8_TO_TCHAR(file_data->file_type)) : TEXT("");
+
+    TArray<uint8> DataCopy;
+    if (file_data->data && file_data->data_size > 0)
     {
-        char* filename = nullptr;
-        char* hash = nullptr;
-        char* file_type = nullptr;
-        unsigned char* data = nullptr;
-        size_t data_size = 0;
-        
-        ~LocalFileData()
-        {
-            if (filename) delete[] filename;
-            if (hash) delete[] hash;
-            if (file_type) delete[] file_type;
-            if (data) delete[] data;
-        }
-    };
-    
-    LocalFileData LocalData;
-    
-    // Copy filename (C string)
-    if (file_data->filename[0] != '\0') {
-        size_t filename_len = strlen(file_data->filename) + 1;
-        LocalData.filename = new char[filename_len];
-        strncpy(LocalData.filename, file_data->filename, filename_len);
+        DataCopy.SetNum(file_data->data_size);
+        FMemory::Memcpy(DataCopy.GetData(), file_data->data, file_data->data_size);
     }
-    
-    // Copy hash (C string)
-    if (file_data->hash[0] != '\0') {
-        size_t hash_len = strlen(file_data->hash) + 1;
-        LocalData.hash = new char[hash_len];
-        strncpy(LocalData.hash, file_data->hash, hash_len);
-    }
-    
-    // Copy file_type (C string)
-    if (file_data->file_type[0] != '\0') {
-        size_t file_type_len = strlen(file_data->file_type) + 1;
-        LocalData.file_type = new char[file_type_len];
-        strncpy(LocalData.file_type, file_data->file_type, file_type_len);
-    }
-    
-    // Copy binary data
-    LocalData.data_size = file_data->data_size;
-    if (file_data->data && file_data->data_size > 0) {
-        LocalData.data = new unsigned char[file_data->data_size];
-        std::memcpy(LocalData.data, file_data->data, file_data->data_size);
-    }
-    
-    
-    AsyncTask(ENamedThreads::GameThread, [LocalData]()
+
+    AsyncTask(ENamedThreads::GameThread, [CapturedFilename = MoveTemp(CapturedFilename), CapturedHash = MoveTemp(CapturedHash), CapturedFileType = MoveTemp(CapturedFileType), DataCopy = MoveTemp(DataCopy)]()
     {
         UE_LOG(LogJUSYNC, Log, TEXT("=== ASYNC TASK EXECUTING ON GAME THREAD ==="));
-        
+
         UJUSYNCSubsystem* Subsystem = g_SubsystemInstance.load();
         if (!Subsystem)
         {
             UE_LOG(LogJUSYNC, Error, TEXT("Async Task: g_SubsystemInstance is NULL on game thread"));
             return;
         }
-        
+
         UE_LOG(LogJUSYNC, Log, TEXT("Converting C data to UE format..."));
-        
+
         FJUSYNCFileData UEFileData;
-        UEFileData.Filename = LocalData.filename ? FString(UTF8_TO_TCHAR(LocalData.filename)) : TEXT("");
-        UEFileData.Hash = LocalData.hash ? FString(UTF8_TO_TCHAR(LocalData.hash)) : TEXT("");
-        UEFileData.FileType = LocalData.file_type ? FString(UTF8_TO_TCHAR(LocalData.file_type)) : TEXT("");
-        
-        if (LocalData.data && LocalData.data_size > 0) {
-            UEFileData.Data.SetNum(LocalData.data_size);
-            FMemory::Memcpy(UEFileData.Data.GetData(), LocalData.data, LocalData.data_size);
-        }
-        
+        UEFileData.Filename = CapturedFilename;
+        UEFileData.Hash = CapturedHash;
+        UEFileData.FileType = CapturedFileType;
+        UEFileData.Data = DataCopy;
+
         UE_LOG(LogJUSYNC, Log, TEXT("Broadcasting to Blueprint events..."));
         UE_LOG(LogJUSYNC, Log, TEXT("  - UE Filename: %s"), *UEFileData.Filename);
         UE_LOG(LogJUSYNC, Log, TEXT("  - UE File Type: %s"), *UEFileData.FileType);
         UE_LOG(LogJUSYNC, Log, TEXT("  - UE Data Size: %d"), UEFileData.Data.Num());
-        
-        // Send to Blueprint Library FIRST
+
         Subsystem->HandleFileReceivedForLibrary(UEFileData);
-        
-        // Broadcast to subsystem events
         Subsystem->OnFileReceived.Broadcast(UEFileData);
-        
+
         UE_LOG(LogJUSYNC, Log, TEXT("=== FILE PROCESSING COMPLETE ==="));
     });
 }
@@ -292,14 +247,19 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
     if (CMesh.normals && CMesh.normals_count >= 3)
     {
         size_t NormalCount = CMesh.normals_count / 3;
-        UEMesh.Normals.Reserve(NormalCount);
-        
-        // Optimized loop with direct pointer access
+        UEMesh.Normals.SetNum(NormalCount);
+
         const float* normalsPtr = CMesh.normals;
         for (size_t i = 0; i < NormalCount; ++i)
         {
             size_t idx = i * 3;
-            UEMesh.Normals.Add(FVector(normalsPtr[idx], -normalsPtr[idx + 1], normalsPtr[idx + 2]).GetSafeNormal());
+            UEMesh.Normals[i] = FVector(normalsPtr[idx], -normalsPtr[idx + 1], normalsPtr[idx + 2]);
+        }
+
+        // Normalize once after accumulation (avoids sqrt per vertex)
+        for (int32 i = 0; i < UEMesh.Normals.Num(); ++i)
+        {
+            UEMesh.Normals[i].Normalize();
         }
     }
 
@@ -307,14 +267,13 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
     if (CMesh.uvs && CMesh.uvs_count >= 2)
     {
         size_t UVCount = CMesh.uvs_count / 2;
-        UEMesh.UVs.Reserve(UVCount);
-        
-        // Optimized loop with direct pointer access
+        UEMesh.UVs.SetNum(UVCount);
+
         const float* uvsPtr = CMesh.uvs;
         for (size_t i = 0; i < UVCount; ++i)
         {
             size_t idx = i * 2;
-            UEMesh.UVs.Add(FVector2D(uvsPtr[idx], uvsPtr[idx + 1]));
+            UEMesh.UVs[i] = FVector2D(uvsPtr[idx], uvsPtr[idx + 1]);
         }
     }
 
@@ -327,12 +286,12 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
 
         bool bDetectedVertexInterp = (ColorCount == VertexCount);
         bool bDetectedUniformInterp = (ColorCount == FaceCount);
-        
-        UEMesh.VertexColors.Reserve(VertexCount);
+
+        UEMesh.VertexColors.SetNum(VertexCount);
 
         if (bDetectedVertexInterp)
         {
-            // âœ… CASE 1: Already vertex interpolation - direct mapping (OPTIMIZED)
+            // CASE 1: Already vertex interpolation - direct mapping (OPTIMIZED)
             const float* colorsPtr = CMesh.vertex_colors;
             for (int32 i = 0; i < VertexCount; ++i)
             {
@@ -341,7 +300,7 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
                 uint8 g = uint8(FMath::Clamp(colorsPtr[idx + 1] * 255.0f, 0.0f, 255.0f));
                 uint8 b = uint8(FMath::Clamp(colorsPtr[idx + 2] * 255.0f, 0.0f, 255.0f));
                 uint8 a = uint8(FMath::Clamp(colorsPtr[idx + 3] * 255.0f, 0.0f, 255.0f));
-                UEMesh.VertexColors.Add(FColor(r, g, b, a));
+                UEMesh.VertexColors[i] = FColor(r, g, b, a);
             }
         }
         else if (bDetectedUniformInterp && bForceVertexInterpolation)
@@ -409,15 +368,16 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
                 UEMesh.VertexColors.Add(FColor(r, g, b, a));
             }
             
-            UE_LOG(LogJUSYNC, Log, TEXT("âœ… Converted uniform to smooth vertex interpolation: %d vertex colors"), 
-                   UEMesh.VertexColors.Num());
+            UE_LOG(LogJUSYNC, Log, TEXT("Converted uniform to smooth vertex interpolation: %d vertex colors"),
+                    UEMesh.VertexColors.Num());
         }
         else if (bDetectedUniformInterp && !bForceVertexInterpolation)
         {
-            // âœ… CASE 3: Keep original uniform behavior (PRESERVED for backwards compatibility)
-            UE_LOG(LogJUSYNC, Log, TEXT("ðŸŽ¨ Using original UNIFORM interpolation (flat shading)"));
-            UEMesh.VertexColors.Reserve(FaceCount * 3);
-            
+            // CASE 3: Keep original uniform behavior (PRESERVED for backwards compatibility)
+            UE_LOG(LogJUSYNC, Log, TEXT("Using original UNIFORM interpolation (flat shading)"));
+            UEMesh.VertexColors.Empty();
+            UEMesh.VertexColors.SetNum(FaceCount * 3);
+
             for (int32 f = 0; f < FaceCount; ++f)
             {
                 int64 cidx = int64(f) * 4;
@@ -426,18 +386,17 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
                 uint8 b = uint8(FMath::Clamp(CMesh.vertex_colors[cidx + 2] * 255.0f, 0.0f, 255.0f));
                 uint8 a = uint8(FMath::Clamp(CMesh.vertex_colors[cidx + 3] * 255.0f, 0.0f, 255.0f));
                 FColor faceColor(r, g, b, a);
-                
-                // Assign to each of the three vertices of face f
-                for (int vi = 0; vi < 3; ++vi)
-                {
-                    UEMesh.VertexColors.Add(faceColor);
-                }
+
+                int32 base = f * 3;
+                UEMesh.VertexColors[base] = faceColor;
+                UEMesh.VertexColors[base + 1] = faceColor;
+                UEMesh.VertexColors[base + 2] = faceColor;
             }
         }
         else
         {
-            // âœ… CASE 4: Fallback behavior (PRESERVED)
-            UE_LOG(LogJUSYNC, Warning, TEXT("ðŸŽ¨ Using fallback vertex interpolation"));
+            // CASE 4: Fallback behavior (PRESERVED)
+            UE_LOG(LogJUSYNC, Warning, TEXT("Using fallback vertex interpolation"));
             for (int32 i = 0; i < VertexCount; ++i)
             {
                 if (i < ColorCount)
@@ -447,11 +406,11 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
                     uint8 g = uint8(FMath::Clamp(CMesh.vertex_colors[idx + 1] * 255.0f, 0.0f, 255.0f));
                     uint8 b = uint8(FMath::Clamp(CMesh.vertex_colors[idx + 2] * 255.0f, 0.0f, 255.0f));
                     uint8 a = uint8(FMath::Clamp(CMesh.vertex_colors[idx + 3] * 255.0f, 0.0f, 255.0f));
-                    UEMesh.VertexColors.Add(FColor(r, g, b, a));
+                    UEMesh.VertexColors[i] = FColor(r, g, b, a);
                 }
                 else
                 {
-                    UEMesh.VertexColors.Add(FColor::White);
+                    UEMesh.VertexColors[i] = FColor::White;
                 }
             }
         }
@@ -615,16 +574,16 @@ bool UJUSYNCSubsystem::IsMiddlewareConnected() const
     
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     bool bConnected = (IsConnected_C() == 1) && bIsInitialized.load();
-    
-    // Periodic connection status logging
+
+    // Periodic connection status logging (timer-free, sparse logging)
     static int32 StatusCheckCount = 0;
-    StatusCheckCount++;
-    if (StatusCheckCount % 1000 == 0) // Log every 1000 calls
+    if (++StatusCheckCount >= 10000) { StatusCheckCount = 0; }
+    if (StatusCheckCount == 0)
     {
-        UE_LOG(LogJUSYNC, Log, TEXT("Connection status: %s (Check #%d)"), 
+        UE_LOG(LogJUSYNC, Log, TEXT("Connection status: %s (Check #%d)"),
                bConnected ? TEXT("CONNECTED") : TEXT("DISCONNECTED"), StatusCheckCount);
     }
-    
+
     return bConnected;
 #else
     return false;
@@ -2222,8 +2181,9 @@ AActor* UJUSYNCSubsystem::SpawnLidarPointCloudAtLocation(const FJUSYNCPointCloud
 
     TWeakObjectPtr<ALidarPointCloudActor> WeakActor = SpawnedActor;
     TWeakObjectPtr<ULidarPointCloudComponent> WeakComp = Comp;
+    FString ElementNameForLog = PointCloudData.ElementName;
 
-    Async(EAsyncExecution::Thread, [PointCount, Positions, Colors, bHasColors, Widths, WeakActor, WeakComp, PCLUT, bUseGradient]()
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [PointCount, Positions, Colors, bHasColors, Widths, WeakActor, WeakComp, PCLUT, bUseGradient, ElementNameForLog]()
     {
         if (!WeakActor.IsValid() || !WeakComp.IsValid()) return;
 
@@ -2249,7 +2209,8 @@ AActor* UJUSYNCSubsystem::SpawnLidarPointCloudAtLocation(const FJUSYNCPointCloud
             {
                 col = FColor::White;
             }
-            Points[i] = FLidarPointCloudPoint(pos, col, true, 0);
+            // UE5.6+ constructor: FLidarPointCloudPoint(X, Y, Z, R, G, B, A)
+            Points[i] = FLidarPointCloudPoint(pos.X, pos.Y, pos.Z, col.R / 255.f, col.G / 255.f, col.B / 255.f, col.A / 255.f);
         }
 
         // Validate and fix bounds BEFORE creating LidarPointCloud
@@ -2262,17 +2223,16 @@ AActor* UJUSYNCSubsystem::SpawnLidarPointCloudAtLocation(const FJUSYNCPointCloud
 
                 for (const auto& P : Points)
                 {
-                    MinBounds.X = FMath::Min(MinBounds.X, P.Position.X);
-                    MinBounds.Y = FMath::Min(MinBounds.Y, P.Position.Y);
-                    MinBounds.Z = FMath::Min(MinBounds.Z, P.Position.Z);
-                    MaxBounds.X = FMath::Max(MaxBounds.X, P.Position.X);
-                    MaxBounds.Y = FMath::Max(MaxBounds.Y, P.Position.Y);
-                    MaxBounds.Z = FMath::Max(MaxBounds.Z, P.Position.Z);
+                    MinBounds.X = FMath::Min(MinBounds.X, P.Location.X);
+                    MinBounds.Y = FMath::Min(MinBounds.Y, P.Location.Y);
+                    MinBounds.Z = FMath::Min(MinBounds.Z, P.Location.Z);
+                    MaxBounds.X = FMath::Max(MaxBounds.X, P.Location.X);
+                    MaxBounds.Y = FMath::Max(MaxBounds.Y, P.Location.Y);
+                    MaxBounds.Z = FMath::Max(MaxBounds.Z, P.Location.Z);
                 }
 
                 FVector3f Extent = MaxBounds - MinBounds;
 
-                // If any axis has near-zero extent, expand it
                 if (Extent.X < 0.01f || Extent.Y < 0.01f || Extent.Z < 0.01f)
                 {
                     float MaxExtent = FMath::Max3(Extent.X, Extent.Y, Extent.Z);
@@ -2280,7 +2240,7 @@ AActor* UJUSYNCSubsystem::SpawnLidarPointCloudAtLocation(const FJUSYNCPointCloud
 
                     for (int32 i = 0; i < Points.Num(); ++i)
                     {
-                        FVector3f& Pos = Points[i].Position;
+                        FVector3f& Pos = Points[i].Location;
                         float Offset = ((float)i - (float)Points.Num() * 0.5f) * FallbackExtent / (float)FMath::Max(Points.Num(), 1);
 
                         if (Extent.X < 0.01f) Pos.X += Offset;
@@ -2290,7 +2250,7 @@ AActor* UJUSYNCSubsystem::SpawnLidarPointCloudAtLocation(const FJUSYNCPointCloud
 
                     UE_LOG(LogTemp, Warning,
                         TEXT("JUSYNC: Fixed degenerate bounds for '%s' (extent: %.3f, %.3f, %.3f)"),
-                        *PointCloudData.ElementName, Extent.X, Extent.Y, Extent.Z);
+                        *ElementNameForLog, Extent.X, Extent.Y, Extent.Z);
                 }
             }
         }

@@ -22,6 +22,7 @@
 #include <atomic>
 #include <future>
 #include <vector>
+#include <string_view>
 // <execution> header: available in libstdc++ (GCC) but NOT in libc++ (clang)
 // PAR_POLICY macro expands to "std::execution::par," on GCC, empty on clang
 #if defined(__clang__)
@@ -202,31 +203,27 @@ public:
             std::string fileContent;
             fileContent.assign(reinterpret_cast<const char*>(buffer.data()), buffer.size());
 
-
-
             // Apply optimized string replacements (faster than regex)
             try {
-                // Use faster string search/replace for common patterns
                 const std::string nonePatternStr = "0: None";
                 const std::string assetPatternStr = "asset:images/";
                 const std::string texCoordPatternStr = "texCoord2f";
                 const std::string noneReplacement = "0: []";
                 const std::string assetReplacement = "@./images/";
                 const std::string texCoordReplacement = "texCoord2f[]";
-                
-                // Apply replacements using optimized algorithm
+
                 size_t pos = 0;
                 while ((pos = fileContent.find(nonePatternStr, pos)) != std::string::npos) {
                     fileContent.replace(pos, nonePatternStr.length(), noneReplacement);
                     pos += noneReplacement.length();
                 }
-                
+
                 pos = 0;
                 while ((pos = fileContent.find(assetPatternStr, pos)) != std::string::npos) {
                     fileContent.replace(pos, assetPatternStr.length(), assetReplacement);
                     pos += assetReplacement.length();
                 }
-                
+
                 pos = 0;
                 while ((pos = fileContent.find(texCoordPatternStr, pos)) != std::string::npos) {
                     fileContent.replace(pos, texCoordPatternStr.length(), texCoordReplacement);
@@ -237,62 +234,37 @@ public:
 
             } catch (const std::exception& e) {
                 MIDDLEWARE_LOG_ERROR("String replacement error during preprocessing: %s", e.what());
-                return buffer; // Return original on failure
+                return buffer;
             }
 
-            // Safe line processing with bounds checking
-            std::vector<std::string> lines;
-            std::istringstream iss(fileContent);
-            std::string line;
+            // Conditional "line 34" patch: find line by scanning newlines, no split
+            // Find the start of line 34 (0-indexed: the 34th newline-delimited line)
+            {
+                size_t lineStart = 0;
+                size_t lineNum = 0;
+                for (; lineNum < 33; ++lineNum) {
+                    size_t newlinePos = fileContent.find('\n', lineStart);
+                    if (newlinePos == std::string::npos) break;
+                    lineStart = newlinePos + 1;
+                }
+                if (lineNum == 33 && lineStart < fileContent.size()) {
+                    size_t lineEnd = fileContent.find('\n', lineStart);
+                    if (lineEnd == std::string::npos) lineEnd = fileContent.size();
+                    std::string_view line34(fileContent.data() + lineStart, lineEnd - lineStart);
 
-            // Limit number of lines to prevent memory exhaustion
-            const size_t MAX_LINES = 1000000;
-            lines.reserve(std::min(MAX_LINES, static_cast<size_t>(fileContent.size() / 50))); // Estimate
+                    if ((line34.find("texture") != std::string::npos ||
+                          line34.find("albedoTex") != std::string::npos) &&
+                         line34.find("uniform") == std::string::npos) {
 
-            while (std::getline(iss, line) && lines.size() < MAX_LINES) {
-                // Validate line length
-                lines.push_back(std::move(line));
-            }
-
-            if (lines.size() >= MAX_LINES) {
-                MIDDLEWARE_LOG_WARNING("File has too many lines, truncated at %zu", MAX_LINES);
-            }
-
-            // Safe line modification with bounds checking
-            if (lines.size() > 33) {
-                std::string& line34 = lines[33];
-                MIDDLEWARE_LOG_DEBUG("Processing line 34: %s", line34.c_str());
-
-                if ((line34.find("texture") != std::string::npos ||
-                     line34.find("albedoTex") != std::string::npos) &&
-                    line34.find("uniform") == std::string::npos) {
-
-                    std::string newLine = "uniform token info:id = \"UsdPreviewSurface\";" + line34;
-                    if (newLine.size() < 1000) { // Reasonable line length check
-                        lines[33] = std::move(newLine);
-                        MIDDLEWARE_LOG_DEBUG("Modified line 34 successfully");
-                    } else {
-                        MIDDLEWARE_LOG_WARNING("Modified line would be too long, skipping");
+                        std::string prefix = "uniform token info:id = \"UsdPreviewSurface\";";
+                        if ((prefix.size() + line34.size()) < 1000) {
+                            fileContent.replace(lineStart, 0, prefix);
+                            MIDDLEWARE_LOG_DEBUG("Modified line 34 successfully");
+                        } else {
+                            MIDDLEWARE_LOG_WARNING("Modified line would be too long, skipping");
+                        }
                     }
                 }
-            }
-
-            // Rebuild content with size monitoring
-            fileContent.clear();
-            size_t estimatedSize = 0;
-            const size_t MAX_GROWTH_FACTOR = 2;
-
-            for (const auto& l : lines) {
-                estimatedSize += l.size() + 1; // +1 for newline
-
-                // Prevent excessive memory growth
-                if (estimatedSize > buffer.size() * MAX_GROWTH_FACTOR) {
-                    MIDDLEWARE_LOG_WARNING("Preprocessed content growing too large, truncating at %zu bytes",
-                                         estimatedSize);
-                    break;
-                }
-
-                fileContent += l + "\n";
             }
 
             MIDDLEWARE_LOG_INFO("Preprocessing complete: %zu -> %zu bytes",
@@ -596,65 +568,12 @@ private:
         RegexPatterns() = default;
     };
     
-    // Simple memory pool for vector allocations
-    class VectorMemoryPool {
-    private:
-        struct PooledVector {
-            std::vector<glm::vec3> points;
-            std::vector<uint32_t> indices;
-            std::vector<glm::vec3> normals;
-            std::vector<glm::vec2> uvs;
-            bool inUse = false;
-        };
-        
-        std::vector<PooledVector> pool;
-        size_t maxPoolSize = 10;
-        
-    public:
-        PooledVector* acquire() {
-            for (auto& vec : pool) {
-                if (!vec.inUse) {
-                    vec.inUse = true;
-                    // Clear vectors but keep capacity
-                    vec.points.clear();
-                    vec.indices.clear();
-                    vec.normals.clear();
-                    vec.uvs.clear();
-                    return &vec;
-                }
-            }
-            
-            // Create new pooled vector if pool is not full
-            if (pool.size() < maxPoolSize) {
-                pool.emplace_back();
-                pool.back().inUse = true;
-                // Pre-allocate reasonable capacities
-                pool.back().points.reserve(10000);
-                pool.back().indices.reserve(30000);
-                pool.back().normals.reserve(10000);
-                pool.back().uvs.reserve(10000);
-                return &pool.back();
-            }
-            
-            return nullptr; // Pool exhausted
-        }
-        
-        void release(PooledVector* vec) {
-            if (vec) {
-                vec->inUse = false;
-                // Keep memory allocated for reuse
-            }
-        }
-        
-        void clear() {
-            pool.clear();
-        }
-    };
-    
     RegexPatterns regexPatterns;
-    VectorMemoryPool vectorPool;
     std::chrono::steady_clock::time_point processingStartTime;
-    std::atomic<size_t> memoryLimitBytes{1024 * 1024 * 1024}; // 1GB default
+
+public:
+    std::atomic<size_t> memoryLimitBytes{std::numeric_limits<int64_t>::max()}; // unlimited, synced by setMemoryLimit
+    std::vector<std::string> extractClipsFromString(const std::string& content);
 };
 
 // Enhanced MeshData validation methods
@@ -667,12 +586,10 @@ std::pair<glm::vec3, glm::vec3> UsdProcessor::MeshData::getBounds() const {
     glm::vec3 maxBounds = points[0];
 
     for (const auto& point : points) {
-        // Validate finite values
         if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) {
             MIDDLEWARE_LOG_WARNING("Non-finite vertex detected in bounds calculation");
             continue;
         }
-
         minBounds = glm::min(minBounds, point);
         maxBounds = glm::max(maxBounds, point);
     }
@@ -681,58 +598,28 @@ std::pair<glm::vec3, glm::vec3> UsdProcessor::MeshData::getBounds() const {
 }
 
 bool UsdProcessor::MeshData::validateGeometry() const {
-    // Validate points
-    if (points.empty()) {
-        return false;
-    }
-
-    // Check for finite values in points
-    for (const auto& point : points) {
-        if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) {
-            return false;
-        }
-    }
-
-    // Validate indices
+    if (points.empty()) return false;
     if (!indices.empty()) {
-        if (indices.size() % 3 != 0) {
-            return false; // Must be triangles
-        }
-
-        // Check index bounds
+        if (indices.size() % 3 != 0) return false;
         for (uint32_t index : indices) {
-            if (index >= points.size()) {
-                return false;
-            }
+            if (index >= points.size()) return false;
         }
     }
-
-    // Validate normals if present
     if (!normals.empty()) {
-        if (normals.size() != points.size()) {
-            return false; // Must match vertex count
-        }
-
-        for (const auto& normal : normals) {
-            if (!std::isfinite(normal.x) || !std::isfinite(normal.y) || !std::isfinite(normal.z)) {
-                return false;
-            }
-        }
+        if (normals.size() != points.size()) return false;
     }
-
-    // Validate UVs if present
     if (!uvs.empty()) {
-        if (uvs.size() != points.size()) {
-            return false; // Must match vertex count
-        }
-
-        for (const auto& uv : uvs) {
-            if (!std::isfinite(uv.x) || !std::isfinite(uv.y)) {
-                return false;
-            }
-        }
+        if (uvs.size() != points.size()) return false;
     }
-
+    for (const auto& point : points) {
+        if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) return false;
+    }
+    for (const auto& normal : normals) {
+        if (!std::isfinite(normal.x) || !std::isfinite(normal.y) || !std::isfinite(normal.z)) return false;
+    }
+    for (const auto& uv : uvs) {
+        if (!std::isfinite(uv.x) || !std::isfinite(uv.y)) return false;
+    }
     return true;
 }
 
@@ -1037,11 +924,12 @@ bool UsdProcessor::LoadUSDBuffer(const std::vector<uint8_t>& buffer,
 
         // CRITICAL FIX: Preserve full data for Unreal RealtimeMesh processing
         std::vector<uint8_t> processedBuffer;
+        std::string fixedContent; // holds the "0: None" fixed content for geometry path
 
-        // Convert buffer to string for processing
+        // Convert buffer to string for processing (single copy)
         std::string content(reinterpret_cast<const char*>(buffer.data()), buffer.size());
 
-        // ALWAY apply the '0: None' -> '0: []' fix for ALL files before any parsing.
+        // ALWAYS apply the '0: None' -> '0: []' fix for ALL files before any parsing.
         // USD ArrayWriter emits '0: None' for empty timeSampled arrays, which TinyUSDZ
         // fails to parse.  Without this fix, large geometry files intermittently fail
         // with C_result=0, MeshCount=0, CloudCount=0.
@@ -1062,6 +950,7 @@ bool UsdProcessor::LoadUSDBuffer(const std::vector<uint8_t>& buffer,
 
             MIDDLEWARE_LOG_INFO("Large geometry detected - using '0: None' fixed buffer for Unreal RealtimeMesh");
             processedBuffer.assign(content.begin(), content.end());
+            fixedContent = std::move(content); // keep for clip extraction below
         } else {
             // Apply minimal preprocessing for non-geometry files
             processedBuffer = pImpl->preprocessUsdContent(buffer);
@@ -1161,7 +1050,7 @@ bool UsdProcessor::LoadUSDBuffer(const std::vector<uint8_t>& buffer,
         if (referenceResolutionEnabled.load() && (outMeshData.empty() || hasEmptyGeometry(outMeshData))) {
             MIDDLEWARE_LOG_INFO("Attempting reference resolution for missing geometry");
 
-            if (!resolveReferences(stage, processedBuffer, fileName, outMeshData, progressCallback)) {
+            if (!resolveReferences(stage, processedBuffer, fileName, outMeshData, progressCallback, &fixedContent)) {
                 MIDDLEWARE_LOG_WARNING("Reference resolution completed with some failures");
             }
         }
@@ -1285,7 +1174,8 @@ int32_t UsdProcessor::getMaxRecursionDepth() const {
 void UsdProcessor::setMemoryLimit(size_t limitMB) {
     if (limitMB >= 1) {
         memoryLimitMB.store(limitMB);
-        MIDDLEWARE_LOG_INFO("Memory limit set to %zu MB", limitMB);
+        pImpl->memoryLimitBytes.store(limitMB * 1024 * 1024); // sync internal gate (bytes)
+        MIDDLEWARE_LOG_INFO("Memory limit set to %zu MB (%.2f GB)", limitMB, limitMB / 1024.0);
     } else {
         MIDDLEWARE_LOG_ERROR("Invalid memory limit: %zu MB (must be >= 1)", limitMB);
     }
@@ -1332,11 +1222,10 @@ bool UsdProcessor::validateUSDFormat(const std::vector<uint8_t>& buffer, const s
         return false;
     }
 
-    // Check for USD magic bytes or text patterns
-    std::string content(reinterpret_cast<const char*>(buffer.data()),
-                      std::min(buffer.size(), static_cast<size_t>(1000)));
+    // Check for USD magic bytes or text patterns — use string_view, no copy
+    size_t checkLen = std::min(buffer.size(), static_cast<size_t>(1000));
+    std::string_view content(reinterpret_cast<const char*>(buffer.data()), checkLen);
 
-    // Look for USD-specific patterns
     return (content.find("#usda") != std::string::npos ||
             content.find("PXR-USDC") != std::string::npos ||
             content.find("def ") != std::string::npos ||
@@ -2120,12 +2009,14 @@ void UsdProcessor::ExtractReferencePaths(const tinyusdz::Stage& stage,
 }
 
 std::vector<std::string> UsdProcessor::ExtractClipsFromRawContent(const std::vector<uint8_t>& buffer) {
+    std::string content(reinterpret_cast<const char*>(buffer.data()), buffer.size());
+    return pImpl->extractClipsFromString(content);
+}
+
+std::vector<std::string> UsdProcessor::UsdProcessorImpl::extractClipsFromString(const std::string& content) {
     std::vector<std::string> clipPaths;
 
-    // Convert buffer to string for parsing
-    std::string content(reinterpret_cast<const char*>(buffer.data()), buffer.size());
-
-    // Look for clips patterns in the raw USD content
+    // Look for clips patterns in the USD content
     std::regex clipsPattern(R"(asset\[\]\s+assetPaths\s*=\s*\[@([^@]+)@\])");
 
     std::sregex_iterator iter(content.begin(), content.end(), clipsPattern);
@@ -2469,10 +2360,11 @@ bool UsdProcessor::hasEmptyGeometry(const std::vector<MeshData>& meshData) const
 }
 
 bool UsdProcessor::resolveReferences(const tinyusdz::Stage& stage,
-                                    const std::vector<uint8_t>& buffer,
-                                    const std::string& fileName,
-                                    std::vector<MeshData>& outMeshData,
-                                    ProgressCallback progressCallback) {
+                                     const std::vector<uint8_t>& buffer,
+                                     const std::string& fileName,
+                                     std::vector<MeshData>& outMeshData,
+                                     ProgressCallback progressCallback,
+                                     const std::string* preExistingContent) {
     try {
         if (progressCallback) {
             progressCallback(0.0f, "Extracting reference paths");
@@ -2482,8 +2374,13 @@ bool UsdProcessor::resolveReferences(const tinyusdz::Stage& stage,
         std::vector<std::string> referencePaths;
         ExtractReferencePaths(stage, referencePaths);
 
-        // Extract clips from raw content
-        std::vector<std::string> clipPaths = ExtractClipsFromRawContent(buffer);
+        // Extract clips from raw content — use pre-existing string if available (avoids copy)
+        std::vector<std::string> clipPaths;
+        if (preExistingContent) {
+            clipPaths = pImpl->extractClipsFromString(*preExistingContent);
+        } else {
+            clipPaths = ExtractClipsFromRawContent(buffer);
+        }
         referencePaths.insert(referencePaths.end(), clipPaths.begin(), clipPaths.end());
 
         if (referencePaths.empty()) {
