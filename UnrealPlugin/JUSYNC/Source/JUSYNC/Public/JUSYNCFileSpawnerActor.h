@@ -251,7 +251,7 @@ private:
     // Depth-gated refresh queue (reuses PipelineDepth)
     int32 RefreshActive;
     TArray<TPair<FString, int32>> RefreshRemainingFiles;
-    
+
     // Forward-declare helper
     void ChainRefreshNext();
     void RetryRemainingFiles();

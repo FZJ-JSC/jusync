@@ -442,9 +442,7 @@ void AJUSYNCFileSpawnerActor::OnSingleFileDownloaded(const FString& Filename, co
         FilesDownloaded++;
         OnFileProgress.Broadcast(FilesDownloaded, FilesTotal);
         PipelineActive--;
-        // Chain pending work that was depth-gated
         if (RefreshRemainingFiles.Num() > 0) ChainRefreshNext();
-        else if (FailedFileIndices.Num() > 0 && CurrentRetryCount < MaxRetries) RetryRemainingFiles();
         else if (PipelineNextIndex < FilteredFiles.Num()) {
             UJUSYNCSubsystem* S = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
             if (S)
@@ -481,14 +479,13 @@ void AJUSYNCFileSpawnerActor::OnSingleFileDownloaded(const FString& Filename, co
 
                     // Chain next download in pipeline (overlap download with spawn)
                     WeakCopy->PipelineActive--;
-                    // Chain pending work that was depth-gated
                     if (WeakCopy->RefreshRemainingFiles.Num() > 0) WeakCopy->ChainRefreshNext();
-                    else if (WeakCopy->FailedFileIndices.Num() > 0 && WeakCopy->CurrentRetryCount < WeakCopy->MaxRetries) WeakCopy->RetryRemainingFiles();
                     else if (WeakCopy->PipelineNextIndex < WeakCopy->FilteredFiles.Num()) {
                         UJUSYNCSubsystem* S = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
                         if (S)
                             WeakCopy->PipelineDownloadNext(S);
                     }
+                    WeakCopy->CheckAllDownloadsComplete();
                 },
                 TStatId(), nullptr, ENamedThreads::GameThread);
         });
@@ -825,13 +822,22 @@ void AJUSYNCFileSpawnerActor::CheckAllDownloadsComplete()
 {
     if (FilesDownloaded >= FilesTotal)
     {
-        // Retry failed downloads if we have retries left
-        if (FailedFileIndices.Num() > 0 && CurrentRetryCount < MaxRetries)
+        // Wait for in-flight downloads to finish before deciding
+        if (PipelineActive > 0) return;
+
+        // Retry failed downloads AND parse failures if we have retries left
+        int32 TotalFailed = FailedFileIndices.Num() + ParseFailedIndices.Num();
+        if (TotalFailed > 0 && CurrentRetryCount < MaxRetries)
         {
-            UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: %d files failed, retrying (%d/%d)..."), FailedFileIndices.Num(), CurrentRetryCount + 1, MaxRetries);
-            GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Yellow, FString::Printf(TEXT("[Spawner] Retrying %d failed files (attempt %d/%d)..."), FailedFileIndices.Num(), CurrentRetryCount + 1, MaxRetries));
+            UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: %d files failed (dl=%d, parse=%d), retrying (%d/%d)..."),
+                TotalFailed, FailedFileIndices.Num(), ParseFailedIndices.Num(), CurrentRetryCount + 1, MaxRetries);
+            GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Yellow,
+                FString::Printf(TEXT("[Spawner] Retrying %d failed files (attempt %d/%d)..."),
+                TotalFailed, CurrentRetryCount + 1, MaxRetries));
             CurrentRetryCount++;
-            FilesDownloaded = FilesTotal - FailedFileIndices.Num(); // Count only remaining failed
+            FilesDownloaded = FilesTotal - TotalFailed;
+            PipelineActive = 0;
+            PipelineNextIndex = FilesTotal;
             RetryFailedDownloads();
             return;
         }
@@ -911,11 +917,20 @@ void AJUSYNCFileSpawnerActor::CheckAllDownloadsComplete()
 
 void AJUSYNCFileSpawnerActor::RetryFailedDownloads()
 {
-    if (FailedFileIndices.Num() == 0)
+    int32 TotalFailed = FailedFileIndices.Num() + ParseFailedIndices.Num();
+    if (TotalFailed == 0)
     {
         CheckAllDownloadsComplete();
         return;
     }
+
+    // Merge parse failures into download retry (re-download the file)
+    for (int32 idx : ParseFailedIndices)
+    {
+        if (!FailedFileIndices.Contains(idx))
+            FailedFileIndices.Add(idx);
+    }
+    ParseFailedIndices.Empty();
 
     UJUSYNCSubsystem* Subsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
     if (!Subsystem) return;
@@ -956,6 +971,12 @@ void AJUSYNCFileSpawnerActor::RetryFailedDownloads()
                     },
                     TStatId(), nullptr, ENamedThreads::GameThread);
             });
+    }
+
+    // If we didn't spawn all, chain the rest from OnSingleFileDownloaded
+    if (FailedFileIndices.Num() > 0)
+    {
+        // Will be picked up by CheckAllDownloadsComplete or next OnSingleFileDownloaded
     }
 }
 
