@@ -13,6 +13,9 @@
 #include <memory>
 #include <cstring>
 #include <fstream>
+#include <map>
+#include <string>
+#include <algorithm>
 #include <filesystem>
 #include <thread>
 #include <mutex>
@@ -365,6 +368,60 @@ int RequestWorkerCountExcludingRank0_C(uint32_t* out_count, int timeout_ms) {
 /**
  * Request list of available files from a specific rank
  */
+// Dedup same-stem USD files: .usda > .usdc > .usdz > .usd
+static int32_t usd_format_priority(const char* path) {
+    const char* dot = strrchr(path, '.');
+    if (!dot) return 0;
+    if (strcmp(dot, ".usda") == 0) return 4;
+    if (strcmp(dot, ".usdc") == 0) return 3;
+    if (strcmp(dot, ".usdz") == 0) return 2;
+    if (strcmp(dot, ".usd")  == 0) return 1;
+    return 99; // non-USD — never deduped
+}
+
+static void dedup_usd_filenames_strings(std::vector<std::string>& files) {
+    std::map<std::string, size_t> bestIdx;
+    for (size_t i = 0; i < files.size(); ++i) {
+        int32_t pri = usd_format_priority(files[i].c_str());
+        if (pri == 99) continue;
+        size_t dotPos = files[i].find_last_of('.');
+        if (dotPos == std::string::npos) continue;
+        std::string stem = files[i].substr(0, dotPos);
+        auto it = bestIdx.find(stem);
+        if (it == bestIdx.end()) bestIdx[stem] = i;
+        else if (pri > usd_format_priority(files[it->second].c_str())) it->second = i;
+    }
+    size_t cur = 0;
+    for (const auto& kv : bestIdx) {
+        if (kv.second > cur) std::swap(files[cur], files[kv.second]);
+        cur++;
+    }
+    std::fill(files.begin() + cur, files.end(), std::string());
+    files.erase(std::remove(files.begin(), files.end(), std::string()), files.end());
+}
+
+static void dedup_usd_filenames_info(std::vector<anari_usd_middleware::FileInfo>& files) {
+    std::map<std::string, size_t> bestIdx;
+    for (size_t i = 0; i < files.size(); ++i) {
+        int32_t pri = usd_format_priority(files[i].name.c_str());
+        if (pri == 99) continue;
+        size_t dotPos = files[i].name.find_last_of('.');
+        if (dotPos == std::string::npos) continue;
+        std::string stem = files[i].name.substr(0, dotPos);
+        auto it = bestIdx.find(stem);
+        if (it == bestIdx.end()) bestIdx[stem] = i;
+        else if (pri > usd_format_priority(files[it->second].name.c_str())) it->second = i;
+    }
+    size_t cur = 0;
+    for (const auto& kv : bestIdx) {
+        if (kv.second > cur) std::swap(files[cur], files[kv.second]);
+        cur++;
+    }
+    std::vector<anari_usd_middleware::FileInfo> kept(cur);
+    std::copy(files.begin(), files.begin() + cur, kept.begin());
+    files.swap(kept);
+}
+
 int RequestFileList_C(int32_t target_rank, char*** out_files, size_t* out_count, int timeout_ms) {
     if (!g_middleware || !out_files || !out_count) {
         return 0;
@@ -377,6 +434,7 @@ int RequestFileList_C(int32_t target_rank, char*** out_files, size_t* out_count,
             *out_files = nullptr;
             return 0;
         }
+        dedup_usd_filenames_strings(files);
         
         // Allocate C string array
         *out_count = files.size();
@@ -418,6 +476,7 @@ int RequestFileListWithSizes_C(int32_t target_rank, char*** out_names, uint64_t*
             *out_sizes = nullptr;
             return 0;
         }
+        dedup_usd_filenames_info(files);
         
         // Allocate C string array and size array
         *out_count = files.size();
@@ -465,6 +524,7 @@ int RequestFileListWithSizesAndRanks_C(int32_t target_rank, char*** out_names, u
             *out_hash_hi = nullptr;
             return 0;
         }
+        dedup_usd_filenames_info(files);
         
         // Allocate C arrays
         *out_count = files.size();
@@ -1734,6 +1794,7 @@ void RequestFileListAsync_C(
         }
         std::vector<std::string> files;
         bool success = g_middleware->requestFileList(target_rank, files, timeout_ms);
+        if (success) dedup_usd_filenames_strings(files);
         
         if (success && callback) {
             // Convert to C-style array
