@@ -267,10 +267,22 @@ void FJUSYNCPointCloudSpawner::DrainReadyQueue()
 
         OnPointCloudSpawned.Broadcast(EntryName, Actor);
 
-        UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: loaded PC actor '%s' (%d points, budget: %.1fms remaining)"),
-               *EntryName, EntryPoints, (RemainingBudget - Elapsed) * 1000.0f);
+        {
+            UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: loaded PC actor '%s' (%d points, budget: %.1fms remaining)"),
+                   *EntryName, EntryPoints, (RemainingBudget - Elapsed) * 1000.0f);
+        }
 #endif
     }
+
+    // Recolor any actors that spawned white but LUT is now available
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (GradientPendingActors.Num() > 0)
+    {
+        FScopeLock Lock(&GradientMutex);
+        if (GradientLUT.Num() > 0)
+            RecolorGradientPendingActors();
+    }
+#endif
 }
 
 void FJUSYNCPointCloudSpawner::ClearAllActors()
