@@ -1,299 +1,557 @@
-
 # JUSYNC
 
-A high-performance C++ middleware library that provides seamless communication between ANARI (ANAlytic Rendering Interface) applications and USD (Universal Scene Description) data streams via ZeroMQ messaging. This middleware enables real-time streaming of USD files, textures, and mesh data over network connections, making it ideal for collaborative workflows, live preview systems, and distributed rendering pipelines.
+A high-performance C++ middleware that streams USD geometry, textures, and point cloud data from **HPC simulation** (ANARI-SDK on supercomputers) to **Unreal Engine 5** in real-time. Built on ZeroMQ DEALER/ROUTER with RAM-aware parallel downloads, XXH3-128 change detection, and live diff-aware notifications.
+
+```
+HPC Workers (ANARI ranks)  →  ZMQ Broker (rank 0)  →  JUSYNC Middleware (.so)  →  UE5 Plugin (RealtimeMesh)
+```
 
 We gratefully acknowledge the Bundesministerium für Forschung, Technologie und Raumfahrt (BMFTR) and Ministerium für Kultur und Wissenschaft des Landes Nordrhein-Westfalen (MWK-NRW) for funding this work in the project InHPC-DE through the Gauss Centre for Supercomputing e.V. (www.gauss-centre.eu).
 
-## Overview
+---
 
-The JUSYNC Middleware acts as a bridge between USD content creation tools and ANARI-based rendering applications. It implements a robust ZeroMQ ROUTER/DEALER communication pattern to handle file transfers with hash verification, automatic USD format conversion, and comprehensive mesh data extraction capabilities.
+## Table of Contents
 
-## Recent Updates (v1.0.1)
+- [Pipeline Architecture](#pipeline-architecture)
+- [Feature Matrix](#feature-matrix)
+- [Dependencies](#dependencies)
+- [Building](#building)
+- [HPC Pipeline](#hpc-pipeline)
+  - [Build ANARI-SDK on Jülich](#build-anari-sdk-on-julich)
+  - [DiffCapture Status Table](#diffcapture-status-table)
+  - [Run Simulation](#run-simulation)
+- [Middleware](#middleware)
+  - [Overview](#overview)
+  - [Components](#components)
+  - [Build](#build-1)
+  - [Thread Model](#thread-model)
+- [Network Protocol](#network-protocol)
+  - [Message Types](#message-types)
+  - [Wire Format](#wire-format)
+  - [Protocol Flows](#protocol-flows)
+- [Unreal Engine 5 Plugin](#unreal-engine-5-plugin)
+  - [Setup](#setup)
+  - [Blueprint Integration](#blueprint-integration)
+  - [Live Updates](#live-updates)
+- [API Reference](#api-reference)
+- [GUI Testing Application](#gui-testing-application)
+- [USD Processing Capabilities](#usd-processing-capabilities)
+- [Troubleshooting](#troubleshooting)
 
-### 🔧 Critical Bug Fixes
-- **Fixed duplicate file processing** - Implemented `isDuplicateFile()` and `markFileAsProcessed()` methods to prevent the same file from being processed multiple times
-- **Resolved C interface memory access violations** - Eliminated premature memory deallocation in C interface that was causing application crashes
-- **Fixed mesh data conversion** - Corrected conversion between internal `glm::vec3` format and public API flat float arrays for RealtimeMesh compatibility
+---
 
-### 🛡️ Enhanced Safety & Validation
-- **Comprehensive input validation** - Added extensive bounds checking throughout USD processing pipeline
-- **Memory safety improvements** - Enhanced memory allocation checks with proper exception handling and size validation
-- **Thread safety enhancements** - Fixed atomic operations in statistics classes and improved mutex usage
-- **Pointer validation** - Added `MIDDLEWARE_VALIDATE_POINTER` macros throughout the codebase
+## Pipeline Architecture
 
-### 🎮 RealtimeMesh Integration
-- **Intelligent geometry preservation** - Added detection for large geometry arrays to preserve original USD data for Unreal's RealtimeMesh system
-- **Enhanced mesh validation** - Comprehensive mesh data validation with bounds checking and geometry integrity validation
-- **Optimized preprocessing** - Smart preprocessing that detects and preserves large geometry for better Unreal Engine compatibility
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│ HPC (Supercomputer - Jülich / Jureca)                                               │
+│                                                                                     │
+│  Rank 0 (Broker)         Rank 1...N (Workers)                                       │
+│  ┌──────────────┐        ┌──────────────────┐                                       │
+│  │ ZmqBroker    │ ◄────── │ UsdDevice::      │ ANARI SDK writes USD to               │
+│  │ (ROUTER)     │  DEALER │  flushCommit()   │ memory store per commit               │
+│  │ - fwd notifs │        │ - TrackStageMem() │                                      │
+│  │ - route reqs │        │ - DiffCapture    │ Captures old state before overwrite   │
+│  │ - status tbl │        │ - StoreFile()    │ New state + hash128                   │
+│  └──────┬───────┘        └──────────────────┘                                       │
+│         │ ZMQ (InfiniBand or localhost)                                              │
+└─────────┼───────────────────────────────────────────────────────────────────────────┘
+          │ NOTIFY_FILE_UPDATE_V2 (hashPrev128, hasOldData)
+          │ RESP_FILE_CHUNK (4MB chunks)
+┌─────────▼───────────────────────────────────────────────────────────────────────────┐
+│ Middleware / Laptop / UE Host                                                       │
+│                                                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐            │
+│  │  AnariUsdClient (DEALER)                                           │            │
+│  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  │            │
+│  │  │ Dispatcher Thread│  │ ParallelDownload │  │ UsdProcessor     │  │            │
+│  │  │ (recv all msg)   │→ │ Manager + RAM    │  │ (TinyUSDZ parse) │  │            │
+│  │  │ → enqueue        │  │  Monitor         │  │ → mesh / PC      │  │            │
+│  │  └──────────────────┘  └──────────────────┘  └──────────────────┘  │            │
+│  └─────────────┬────────────────────────────────────┬─────────────────┘            │
+│                │ C API callbacks                     │ UE Plugin                     │
+│                ▼                                     ▼                               │
+│        CMeshData / CPointCloudData        JUSYNCSubsystem                            │
+│                                              → AsyncTask(GameThread)                 │
+│                                              → Broadcast to Blueprint                │
+│                                              → SpawnRealtimeMesh / PointCloud        │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
 
-### 🔄 USD Processing Improvements
-- **Enhanced reference resolution** - Improved reference and payload resolution system with better error handling
-- **Transform validation** - Added determinant checking to prevent singular matrix transformations
-- **Better error context** - Enhanced error messages with more specific context about failed operations
+### Data Flow (Live Update)
 
-### 🌐 Cross-Platform Enhancements
-- **Safe string handling** - Added platform-specific safe string copying methods (`strncpy_s` on Windows, standard `strncpy` elsewhere)
-- **Improved conditional compilation** - Enhanced `MiddlewareLogging.h` with better Unreal Engine detection
-- **Fixed API macro definitions** - Resolved duplicate API macro definitions in C interface
+```
+1. HPC rank updates geometry → TrackStageMemory() exports .usda
+2. DiffCapture captures old FileEntry before StoreFile() overwrites
+3. SendFileNotificationV2() → broker → middleware
+   (includes hash128 of NEW data, hashPrev128 of OLD data)
+4. Middleware dispatcher thread recv() → NotificationCallback fires
+5. UE JUSYNCSubsystem marshals to game thread → OnNotificationReceived broadcast
+6. JUSYNCFileSpawnerActor compares hashPrev vs stored hash:
+   - Same hash → SKIP (no download, no destroy)
+   - Different hash → download → parse → spawn new → destroy old
+```
 
-### ⚠️ Breaking Changes
-- **ProcessingStats and MessageStats classes** are now non-copyable (use snapshot methods instead)
-- **Enhanced validation** may reject previously accepted invalid data
+---
 
 ## Feature Matrix
 
 ### ✅ Available Features
 
-- [x] **Real-time USD Streaming**: Receive and process USD files (.usd, .usda, .usdc, .usdz) in real-time over ZeroMQ connections
-- [x] **Advanced Mesh Processing**: Extract complete geometry data including vertices, indices, normals, and UV coordinates
-- [x] **USD Reference Resolution**: Automatically resolves USD references, payloads, and clips to load complete scenes
-- [x] **Hash Verification**: Built-in SHA-256 hash verification ensures data integrity during transmission
-- [x] **Cross-platform Support**: Compatible with Windows and Linux environments with dynamic library linking
-- [x] **Thread-safe Operations**: Multi-threaded architecture with callback-based event handling
-- [x] **GUI Testing Tool**: Dear ImGui-based GUI application at `../tools/ReceiverUI`
-- [x] **Texture Processing**: Handle image data with gradient extraction and PNG encoding/decoding
-- [x] **Load from Disk**: Direct USD file loading from filesystem with `LoadUSDFromDisk()`
-- [x] **Load from Buffer**: Process USD data from memory buffers with `LoadUSDBuffer()`
-- [x] **USD Format Detection**: Automatic detection of USD file formats and types
-- [x] **Triangulation**: Converts polygonal faces to triangles for real-time rendering
-- [x] **Coordinate Transformation**: Transforms vertices and normals using world transformation matrices
-- [x] **UV Coordinate Handling**: Searches multiple primvar names for texture coordinates
-- [x] **Comprehensive Logging**: Environment-specific logging (Unreal Engine vs Standard C++)
-- [x] **Error Handling**: Detailed error reporting with fallback mechanisms
-- [x] **Memory Management**: RAII patterns with automatic cleanup
+- [x] **Real-time USD Streaming**: Receive and process USD files (.usd, .usda, .usdc, .usdz) over ZeroMQ
+- [x] **Live Update Notifications**: `NOTIFY_FILE_UPDATE`, `NOTIFY_COMMIT_COMPLETE`, `NOTIFY_FILE_UPDATE_V2`
+- [x] **Diff-Aware Streaming (V2)**: `hashPrev128` + `hasOldData` enables skip-if-unchanged at UE side
+- [x] **Parallel Downloads**: RAM-aware parallel streaming with worker pool and memory budgeting
+- [x] **Advanced Mesh Processing**: Vertices, indices, normals, UVs, vertex colors, subdivision scheme
+- [x] **Point Cloud / LiDAR**: Extract `GeomPoints`, bake gradient colormap colors, UE LiDAR plugin
+- [x] **USD Reference Resolution**: Automatically resolves references, payloads, and clips
+- [x] **XXH3-128 Hashing**: Non-cryptographic, ultra-fast hash verification (replaced SHA-256)
+- [x] **GPU Acceleration**: CUDA vertex/normal/UV transforms for meshes ≥ 10K vertices
+- [x] **Collision Generation**: 5 levels — None, Simple (AABB), ConvexHull, Complex (full), Simplified (decimated)
+- [x] **Cross-Platform**: Windows (.dll) and Linux (.so) with dynamic library linking
+- [x] **Thread-Safe**: Dispatcher thread owns all ZMQ recv(), callbacks dispatched to consumer threads
+- [x] **Unreal Engine 5 Plugin**: Full plugin with Blueprints, async actions, RealtimeMesh, live updates
+- [x] **DiffCapture (HPC Broker)**: Terminal status table with per-rank update tracking (10s refresh)
+- [x] **Worker Discovery**: Query worker count, status, hostname, GPU info via ZMQ
+- [x] **Memory Safety**: RAII patterns, pointer validation macros, bounds checking, atomic stats
 - [x] **Duplicate Prevention**: Intelligent duplicate file detection and processing prevention
-- [x] **RealtimeMesh Compatibility**: Optimized for Unreal Engine RealtimeMesh workflows
+- [x] **GUI Testing Tool**: Dear ImGui-based application at `tools/ReceiverUI`
 
-### ❌ Not Available Features
+### ❌ Not Available
 
-- [ ] **USD to USDC Conversion**: `ConvertUSDtoUSDC()` method exists but requires external `tusdcat` tool
-- [ ] **Material Processing**: Material extraction from USD files is not fully implemented
 - [ ] **Animation Support**: USD animation and time-varying data is not processed
+- [ ] **Material Processing**: Full material extraction (shader graphs, textures from USD) incomplete
 - [ ] **Light Processing**: USD light extraction is not implemented
 - [ ] **Camera Processing**: USD camera data extraction is not implemented
-- [ ] **Subdivision Surfaces**: Advanced USD subdivision surfaces are not supported
 - [ ] **Volume Rendering**: USD volume data processing is not available
 - [ ] **Instancing**: USD instancing and prototypes are not fully supported
 
-### 🚧 Work in Progress
-
-- [x] Unreal plugin
-
-## Architecture
-
-The middleware consists of several key components:
-
-- **AnariUsdMiddleware**: Main interface class providing the public API with PIMPL pattern
-- **ZmqConnector**: Handles ZeroMQ ROUTER socket communication for receiving data from DEALER clients
-- **UsdProcessor**: Processes USD files using TinyUSDZ library for mesh and texture extraction
-- **HashVerifier**: Provides SHA-256 hash calculation and verification utilities using OpenSSL
+---
 
 ## Dependencies
 
-- **ZeroMQ**: High-performance messaging library for network communication
-- **OpenSSL**: Cryptographic library for hash verification
-- **TinyUSDZ**: Lightweight USD file processing library with composition support
-- **GLM**: Mathematics library for 3D transformations
-- **STB**: Single-header libraries for image processing
-- **Dear ImGui**: For the optional GUI testing application
+| Dependency | Purpose | Notes |
+|---|---|---|
+| **ZeroMQ** | High-performance messaging | ROUTER/DEALER sockets |
+| **TinyUSDZ** | USD parsing | Embedded as submodule |
+| **xxhash** | Fast non-cryptographic hashing | XXH3-128, replaces OpenSSL |
+| **GLM** | 3D math | Vec3 transforms, matrix ops |
+| **STB** | Image processing | PNG encode/decode |
+| **CUDA** *(optional)* | GPU acceleration | Vertex/normal/UV transforms |
+| **Dear ImGui** *(optional)* | GUI testing tool | `BUILD_JUSYNC_Receiver_GUI=ON` |
+
+> Removed: OpenSSL (no longer needed after XXH3 migration)
+
+---
 
 ## Building
 
 ### Prerequisites
 
-**Windows**:
-- Visual Studio 2019 or later
-- CMake 3.16+
-- ZeroMQ SDK (configurable path, defaults to `D:/SDK/ZeroMQ`)
-- OpenSSL (configurable path, defaults to `C:/Program Files/FireDaemon OpenSSL 3`)
+**Linux (Jülich / Dev Machine):**
+- GCC 13+ or Clang 18+
+- CMake 3.22+
+- ZeroMQ development packages (`libzmq3-dev` or `zeromq-devel`)
+- CUDA toolkit *(optional, for GPU acceleration)*
 
-**Linux**:
-- GCC 7+ or Clang 6+
-- CMake 3.16+
-- ZeroMQ development packages (`libzmq3-dev`)
-- OpenSSL development packages (`libssl-dev`)
+**Windows:**
+- Visual Studio 2022+
+- CMake 3.22+
+- ZeroMQ SDK
+- CUDA toolkit *(optional)*
 
-### Build Instructions
+### Build
 
-```
+```bash
+git clone https://github.com/FZJ-JSC/jusync.git
+cd jusync
+git submodule init && git submodule update
 
+mkdir build && cd build
 
-# Clone the repository
-
-git clone <repository-url>
-cd jusync_usd_middleware
-
-# Create build directory
-
-mkdir build
-cd build
-
-# Configure with CMake (uses dynamic paths)
-
+# Configure
 cmake .. -DCMAKE_BUILD_TYPE=Release
 
-# Override default paths if needed
-
-cmake .. -DZMQ_ROOT=/custom/zmq/path -DOPENSSL_ROOT_DIR=/custom/openssl/path
-
-# Build the library
-
+# Build (shared library)
 cmake --build . --config Release
 
 # Build with GUI testing tool
-
 cmake .. -DBUILD_JUSYNC_Receiver_GUI=ON
 
-# Disable tests if not needed
-
-cmake .. -DBUILD_TESTS=OFF
-
+# Build with GPU acceleration
+cmake .. -DBUILD_GPU=ON  # requires CUDA toolkit
 ```
 
-## GUI Testing Application
+Output: `libanari_usd_middleware.so` (Linux) / `anari_usd_middleware.dll` (Windows)
 
-The middleware includes a Dear ImGui-based GUI application located at `../tools/ReceiverUI` for testing and visualizing model loading:
+---
 
+## HPC Pipeline
+
+### Build ANARI-SDK on Jülich
+
+The ANARI-SDK contains the broker (`ZmqBroker`) and DiffCapture. Build on Jüelah (not dev machine):
+
+```bash
+# On Jülich login node:
+module load EasyBuild
+module load GCC/13.3.0
+source /path/to/your/anari-env.sh
+
+git clone https://github.com/staticx-g7/ANARI-USD.git
+cd ANARI-USD && git checkout diffcapture
+
+mkdir build && cd build
+cmake .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DUSD_ROOT_DIR=$HOME/userinstallation_anari/easybuild/jurecadc/software/OpenUSD/24.11-GCCcore-13.3.0 \
+  -DZMQ_INCLUDE_DIR=/path/to/zmq/include \
+  -DZMQ_LIBRARY=/path/to/zmq/lib/libzmq.so
+
+make -j$(nproc)
+# Output: libanari_library_usd.so  (copy to JUSYNC ThirdParty path)
 ```
 
+### DiffCapture Status Table
 
-# Build with GUI enabled
-
-cmake .. -DBUILD_JUSYNC_Receiver_GUI=ON
-cmake --build . --config Release
-
-# Run the GUI application
-
-cd tools/ReceiverUI
-./ReceiverUI  \# or ReceiverUI.exe on Windows
+The broker on rank 0 prints a terminal status table every 10 seconds showing per-rank file updates:
 
 ```
-
-The GUI application provides:
-- **Real-time Connection Status**: Visual indicators for ZeroMQ connection state
-- **File Reception Monitoring**: Live display of incoming files with size and hash information
-- **USD Model Visualization**: Interactive 3D viewer for loaded USD models
-- **Mesh Data Inspector**: Detailed view of extracted vertices, normals, and UV coordinates
-- **Texture Preview**: Display of processed textures and gradient lines
-- **Performance Metrics**: Real-time statistics for processing times and memory usage
-
-## API Flow Architecture
-
++================================================================================+
+| DIFF-CAPTURE STATUS TABLE                                          interval: 10s |
++================================================================================+
+| ssh -N -L 5556:10.0.1.5:5556 -i ~/.ssh/... george2@jureca04.fz-juelich.de   |
+| Ranks: 4  |  Active: 3  |  Updates (last 60s): 17                                   |
++--------------------------------------------------------------------------------+
+| Rank   Updated         Category   File Updated                                    |
++--------------------------------------------------------------------------------+
+| 0      4s ago   [green] geom       scene.usda                                      |
+| 1     18s ago [yellow] texture    material_diff.param.usda                        │
+| 2      8s ago   [green] geom       clips/prim_r2.usda                              │
+| 3       ---           --         (no update yet)                                 |
++================================================================================+
 ```
 
-graph TD
-A[Client Application] --> B[AnariUsdMiddleware::initialize]
-B --> C[ZmqConnector::initialize]
-C --> D[Bind to ZeroMQ Endpoint]
+**Controls:**
+| Env Var | Effect |
+|---|---|
+| `DIFFCAPTURE_STATUS_INTERVAL=10` | Refresh interval in seconds (default: 10) |
+| `DIFFCAPTURE_STATUS_INTERVAL=0` | Disable status table |
 
-    A --> E[registerUpdateCallback]
-    A --> F[registerMessageCallback]
-    
-    A --> G[startReceiving]
-    G --> H[Background Thread Loop]
-    
-    I[ZeroMQ Client] --> J[Send File/Message]
-    J --> K[ZmqConnector::receiveFile]
-    K --> L[HashVerifier::verifyHash]
-    L --> M{Hash Valid?}
-    
-    M -->|Yes| N[Trigger FileUpdateCallback]
-    M -->|No| O[Log Error & Reject]
-    
-    N --> P[UsdProcessor::LoadUSDBuffer]
-    P --> Q[Extract Mesh Data]
-    Q --> R[Return MeshData Array]
-    
-    S[Image Buffer] --> T[UsdProcessor::CreateTextureFromBuffer]
-    T --> U[STB Image Processing]
-    U --> V[Return TextureData]
-    
-    W[USD File Path] --> X[LoadUSDFromDisk]
-    X --> Y[Read File to Buffer]
-    Y --> P
-    ```
+### Run Simulation
 
-## Public API Reference
+Start the simulation from Jüelah with the ANARI device, broker auto-starts on rank 0.
 
-### Core Classes
+```bash
+# On your laptop — SSH tunnel to broker:
+ssh -N -L 5556:127.0.0.1:5556 -L 5555:127.0.0.1:5555 \
+  -i ~/.ssh/ed_25519_universal_openssh george2@jureca04.fz-juelich.de
 
-#### AnariUsdMiddleware
-
+# On HPC — run your simulation (broker starts automatically on rank 0)
+sbatch run_simulation.sh
 ```
 
+---
+
+## Middleware
+
+### Overview
+
+JUSYNC connects to the ANARI-USD broker as a **DEALER client**. It does NOT run as a server. The architecture:
+
+1. **Connect** to broker at `tcp://host:5556`
+2. **Subscribe** to push notifications (live updates)
+3. **Query** file lists per rank with sizes and XXH3-128 hashes
+4. **Download** files in parallel with RAM budget enforcement
+5. **Parse** USD with TinyUSDZ → extract meshes, point clouds, textures
+6. **Dispatch** via C callbacks to host application (UE5)
+
+### Components
+
+| Component | Role |
+|---|---|
+| `AnariUsdClient` | ZMQ DEALER client; dispatcher thread owns all recv() |
+| `UsdProcessor` | TinyUSDZ wrapper; extracts meshes, point clouds, UVs |
+| `ParallelDownloadManager` | Scheduler + worker pool; RAM-aware parallel streaming |
+| `MemoryMonitor` | System RAM awareness; gates download concurrency |
+| `CollisionProcessor` | Physics collision generation (5 complexity levels) |
+| `HashVerifier` | XXH3-128 hash comparison (replaced OpenSSL SHA-256) |
+| `GpuContext` | CUDA device detection; optional GPU-accelerated transforms |
+| `AnariUsdMiddleware_C` | C FFI interface for Unreal Engine |
+
+### Thread Model
+
+| Thread | Component | Purpose |
+|---|---|---|
+| **Dispatcher** | `AnariUsdClient` | Single thread owning ALL ZMQ recv(); enqueues into queue |
+| **Scheduler** | `ParallelDownloadManager` | Drains pending downloads, checks RAM budget, starts workers |
+| **Workers** | `ParallelDownloadManager` | Pool of threads, request/chunk/accumulate per file |
+| **GPU** | `GpuContext` (optional) | CUDA transforms for meshes ≥ 10K vertices |
+| **Main** | Host application | Calls API, receives callbacks |
+
+---
 
 ## Network Protocol
 
-### ZeroMQ ROUTER/DEALER Pattern
+### Message Types
 
-**File Transfer Message Format**:
-1. Client Identity (automatic)
-2. Filename
-3. File Content (binary)
-4. SHA-256 Hash
+All messages start with magic `0x55534446` (`"USDF"`). Binary-packed structs over ZMQ multipart frames.
 
-**Simple Message Format**:
-1. Client Identity (automatic)
-2. Message Content (JSON/text)
+**Worker Registration:**
+| Type | ID | Direction |
+|---|---|---|
+| `WORKER_READY` | 1 | Worker → Broker |
+| `WORKER_HEARTBEAT` | 2 | Worker → Broker |
+| `BROKER_ACK` | 10 | Broker → Worker |
 
-### Client Example (Python)
+**Worker Queries:**
+| Type | ID | Purpose |
+|---|---|---|
+| `REQ_WORKER_COUNT` / `RESP_WORKER_COUNT` | 21 / 23 | Total connected workers |
+| `REQ_WORKER_STATUS` / `RESP_WORKER_STATUS` | 20 / 22 | Per-worker status, hostname, GPU info |
+| `REQ_WORKER_LIST` / `RESP_WORKER_LIST` | 24 / 25 | Full worker list |
+| `REQ_GET_PROPERTY` / `RESP_PROPERTY` | 400 / 401 | Generic property queries |
 
+**File Operations:**
+| Type | ID | Purpose |
+|---|---|---|
+| `REQ_LIST_FILES` / `RESP_FILE_LIST` | 100 / 200 | List files per rank (JSON with hashes) |
+| `REQ_GET_FILE` / `RESP_FILE_CHUNK` / `RESP_FILE_COMPLETE` | 101 / 201 / 202 | Chunked download (4MB chunks) |
+| `RESP_NO_FILE` / `RESP_ERROR` | 203 / 204 | Error responses |
+
+**Push Notifications:**
+| Type | ID | Description |
+|---|---|---|
+| `NOTIFY_FILE_UPDATE` | 300 | File changed (old data not available) |
+| `NOTIFY_COMMIT_COMPLETE` | 301 | Scene commit finished |
+| `NOTIFY_FILE_UPDATE_V2` | 302 | File changed **with hashPrev128 + hasOldData** |
+
+### Wire Format
+
+**File Request (`REQ_GET_FILE`, 276 bytes):**
+```
+Offset  Size  Field
+0       4     magic (0x55534446)
+4       4     message_type (101)
+8       4     request_id (monotonic, client-side)
+12      4     target_rank (-1 = broadcast all)
+16      256   filename (null-terminated UTF-8)
+272     4     chunk_size (0 = default 4MB)
 ```
 
-import zmq
-import hashlib
+**Notification (`ZmqFileNotification`, ~384 bytes):**
+```
+Offset  Size  Field
+0       4     magic (0x55534446)
+4       4     message_type (300/301/302)
+8       4     source_rank
+12      256   filename
+268     8     file_size
+276     8     timestamp (Unix epoch seconds)
+284     16    hash128[2] (XXH3-128 of new data)
+300     16    hashPrev128[2] (XXH3-128 of old data, 0 if first)
+316     1     hasOldData (true if hashPrev128 is valid)
+```
 
-context = zmq.Context()
-socket = context.socket(zmq.DEALER)
-socket.connect("tcp://localhost:5556")
+### Protocol Flows
 
-# Send USD file
+**File Download:**
+```
+Client ──[REQ_GET_FILE]──▶ Broker ──forward──▶ Worker
+Client ◀──[RESP_FILE_CHUNK]── Broker ◀──data── Worker  (repeated, 4MB each)
+Client ◀──[RESP_FILE_COMPLETE]── Broker
+```
 
-with open("model.usd", "rb") as f:
-data = f.read()
+**Live Notification (V2):**
+```
+Worker ──[NOTIFY_FILE_UPDATE_V2]──▶ Broker ──forward──▶ Client
+                                                    └──▶ Client (multi-client)
+```
 
-file_hash = hashlib.sha256(data).hexdigest()
-socket.send_multipart([
-b"model.usd",
-data,
-file_hash.encode()
-])
+---
+
+## Unreal Engine 5 Plugin
+
+### Setup
+
+1. Build middleware → copy `.so` to:
+   ```
+   jusync-uesample/Plugins/JUSYNC/ThirdParty/AnariUsdMiddleware/Lib/Linux/
+   jusync-uesample/Plugins/JUSYNC/Source/ThirdParty/AnariUsdMiddleware/Lib/Linux/
+   ```
+2. Build ANARI-SDK → copy `.so` to same path
+3. Open `jusync-uesample.uproject` in UE5 editor
+4. Ensure JUSYNC plugin is enabled in `Edit → Plugins`
+5. Connect broker in Blueprint or C++:
+   ```cpp
+   UJUSYNCSubsystem::ConnectToBroker("tcp://127.0.0.1:5556");
+   ```
+
+### Blueprint Integration
+
+**Async Action Nodes:**
+| Node | Inputs | Outputs |
+|---|---|---|
+| `AsyncLoadUSD` | Buffer or file path | MeshData[], PointCloudData[] |
+| `AsyncReceiveFiles` | Timer interval | FileData[] (when files arrive) |
+| `AsyncCreateTexture` | Buffer data | UTexture2D |
+| `AsyncCreateMesh` | MeshData | URealtimeMeshComponent |
+
+**Subsystem Delegates:**
+| Delegate | Fires When |
+|---|---|
+| `OnFileReceived` | Chunked file download complete |
+| `OnNotificationReceived` | Broker push notification (V2-aware) |
+| `OnMessageReceived` | Text message from broker |
+
+### Live Updates
+
+The `JUSYNCFileSpawnerActor` subscribes to `OnNotificationReceived`:
 
 ```
+NotificationCallback_Static (C, middleware thread)
+  → AsyncTask(GameThread)
+  → FJUSYNCNotification (with HashLo, HashHi, HashPrevLo, HashPrevHi, bHasOldData)
+  → OnNotificationReceived.Broadcast()
+  → AJUSYNCFileSpawnerActor::OnBrokerNotification()
+  → if hashPrev != storedHash → download → spawn new → destroy old
+  → if hashPrev == storedHash → SKIP (no flicker, no bandwidth)
+```
+
+> The hash-gated decision logic compares `Notification.HashPrevLo/Hi` against stored `FileHashLo[Filename]`. Match = skip download completely.
+
+---
+
+## API Reference
+
+### C++ Public API (`AnariUsdMiddleware`)
+
+```cpp
+// Lifecycle
+middleware->initialize();
+middleware->connectToBroker("tcp://host:5556");
+middleware->disconnectFromBroker();
+
+// File list (returns FileInfo[] with sizes, hashes)
+auto files = middleware->requestFileList(rank, timeoutMs);
+
+// Parallel download (RAM-aware, immediate callbacks)
+middleware->requestFilesParallelAsync(filePaths, spawnCallback, errorCallback);
+
+// Worker queries
+int count = middleware->requestWorkerCount(timeoutMs);
+auto status = middleware->requestWorkerStatus(rank, timeoutMs);
+
+// USD processing
+auto meshes = middleware->loadUSDBuffer(data, size);
+auto meshes = middleware->loadUSDFromDisk("model.usda");
+
+// Collision generation
+middleware->processCollisionMesh(meshData, ECollisionComplexity::Complex);
+
+// Notifications
+middleware->setNotificationCallback([&](uint32_t type, int32_t rank,
+  const std::string& file, uint64_t size, uint64_t ts,
+  uint64_t hashLo, uint64_t hashHi,
+  uint64_t hashPrevLo, uint64_t hashPrevHi, bool hasOldData) {
+    // Handle live update
+});
+```
+
+### C FFI (`AnariUsdMiddleware_C.h`)
+
+All functions suffixed `_C` for UE compatibility. Key functions:
+
+```c
+// Lifecycle
+AnariUsdMiddlewareHandle_t InitializeMiddleware_C(void);
+void ConnectToBroker_C(handle, const char* endpoint);
+
+// File operations
+FileHandle_t RequestFilesParallelAsync_C(handle, filePaths[], count,
+  FileReceivedCallback_C callback, BrokerErrorCallback_C errorCb);
+
+// USD processing
+MeshHandle_t LoadUSDBuffer_C(handle, const uint8_t* data, size_t size);
+MeshData_t* GetMeshData_C(handle, count);
+PointCloudData_t* ProcessPointCloudFromUSD_C(handle, const uint8_t* data, size_t size);
+
+// Collision
+void ProcessCollisionMesh_C(handle, CMeshData* mesh, ECollisionComplexity complexity);
+
+// Notifications
+void RegisterNotificationCallback_C(NotificationCallback_C callback);
+
+// Cleanup
+void FreeMeshData_C(meshData, count);
+void FreePointCloudData_C(pcData, count);
+void ShutdownMiddleware_C(handle);
+```
+
+### C Structs
+
+**`CFileData`**: filename, data[], data_size, hash, file_type
+**`CMeshData`**: element_name, type_name, points[], points_count, indices[], indices_count, normals[], uvs[], vertex_colors[], vertex_colors_count, collision[], collision_count, collision_type, collision_complexity, subdivision_scheme
+**`CPointCloudData`**: positions[], positions_count, widths[], widths_count, scalar_attributes[], scalar_attributes_count, colors[], colors_count
+**`CTextureData`**: data[], data_size, width, height, channels
+
+---
+
+## GUI Testing Application
+
+Dear ImGui-based testing tool at `tools/ReceiverUI`:
+
+```bash
+cmake .. -DBUILD_JUSYNC_Receiver_GUI=ON
+cmake --build . --config Release
+./tools/ReceiverUI/ReceiverUI
+```
+
+**Features:**
+- Real-time connection status and ZeroMQ state
+- File reception monitoring (size, hash, type)
+- 3D model viewer for loaded USD
+- Mesh data inspector (vertices, normals, UVs, colors)
+- Texture preview and gradient extraction
+- Performance metrics (processing times, memory)
+- Point cloud visualization with colormap
+
+---
 
 ## USD Processing Capabilities
 
-The middleware includes comprehensive USD processing functionality:
+- **Geometry Extraction**: Full prim hierarchy walk, mesh points, indices, normals, UVs, vertex colors
+- **Reference Resolution**: Automatic resolution of USD references, payloads, and clips
+- **Triangulation**: Polygonal faces → triangles
+- **Transform Application**: World-space transform matrices applied to points and normals
+- **UV Primvar Search**: Multiple primvar name patterns for UV coordinates
+- **Coord Space**: USD Z-up right-handed → UE Z-up left-handed (Y-axis flip)
+- **Format Support**: .usd, .usda, .usdc, .usdz (via TinyUSDZ composition)
+- **Point Cloud**: GeomPoints extraction with width, scalar attributes, gradient colormap color baking
+- **GPU Acceleration**: CUDA transforms for meshes ≥ 10K vertices (positions, normals, UVs)
+- **Collision**: 5 levels — None / Simple (AABB) / ConvexHull / Complex (full) / Simplified (decimated)
+- **Vertex Color Interpolation**: Smooth blending from uniform face colors to vertex colors
 
-- **USD Parsing**: Extracts geometry, materials, UVs, and transformations from USD files using TinyUSDZ
-- **Reference Resolution**: Automatically resolves USD references, payloads, and clips to load complete scenes
-- **Triangulation**: Converts polygonal faces to triangles for real-time rendering
-- **Coordinate Transformation**: Transforms vertices and normals using proper world transformation matrices
-- **UV Coordinate Handling**: Searches for UV coordinates across multiple possible primvar names
-- **Texture Processing**: Creates textures from raw buffer data with gradient extraction capabilities
-- **Format Detection**: Supports multiple USD formats (.usd, .usda, .usdc, .usdz)
-- **Content Preprocessing**: Fixes common USD content issues for better compatibility
-
-## Error Handling
-
-The middleware provides comprehensive error handling with detailed logging:
-
-- **Connection Errors**: Automatic endpoint fallback and retry mechanisms
-- **Hash Verification**: Detailed mismatch reporting with calculated vs expected hashes
-- **USD Processing**: TinyUSDZ error reporting with reference resolution fallbacks
-- **File System**: Proper error handling for disk operations and file access
-- **Memory Management**: RAII patterns with automatic cleanup
+---
 
 ## Troubleshooting
 
-**Common Issues**:
+| Problem | Cause | Fix |
+|---|---|---|
+| **Broker not reachable** | SSH tunnel not running | `ssh -N -L 5556:localhost:5556 ...` |
+| **Hash mismatch on download** | stale .usd on disk / network drop | Re-request file; XXH3 logs both hashes |
+| **UE plugin can't find .so** | Middleware not copied to ThirdParty path | Copy `libanari_usd_middleware.so` to `Lib/Linux/` |
+| **Status table not printing** | Interval = 0 or env var disabled | Set `DIFFCAPTURE_STATUS_INTERVAL=10` |
+| **CUDA fallback to CPU** | No CUDA device or build without GPU | `cmake .. -DBUILD_GPU=ON` + CUDA toolkit |
+| **Point cloud empty** | No GeomPoints prims in USD | Check source simulation exports point cloud data |
+| **Dead ranks in status** | Worker crashed or network partition | Check HPC job status, restart worker |
+| **V2 notifications ignored** | UE handler only checks type 300 | Update `OnBrokerNotification` to handle type 302 |
 
-- **Port Binding**: Library tries alternative endpoints automatically
-- **USD References**: Searches multiple patterns for referenced geometry files
-- **Hash Failures**: Logs both expected and calculated hashes for debugging
-- **Missing Dependencies**: Clear error messages with installation guidance
-- **File Access**: Proper error reporting for file system operations
+**Enable verbose logging:**
+```bash
+# Middleware logging level (0=quiet, 3=verbose)
+export MIDDLEWARE_LOG_LEVEL=3
 
-Enable verbose logging for detailed processing information including USD prim hierarchies, ZeroMQ message flow, and file system operations.
-
+# DiffCapture status table off
+export DIFFCAPTURE_STATUS_INTERVAL=0
+```
