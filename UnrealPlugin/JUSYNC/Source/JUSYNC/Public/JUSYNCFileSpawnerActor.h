@@ -199,7 +199,7 @@ private:
     UFUNCTION()
     void OnBrokerNotification(const FJUSYNCNotification& Notification);
     void HandleFileUpdateNotification(const FString& Filename, int32_t SourceRank);
-    void HandleCommitCompleteNotification();
+    void HandleCommitCompleteNotification(bool bIsTimer = false);
     void StartLiveUpdatePolling();
     void StopLiveUpdatePolling();
     void OnLiveUpdateTimer();
@@ -220,6 +220,7 @@ private:
     TMap<FString, int32> GradientPngRankMap;
     TMap<int32, TArray<FColor>> RankGradients;
     std::atomic<bool> bGradientReady;
+    bool bGradientAttempted;  // Guard: only attempt middleware gradient once
     TArray<FJUSYNCPointCloudData> PendingPointClouds;
 
     int32 NextSpawnIndex;
@@ -237,6 +238,8 @@ private:
     // Live update state
     FTimerHandle LiveUpdateTimerHandle;
     TMap<FString, AActor*> FileToActorMap;
+    // Reverse index: filename → actors spawned from it (for O(1) old actor collection)
+    TMap<FString, TArray<AActor*>> FilenameToActors;
     TMap<FString, uint64> FileHashLo;
     TMap<FString, uint64> FileHashHi;
     TMap<FString, int64> FileLastSize;
@@ -247,12 +250,25 @@ private:
     // Live update guards
     bool bInitialSpawnDone;
     TSet<FString> RefreshedFiles;
+    TSet<FString> RefreshingFiles;
 
     // Depth-gated refresh queue (reuses PipelineDepth)
     int32 RefreshActive;
     TArray<TPair<FString, int32>> RefreshRemainingFiles;
 
+    // V2 download-active counter: prevents timer chain refresh from firing while
+    // V2 per-file refreshes are downloading+spawning on background threads.
+    std::atomic<int32> V2ActiveDownloads;
+
+    // Persistent V2-seen file→rank map: tracks ALL files the broker notifies about,
+    // so when a stub file (tiny, filtered) later grows into real geometry, we can spawn it.
+    TMap<FString, int32> SeenV2Files;
+    FTimerHandle SpawnThrottleTimer;
+    int32 MaxSpawnsPerFrame;
+    TArray<TPair<TArray<FJUSYNCMeshData>, FString>> DeferredSpawns;
+
     // Forward-declare helper
     void ChainRefreshNext();
     void RetryRemainingFiles();
+    void ProcessDeferredSpawns();
 };

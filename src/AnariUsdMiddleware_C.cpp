@@ -19,6 +19,8 @@
 #include <filesystem>
 #include <thread>
 #include <mutex>
+#include <condition_variable>
+#include <atomic>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -44,6 +46,31 @@ static int g_default_collision_complexity = COLLISION_COMPLEX;
 
 // Global mutex for thread-safe access to g_middleware and g_collision_processor
 static std::mutex g_middleware_mutex;
+
+// Lightweight counting semaphore (C++17 compatible) — limits parallel USD parsing
+// TinyUSDZ's LoadUSDFromMemory is not thread-safe for concurrent use across instances
+struct CountingSemaphore {
+    std::mutex mtx;
+    std::condition_variable cv;
+    int count;
+    explicit CountingSemaphore(int initial) : count(initial) {}
+    void acquire() {
+        std::unique_lock<std::mutex> lock(mtx);
+        cv.wait(lock, [this] { return count > 0; });
+        count--;
+    }
+    void release() {
+        std::unique_lock<std::mutex> lock(mtx);
+        count++;
+        cv.notify_one();
+    }
+};
+static CountingSemaphore g_parse_semaphore{4}; // allow 4 concurrent USD parses
+
+// RAII guard for the semaphore
+struct ParseGuard {
+    ~ParseGuard() { g_parse_semaphore.release(); }
+};
 
 // ============================================================================
 // C INTERFACE IMPLEMENTATION
@@ -401,25 +428,44 @@ static void dedup_usd_filenames_strings(std::vector<std::string>& files) {
 }
 
 static void dedup_usd_filenames_info(std::vector<anari_usd_middleware::FileInfo>& files) {
-    std::map<std::string, size_t> bestIdx;
+    // Collect USD files for dedup, preserve non-USD files as-is
+    std::vector<size_t> usdIndices;
+    std::vector<size_t> nonUsdIndices;
     for (size_t i = 0; i < files.size(); ++i) {
         int32_t pri = usd_format_priority(files[i].name.c_str());
-        if (pri == 99) continue;
-        size_t dotPos = files[i].name.find_last_of('.');
-        if (dotPos == std::string::npos) continue;
-        std::string stem = files[i].name.substr(0, dotPos);
-        auto it = bestIdx.find(stem);
-        if (it == bestIdx.end()) bestIdx[stem] = i;
-        else if (pri > usd_format_priority(files[it->second].name.c_str())) it->second = i;
+        if (pri == 99) {
+            nonUsdIndices.push_back(i);
+        } else {
+            usdIndices.push_back(i);
+        }
     }
+
+    // Dedup USD files by stem, keep highest priority
+    std::map<std::string, size_t> bestIdx;
+    for (size_t idx : usdIndices) {
+        int32_t pri = usd_format_priority(files[idx].name.c_str());
+        size_t dotPos = files[idx].name.find_last_of('.');
+        if (dotPos == std::string::npos) continue;
+        std::string stem = files[idx].name.substr(0, dotPos);
+        auto it = bestIdx.find(stem);
+        if (it == bestIdx.end()) {
+            bestIdx[stem] = idx;
+        } else if (pri > usd_format_priority(files[it->second].name.c_str())) {
+            it->second = idx;
+        }
+    }
+
+    // Rebuild: deduped USD first, then all non-USD (PNG, etc.)
     size_t cur = 0;
     for (const auto& kv : bestIdx) {
         if (kv.second > cur) std::swap(files[cur], files[kv.second]);
         cur++;
     }
-    std::vector<anari_usd_middleware::FileInfo> kept(cur);
-    std::copy(files.begin(), files.begin() + cur, kept.begin());
-    files.swap(kept);
+    for (size_t idx : nonUsdIndices) {
+        if (idx != cur) std::swap(files[cur], files[idx]);
+        cur++;
+    }
+    files.erase(files.begin() + cur, files.end());
 }
 
 int RequestFileList_C(int32_t target_rank, char*** out_files, size_t* out_count, int timeout_ms) {
@@ -814,16 +860,12 @@ static void ConvertMeshDataToCFormat(const anari_usd_middleware::UsdProcessor::M
         }
     }
 
-    // Vertex colors: src.vertex_colors is std::vector<glm::vec3> -> convert to flat float array
-    size_t numColors = src.vertex_colors.size();
-    dst.vertex_colors_count = numColors * 3;  // ✅ FIXED: Each vec3 = 3 floats
+    // Vertex colors: src.vertex_colors is flat float[] (RGBA) -> direct copy
+    size_t numColorFloats = src.vertex_colors.size();
+    dst.vertex_colors_count = numColorFloats;  // Already flat float array (4 floats per color)
     if (dst.vertex_colors_count > 0) {
         dst.vertex_colors = new float[dst.vertex_colors_count];
-        for (size_t i = 0; i < numColors; ++i) {
-            dst.vertex_colors[i * 3 + 0] = src.vertex_colors[i].x;
-            dst.vertex_colors[i * 3 + 1] = src.vertex_colors[i].y;
-            dst.vertex_colors[i * 3 + 2] = src.vertex_colors[i].z;
-        }
+        std::memcpy(dst.vertex_colors, src.vertex_colors.data(), dst.vertex_colors_count * sizeof(float));
     }
 
     // Note: USD geometry features are not copied to CMeshData
@@ -854,14 +896,18 @@ int LoadUSDBuffer_C(const unsigned char* buffer, size_t buffer_size, const char*
 
         // Create UsdProcessor instance and call ProcessFile directly
         anari_usd_middleware::UsdProcessor processor;
-        bool result = processor.LoadUSDBuffer(std_buffer, std_filename, mesh_data);
+        g_parse_semaphore.acquire();
+        {
+            ParseGuard guard;
+            bool result = processor.LoadUSDBuffer(std_buffer, std_filename, mesh_data);
 
 
-        if (!result || mesh_data.empty()) {
-            *out_count = 0;
-            *out_meshes = nullptr;
+            if (!result || mesh_data.empty()) {
+                *out_count = 0;
+                *out_meshes = nullptr;
             return 0;
         }
+        } // semaphore released here
 
         // Allocate C mesh array
         *out_count = mesh_data.size();
@@ -2275,9 +2321,12 @@ int LoadUSDFull_C(const unsigned char* buffer,
         std::vector<anari_usd_middleware::UsdProcessor::MeshData> mesh_data;
         std::vector<anari_usd_middleware::UsdProcessor::PointCloudData> pc_data;
 
-        bool result = processor.LoadUSDBuffer(std_buffer, std_filename, mesh_data, &pc_data);
+        g_parse_semaphore.acquire();
+        {
+            ParseGuard guard;
+            bool result = processor.LoadUSDBuffer(std_buffer, std_filename, mesh_data, &pc_data);
 
-        if (!result) {
+            if (!result) {
             MIDDLEWARE_LOG_ERROR("LoadUSDFull_C: LoadUSDBuffer returned false for '%s' (size=%zu bytes)",
                 std_filename.c_str(), buffer_size);
             // Show first 200 bytes of the buffer to diagnose
@@ -2289,7 +2338,8 @@ int LoadUSDFull_C(const unsigned char* buffer,
             *out_cloud_count = 0;
             *out_clouds = nullptr;
             return 0;
-        }
+            }
+        } // semaphore released here
 
         /*
          * Diagnose: if result is true but pc_data has an entry with 0 positions,

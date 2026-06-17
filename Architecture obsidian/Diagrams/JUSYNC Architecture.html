@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>JUSYNC Architecture — Full Stack Diagram</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: #0f1117;
+  color: #ccd6f6;
+  overflow-x: hidden;
+}
+#header {
+  background: linear-gradient(135deg, #1a1d2e 0%, #0d1117 100%);
+  padding: 24px 30px;
+  border-bottom: 1px solid #30363d;
+}
+#header h1    { font-size: 24px; color: #58a6ff; margin-bottom: 4px; }
+#header p     { font-size: 14px; color: #8b949e; }
+#charts { display: flex; flex-direction: column; gap: 40px; padding: 30px; }
+.chart-section { background: #161b22; border: 1px solid #21262d; border-radius: 10px; padding: 20px; }
+.chart-section h2 {
+  font-size: 18px;
+  color: #58a6ff;
+  margin-bottom: 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #21262d;
+}
+.chart-section p { font-size: 13px; color: #8b949e; margin-bottom: 12px; }
+/* Make mermaid containers responsive */
+.mermaid { display: flex; justify-content: center; width: 100%; overflow: auto; }
+.mermaid svg { max-width: 100%; height: auto; }
+/* Override mermaid dark colors */
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon {
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));
+}
+</style>
+</head>
+<body>
+<div id="header">
+  <h1>JUSYNC Architecture — HPC → ANARI-USD → ZMQ → Middleware → Unreal Engine</h1>
+  <p>Mermaid.js diagrams · Full pipeline with DiffCapture V2, hash-gated updates, parallel download, and RMC in-place rendering</p>
+</div>
+
+<div id="charts">
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 1. FULL PIPELINE SEQUENCE DIAGRAM                          -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="chart-section">
+  <h2>📋 Frame Update Sequence — V2 with DiffCapture</h2>
+  <p>End-to-end flow from ParaView commit to UE actor visible. Each step corresponds to actual source files.</p>
+
+<pre class="mermaid">
+sequenceDiagram
+    autonumber
+    participant P as ParaView/Catalyst<br/><i>HPC Worker (rank N)</i>
+    participant A as ANARI-SDK<br/><i>UsdDevice</i>
+    participant D as DiffCapture<br/><i>CapturePreStore</i>
+    participant Z as ZmqWorker<br/><i>SendNotificationV2</i>
+    participant B as ZmqBroker<br/><i>ForwardToClient</i>
+    participant M as AnariUsdClient<br/><i>handleNotification</i>
+    participant U as UE Spawner<br/><i>OnBrokerNotification</i>
+    participant R as RMC / GPU<br/><i>RealtimeMesh</i>
+
+    Note over P,R: ═══ ParaView Commit Boundary ═══
+
+    P->>A: flushCommit() / RenderFrame()
+    A->>A: UsdBridgeUsdWriter::TrackStageMemory()
+    A->>A: ExportToString → fullUsdContent (.usda)
+
+    Note over D: 📸 DIFF-CAPTURE-HOOK
+    A->>D: CapturePreStore(filename)
+    D->>D: Read OLD FileEntry from MemoryStore
+    A->>A: StoreFile → overwrite OLD data
+    A->>A: FlushSceneAndNotify()
+
+    A->>D: GetOldHash128, HasOldEntry
+    D-->>A: oldHash128[2], hasOldData=true
+    A->>Z: SendFileNotificationV2(newHash, oldHash, hasOld)
+    A->>D: Commit(filename) [clear old data]
+
+    Z->>B: NOTIFY_FILE_UPDATE_V2 (302)
+    B->>B: ForwardNotificationToClient()
+    B-->>M: ZMQ ROUTER → client
+
+    M->>M: dispatcherThread → handleNotification
+    M-->>U: notificationCallback(V2 fields)
+
+    Note over U: ═══ Game Thread (AsyncTask) ═══
+    U->>U: FJUSYNCNotification broadcast
+    U->>U: HashLo/Hi vs FileHashLo/Hi
+
+    alt Hash MATCH
+        U->>U: SKIP — no download, no destroy
+        U-->>R: Actor stays visible
+    else Hash MISMATCH
+        U->>Z: REQ_GET_FILE (101)
+        Z-->>M: RESP_FILE_CHUNK × N
+        M-->>U: Full file delivered
+        U->>U: UsdProcessor::ExtractMeshData
+        U->>R: SpawnRealtimeMeshAtLocation
+        R->>R: Build vertex streams<br/>GPU upload
+        U->>U: Update hash, swap FileToActorMap
+        U->>U: Destroy old actors
+    end
+</pre>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 2. ARCHITECTURE OVERVIEW BLOCK DIAGRAM                     -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="chart-section">
+  <h2>🏗️ Architecture Overview — Modules & Dependencies</h2>
+  <p>Component-level map with build targets, file locations, and data flow directions.</p>
+
+<pre class="mermaid">
+graph LR
+    subgraph HPC_SDK["HPC: ANARI-USD SDK (libanari_library_usd.so)"]
+        A1[ParaView/Catalyst]
+        A2[UsdDevice.cpp]
+        A3[UsdBridgeUsdWriter.cpp<br/>TrackStageMemory]
+        A4[UsdBridgeMemoryStore.cpp]
+        A5[UsdBridgeDiffCapture.cpp<br/>STANDALONE - 2 files]
+        A6[UsdBridgeZmqBroker.cpp]
+    end
+
+    subgraph NETWORK["Network: ZeroMQ (DEALER ↔ ROUTER)"]
+        B1[Worker DEALER Port:5555]
+        B2[Broker ROUTER Port:5556]
+    end
+
+    subgraph MIDWARE["JUSYNC Middleware (libanari_usd_middleware.so)"]
+        C1[AnariUsdClient.cpp<br/>Dispatcher thread]
+        C2[AnariUsdMiddleware.cpp<br/>C C-API wrapper]
+        C3[ParallelDownloadManager.cpp<br/>Worker pool]
+        C4[UsdProcessor.cpp<br/>TinyUSDZ → FJUSYNCMeshData]
+        C5[MemoryMonitor.cpp<br/>RAM guard]
+        C6[HashVerifier.cpp<br/>XXH3-128]
+        C7[xxhash/xxhash.c]
+    end
+
+    subgraph UE["Unreal Plugin (libUnrealEditor-JUSYNC.so)"]
+        D1[JUSYNCSubsystem.cpp<br/>NotificationCallback_Static]
+        D2[JUSYNCFileSpawnerActor.cpp<br/>OnBrokerNotification]
+        D3[JUSYNCPointCloudSpawner.cpp<br/>Actor pool]
+        D4[JUSYNCBlueprintLibrary.cpp<br/>RMC spawn wrapper]
+        D5[JUSYNCTypes.h<br/>FJUSYNCNotification V2]
+    end
+
+    A1 --> A2 --> A3
+    A3 -->|📸 capture old| A5
+    A5 -->|hashPrev128| A6
+    A3 --> A4
+    A4 --> A6
+    A6 --> B1
+    B1 --> B2
+    B2 -->|"NOTIFY_UPDATE_V2 (302)"| C1
+    B2 -->|"REQ_LIST_FILES"| C3
+    B1 -->|"file chunks"| C1
+    C1 --> C2 --> D1
+    C3 --> D2
+    C4 --> D2
+    D1 -->|hash gate| D2
+    D2 --> D4
+    D2 --> D3
+    D4 -->|"RMC API"| E1[RealtimeMeshComponent Plugin]
+    D3 -->|"LiDAR API"| E2[LidarPointCloud Plugin]
+
+    classDef sdk fill:#1f6feb,stroke:#58a6ff,color:#fff
+    classDef net fill:#a371f7,stroke:#d2a8ff,color:#fff
+    classDef mid fill:#da3633,stroke:#ff6e69,color:#fff
+    classDef ue fill:#238636,stroke:#3fb950,color:#fff
+    classDef gpu fill:#f778ba,stroke:#ffafc8,color:#fff
+
+    class A1,A2,A3,A4,A5,A6 sdk
+    class B1,B2 net
+    class C1,C2,C3,C4,C5,C6,C7 mid
+    class D1,D2,D3,D4,D5 ue
+    class E1,E2 gpu
+</pre>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 3. HASH TRACKING STATE DIAGRAM                             -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="chart-section">
+  <h2>🔐 Hash Tracking Lifecycle — Per Mesh File</h2>
+  <p>How a single file moves through states from first spawn to final destruction.</p>
+
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> Unknown: File never seen in UE
+    Unknown --> HashStored: Initial spawn → write FileHashLo/Hi[filename]
+    HashStored --> Unchanged: V2 notification: hash match → SKIP refresh
+    HashStored --> Changed:   V2 notification: hash mismatch → refresh
+    Unchanged --> HashStored: Next notification, re-evaluate
+    Changed --> Downloading: REQ_GET_FILE → 4MB chunks → accumulate
+    Downloading --> Parsing: Full file → UsdProcessor::ExtractMeshData
+    Parsing --> Spawning: FJUSYNCMeshData → SpawnRealtimeMeshAtLocation
+    Spawning --> Verifying: New actor spawned, old still visible<br/>FileToActorMap swap
+    Verifying --> HashUpdated: Write new FileHashLo/Hi, update generation
+    HashUpdated --> HashStored: Old actors destroyed, full cycle done
+    HashUpdated --> [*]: PIE stop / actor cleanup
+</pre>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 4. THREAD MODEL                                            -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="chart-section">
+  <h2>🧵 Thread Model — Who Owns What</h2>
+  <p>Thread affinity for every critical operation. Cross-thread marshaling points are marked.</p>
+
+<pre class="mermaid">
+graph TD
+    subgraph HPC["HPC Worker (rank N)"]
+        T1["ANARI-SDK main thread<br/>flushCommit, TrackStageMemory"]
+        T2["ZMQ Dealer send thread<br/>SendFileNotificationV2"]
+    end
+
+    subgraph BROKER["Broker (rank 0)"]
+        T3["Broker message loop<br/>ForwardNotificationToClient"]
+    end
+
+    subgraph MID["JUSYNC Middleware"]
+        T4["Dispatcher thread<br/>owns ALL ZMQ recv()"]
+        T5["Scheduler thread<br/>gate on MemoryMonitor"]
+        T6["Worker threads × N<br/>send REQ_GET_FILE, accumulate chunks"]
+        T7["Callback thread<br/>notificationCallback"]
+    end
+
+    subgraph UE_TH["UE Game Thread"]
+        T8["OnBrokerNotification<br/>hash compare, decide"]
+        T9["RMC spawn / destroy<br/>FileToActorMap swap"]
+    end
+
+    subgraph BG_TH["UE Background Threads"]
+        T10["Parse thread<br/>UsdProcessor background"]
+    end
+
+    T1 -->|"V2 notification"| T2
+    T2 -->|"ZMQ"| T3
+    T3 --> T4
+    T4 -->|"recv → queue"| T6
+    T4 --> T7
+    T7 -->|"C callback"| T8
+    T5 --> T6
+    T8 -->|"hash gate"| T9
+    T8 -->|"spawn request"| T10
+    T10 -->|"marshal results"| T9
+
+    classDef hpc fill:#1f6feb,color:#fff
+    classDef brk fill:#a371f7,color:#fff
+    classDef mid fill:#da3633,color:#fff
+    classDef ue fill:#238636,color:#fff
+    classDef bg fill:#f778ba,color:#fff
+
+    class T1,T2 hpc
+    class T3 brk
+    class T4,T5,T6,T7 mid
+    class T8,T9 ue
+    class T10 bg
+</pre>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 5. DATA STRUCTURES                                           -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="chart-section">
+  <h2>📦 Key Data Structures</h2>
+  <p>Maps, arrays, and queues that track actor state, hash history, and pending operations.</p>
+
+<pre class="mermaid">
+classDiagram
+    class FJUSYNCNotification {
+        +EJUSYNCNotificationType Type
+        +int32 SourceRank
+        +FString Filename
+        +int64 FileSize
+        +int64 Timestamp
+        +int64 HashLo
+        +int64 HashHi
+        +int64 HashPrevLo
+        +int64 HashPrevHi
+        +bool bHasOldData
+    }
+
+    class FJUSYNCMeshData {
+        +FString ElementName
+        +TArray FVector Vertices
+        +TArray int32 Triangles
+        +TArray FVector Normals
+        +TArray FVector2D UVs
+        +TArray FColor VertexColors
+        +GetVertexCount()
+        +GetTriangleCount()
+    }
+
+    class FJUSYNCPointCloudData {
+        +FString ElementName
+        +TArray FVector Positions
+        +TArray FColor Colors
+        +TArray float Widths
+        +int32 PointCount
+        +bool bHasColors
+    }
+
+    class ZmqFileNotification {
+        +uint32 magic
+        +uint32 message_type
+        +int32 source_rank
+        +char filename[256]
+        +uint64 file_size
+        +uint64 timestamp
+        +uint64 hash128[2]
+        +uint64 hashPrev128[2]
+        +bool hasOldData
+    }
+
+    class DiffFileEntry {
+        +string filename
+        +vector~uint8~ oldData
+        +uint64 oldHash128[2]
+        +size_t oldSize
+        +double oldTimestamp
+    }
+
+    class AnariUsdClient {
+        +dispatcherThread()
+        +handleNotification(data)
+        +setNotificationCallback(cb)
+        #notificationCallback
+        #responseQueue
+        #dispatcherActive
+    }
+
+    AnariUsdClient ..> ZmqFileNotification : receives
+    AnariUsdClient ..> FJUSYNCNotification : callback → broadcast
+    FJUSYNCNotification ..> FJUSYNCMeshData : spawn decision
+    ZmqFileNotification ..> FJUSYNCNotification : V2 fields map
+    DiffFileEntry ..> ZmqFileNotification : populates hashPrev128
+</pre>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 6. MESSAGE TYPE MAP                                        -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="chart-section">
+  <h2>📨 ZMQ Message Types</h2>
+  <p>Complete wire protocol reference. All messages carry ANARI_USD_MAGIC (0x55534146).</p>
+
+<pre class="mermaid">
+graph LR
+    subgraph REQ["Requests (Client → Broker → Worker)"]
+        R1["REQ_LIST_FILES (100)"]
+        R2["REQ_GET_FILE (101)"]
+        R3["REQ_GET_FRAME (102)"]
+        R4["REQ_GET_PROPERTY (400)"]
+    end
+
+    subgraph RESP["Responses (Worker → Broker → Client)"]
+        S1["RESP_FILE_LIST (200)"]
+        S2["RESP_FILE_CHUNK (201)"]
+        S3["RESP_FILE_COMPLETE (202)"]
+        S4["RESP_NO_FILE (203)"]
+        S5["RESP_ERROR (204)"]
+        S6["RESP_PROPERTY (401)"]
+    end
+
+    subgraph NOTIFY["Push Notifications (Worker → Broker → Client)"]
+        N1["NOTIFY_FILE_UPDATE (300)<br/>V1: no old hash"]
+        N2["NOTIFY_FILE_UPDATE_V2 (302)<br/>V2: hashPrev128 + hasOldData"]
+        N3["NOTIFY_COMMIT_COMPLETE (301)"]
+    end
+
+    R1 --> S1
+    R2 --> S2
+    R2 --> S3
+    R2 --> S4
+    R2 --> S5
+    R4 --> S6
+
+    classDef req fill:#da3633,color:#fff
+    classDef resp fill:#238636,color:#fff
+    classDef notif fill:#d29922,color:#000
+
+    class R1,R2,R3,R4 req
+    class S1,S2,S3,S4,S5,S6 resp
+    class N1,N2,N3 notif
+</pre>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 7. PARALLEL DOWNLOAD                                      -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="chart-section">
+  <h2>⚡ Parallel Download + Spawn — Immediate Spawn Pipeline</h2>
+  <p>Files spawn as soon as their data is ready, not after all downloads complete.</p>
+
+<pre class="mermaid">
+graph LR
+    A["UE: requestFilesParallelAsync<br/>[file1, file2, file3]"] --> B["Scheduler: estimate bytes/file"]
+
+    B --> C["MemoryMonitor: canAlloc?"]
+    C -->|YES| D["allocate(estimatedMB)"]
+    C -->|NO| E["Wait → retry"]
+
+    D --> F1["Worker 1: REQ(file1)"]
+    D --> F2["Worker 2: REQ(file2)"]
+    D --> F3["Worker 3: REQ(file3)"]
+
+    F1 --> G1["CHUNK 1a → COMPLETE 1"]
+    F2 --> G2["CHUNK 2a → CHUNK 2b → COMPLETE 2"]
+    F3 --> G3["CHUNK 3a → COMPLETE 3"]
+
+    G1 --> H1["SpawnCallback → PARSE 1 → SPAWN 1 🟢"]
+    G2 --> H2["SpawnCallback → PARSE 2 → SPAWN 2 🟢"]
+    G3 --> H3["SpawnCallback → PARSE 3 → SPAWN 3 🟢"]
+
+    H1 --> I["release(actualSize)"]
+    H2 --> I
+    H3 --> I
+
+    I --> J["completeCallback: all spawned"]
+
+    classDef sched fill:#da3633,color:#fff
+    classDef worker fill:#238636,color:#fff
+    classDef spawn fill:#d29922,color:#000
+
+    class B,C sched
+    class F1,F2,F3,G1,G2,G3 worker
+    class H1,H2,H3 spawn
+</pre>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 8. USD PARSING PIPELINE                                    -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="chart-section">
+  <h2>🔍 USD Parsing Pipeline — File Bytes → FJUSYNCMeshData</h2>
+  <p>Full data extraction chain with critical patches and field mapping.</p>
+
+<pre class="mermaid">
+graph TD
+    A["Raw .usda / .usd bytes"] --> B["Patches:<br/>.usd → .usda rename<br/>0: None → 0: []"]
+    B --> C["TinyUSDZ::preprocessUsd()"]
+    C --> D["UsdStageRefPtr stage"]
+
+    D --> E["ProcessPrimRecursive"]
+    E -->|GeomMesh| F["ExtractMeshData"]
+    E -->|GeomPoints| G["ExtractPointCloudData"]
+    E -->|GeomXform| H["Transform matrix"]
+    E -->|GeomPointInstancer| I["ExtractInstancerData"]
+
+    F --> F1["Get world matrix<br/>from prim stack"]
+    F1 --> F2["points → transform to world"]
+    F2 --> F3["faceVertexCounts + faceVertexIndices<br/>triangulate N-gons if subdiv=none"]
+    F3 --> F4["normals → normal matrix transform<br/>auto-compute if missing"]
+    F4 --> F5["UVs from primvars(st,st1,st2,uv)"]
+    F5 --> F6["colors from primvars:color<br/>or displayColor+displayOpacity"]
+    F6 --> F7["subdivisionScheme: catmullClark/loop/none"]
+    F7 --> R["FJUSYNCMeshData<br/>{elementName, typeName, points[], indices[], normals[], uvs[], vertex_colors[], faceVertexCounts[], uvSets[]}"]
+
+    G --> G1["positions + widths"]
+    G1 --> G2["gradient colormap → vertex_colors"]
+    G2 --> R
+
+    classDef raw fill:#484f58,color:#fff
+    classDef patch fill:#da3633,color:#fff
+    classDef parse fill:#1f6feb,color:#fff
+    classDef extract fill:#238636,color:#fff
+    classDef result fill:#f778ba,color:#fff
+
+    class A raw
+    class B patch
+    class C,D,E,H,I parse
+    class F,F1,F2,F3,F4,F5,F6,F7 extract
+    class G,G1,G2 extract
+    class R result
+</pre>
+</div>
+
+</div> <!-- /charts -->
+
+<script>
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'dark',
+  themeVariables: {
+    primaryColor: '#1f6feb',
+    primaryTextColor: '#e6edf3',
+    primaryBorderColor: '#58a6ff',
+    lineColor: '#30363d',
+    secondaryColor: '#238636',
+    tertiaryColor: '#161b22',
+    background: '#0d1117',
+    mainBkg: '#161b22',
+    nodeBorder: '#30363d',
+    clusterBkg: '#0d1117',
+    clusterBorder: '#21262d',
+    titleColor: '#58a6ff',
+    edgeLabelBackground: '#161b22',
+    actorBorder: '#58a6ff',
+    actorBkg: '#1f6feb',
+    actorTextColor: '#fff',
+    sequenceNumber: '#8b949e',
+    activatableBkg: '#21262d',
+    loopLineColor: '#da3633',
+  },
+  flowchart: { curve: 'basis', padding: 16, htmlLabels: true },
+  sequence: { actorMargin: 80, messageMargin: 40, boxMargin: 5, boxTextMargin: 5, noteMargin: 10, messageFontFamily: 'Segoe UI, sans-serif', actorFontFamily: 'Segoe UI, sans-serif', width: 1700, actorFontSize: 12, messageFontSize: 11, noteFontSize: 11 },
+  state: { curve: 'basis', padding: 16, fontSize: 12 },
+  class: { curve: 'basis', padding: 12, fontSize: 11 },
+});
+</script>
+</body>
+</html>

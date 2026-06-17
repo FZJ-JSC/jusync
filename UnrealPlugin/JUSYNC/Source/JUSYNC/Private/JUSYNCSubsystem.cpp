@@ -175,12 +175,34 @@ extern "C" void MessageReceivedCallback_Static(const char* message)
     });
 }
 
+// Filter helper: determine if a file path is relevant for live updates (geometry clips only)
+static bool IsNotificationForSkippableFile(const char* filename)
+{
+    if (!filename) return false;
+    const char* p = filename;
+    while (*p)
+    {
+        if (p[0] == 'i' && p[1] == 'm' && p[2] == 'a' && p[3] == 'g' && p[4] == 'e' && p[5] == 's' && p[6] == '/') return true;
+        if (p[0] == 's' && p[1] == 'h' && p[2] == 'a' && p[3] == 'r' && p[4] == 'e' && p[5] == 'd' && p[6] == '/') return true;
+        if (p[0] == 'm' && p[1] == 'a' && p[2] == 'n' && p[3] == 'i' && p[4] == 'f' && p[5] == 'e' && p[6] == 's' && p[7] == 't') return true;
+        if (p[0] == 'S' && p[1] == 'e' && p[2] == 's' && p[3] == 's' && p[4] == 'i' && p[5] == 'o' && p[6] == 'n' && p[7] == '_') return true;
+        if (p[0] == 'p' && p[1] == 'r' && p[2] == 'i' && p[3] == 'm' && p[4] == 's' && p[5] == 't' && p[6] == 'a' && p[7] == 'g' && p[8] == 'e' && p[9] == 's') return true;
+        if ((p[0] == '.' || p[0] == '/') && (p[1] == 'p' || p[1] == 'P') && (p[2] == 'n' || p[2] == 'N') && (p[3] == 'g' || p[3] == 'G')) return true;
+        p++;
+    }
+    return false;
+}
+
 extern "C" void NotificationCallback_Static(uint32_t messageType, int32_t sourceRank,
                                               const char* filename, uint64_t fileSize, uint64_t timestamp,
                                               uint64_t hashLo, uint64_t hashHi,
                                               uint64_t hashPrevLo, uint64_t hashPrevHi,
                                               bool hasOldData)
 {
+    // CommitComplete has no filename - always pass through
+    if (messageType != 301 && IsNotificationForSkippableFile(filename))
+        return;  // Drop images/, shared/, .png, manifest, Session_, primstages/ early
+
     FString NotifType = TEXT("NOTIFY_UNKNOWN");
     if (messageType == 302)      NotifType = TEXT("NOTIFY_FILE_UPDATE_V2");
     else if (messageType == 301) NotifType = TEXT("NOTIFY_COMMIT_COMPLETE");
@@ -1091,7 +1113,7 @@ void UJUSYNCSubsystem::ApplyCachedGradientToSpawner()
     int Result = GetCachedGradientTexture_C(&gradientData, &gradientSize, &width, &height);
     if (Result != 1 || !gradientData || gradientSize == 0 || width < 1 || height < 1)
     {
-        UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC: No cached gradient texture in middleware"));
+        UE_LOG(LogJUSYNC, Verbose, TEXT("JUSYNC: No cached gradient texture in middleware (expected if no PC parsed yet)"));
         return;
     }
 
@@ -3212,7 +3234,7 @@ bool UJUSYNCSubsystem::RequestFileListWithSizes(int32 TargetRank, int32 TimeoutM
     return false;
 }
 
-bool UJUSYNCSubsystem::RequestFileListWithSizesAndRanks(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles, TArray<int64>& OutSizes, TArray<int32>& OutRanks)
+bool UJUSYNCSubsystem::RequestFileListWithSizesAndRanks(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles, TArray<int64>& OutSizes, TArray<int32>& OutRanks, TArray<uint64>* OutHashLo, TArray<uint64>* OutHashHi)
 {
     // âœ… FIX: Removed MiddlewareMutex lock - blocking broker call should not hold global mutex
     
@@ -3287,7 +3309,9 @@ bool UJUSYNCSubsystem::RequestFileListWithSizesAndRanks(int32 TargetRank, int32 
         OutFiles.Reserve(FileCount);
         OutSizes.Reserve(FileCount);
         OutRanks.Reserve(FileCount);
-        
+        if (OutHashLo) OutHashLo->Reserve(FileCount);
+        if (OutHashHi) OutHashHi->Reserve(FileCount);
+
         for (size_t i = 0; i < FileCount; ++i)
         {
             if (FileList[i])
@@ -3295,6 +3319,8 @@ bool UJUSYNCSubsystem::RequestFileListWithSizesAndRanks(int32 TargetRank, int32 
                 OutFiles.Add(FString(UTF8_TO_TCHAR(FileList[i])));
                 OutSizes.Add(static_cast<int64>(FileSizes[i]));
                 OutRanks.Add(static_cast<int32>(FileRanks[i]));
+                if (OutHashLo && FileHashLo) OutHashLo->Add(FileHashLo[i]);
+                if (OutHashHi && FileHashHi) OutHashHi->Add(FileHashHi[i]);
             }
         }
         
@@ -3309,7 +3335,7 @@ bool UJUSYNCSubsystem::RequestFileListWithSizesAndRanks(int32 TargetRank, int32 
         UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to request file list with sizes and ranks (Result: %d)"), Result);
         if (FileList || FileSizes || FileRanks)
         {
-            FreeFileListWithSizesAndRanks_C(FileList, FileSizes, FileRanks, nullptr, nullptr, FileCount);
+            FreeFileListWithSizesAndRanks_C(FileList, FileSizes, FileRanks, FileHashLo, FileHashHi, FileCount);
         }
     }
 #endif
