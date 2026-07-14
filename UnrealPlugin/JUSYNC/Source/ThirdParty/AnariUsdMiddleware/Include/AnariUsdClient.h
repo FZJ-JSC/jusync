@@ -59,6 +59,18 @@ public:
     using FileListWithSizesCallback = std::function<void(const std::vector<FileInfo>& files)>;
     using ErrorCallback = std::function<void(const std::string& error)>;
     
+    // Notification callback types (for live update support, V2-aware)
+    using NotificationCallback = std::function<void(uint32_t messageType,
+                                                     int32_t sourceRank,
+                                                     const std::string& filename,
+                                                     uint64_t fileSize,
+                                                     uint64_t timestamp,
+                                                     uint64_t hashLo,
+                                                     uint64_t hashHi,
+                                                     uint64_t hashPrevLo,
+                                                     uint64_t hashPrevHi,
+                                                     bool hasOldData)>;
+
     // Worker status callback types
     using WorkerStatusCallback = std::function<void(int32_t rank,
                                                     uint32_t status,
@@ -168,6 +180,9 @@ public:
     bool testConnection();
     void updateHealthStatus();
 
+    // Notification callbacks (live update support)
+    void setNotificationCallback(NotificationCallback callback);
+
     // Parallel download support
     zmq::socket_t* getSocket() { return zmqSocket.get(); }
     const zmq::socket_t* getSocket() const { return zmqSocket.get(); }
@@ -180,6 +195,14 @@ public:
         std::function<void()> completion_callback = nullptr,
         std::function<void(const std::string&, const std::string&)> error_callback = nullptr,
         int timeout_ms = 30000);
+
+    // Async file request — fire-and-forget, never blocks calling thread.
+    // Callbacks are invoked from the dispatcher thread when responses arrive.
+    bool requestFileAsync(const std::string& filename, int32_t targetRank,
+                           FileChunkCallback chunkCallback,
+                           FileCompleteCallback completeCallback,
+                           ErrorCallback errorCallback = nullptr,
+                           int timeoutMs = 30000);
 
 private:
     // Connection management helpers
@@ -260,6 +283,10 @@ private:
     std::atomic<size_t> maxMessageSize{104857600}; // 100MB default
     std::chrono::steady_clock::time_point lastHealthCheck;
 
+    // Notification callback (live update support)
+    std::mutex notificationCallbackMutex;
+    NotificationCallback notificationCallback;
+
     // Default chunk size for file requests
     static constexpr uint32_t DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024; // 4MB
 
@@ -280,8 +307,36 @@ private:
 
     // Attempt to dequeue a matching message (non-blocking).
     bool tryDequeueMatching(uint32_t requestId,
-                            std::vector<uint8_t>& outDelimiter,
-                            std::vector<uint8_t>& outData);
+                             std::vector<uint8_t>& outDelimiter,
+                             std::vector<uint8_t>& outData);
+
+    // Handle notification message (called from dispatcher thread)
+    void handleNotification(const std::vector<uint8_t>& data);
+
+    // Async file download frame handler — called from dispatcher thread.
+    // Returns true if frame was consumed by an async download, false to forward to blocking queue.
+    bool asyncFileFrameHandler(uint32_t requestId, const uint8_t* data, size_t size, uint32_t msgType);
+
+private:
+    // Async file state for non-blocking downloads.
+    struct AsyncFileState {
+        uint32_t request_id;
+        std::string filename;
+        int32_t target_rank;
+        std::chrono::steady_clock::time_point deadline;
+        std::vector<uint8_t> accumulated_data;
+        uint64_t expected_file_size = 0;
+        uint64_t received_bytes = 0;
+        bool completed = false;
+        bool failed = false;
+        FileChunkCallback chunk_callback;
+        FileCompleteCallback complete_callback;
+        ErrorCallback error_callback;
+    };
+
+    // Async download tracking — populated by requestFileAsync, consumed by dispatcher.
+    std::mutex asyncFilesMutex;
+    std::map<uint32_t, std::unique_ptr<AsyncFileState>> asyncFiles;
 };
 
 } // namespace anari_usd_middleware

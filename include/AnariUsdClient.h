@@ -196,6 +196,14 @@ public:
         std::function<void(const std::string&, const std::string&)> error_callback = nullptr,
         int timeout_ms = 30000);
 
+    // Async file request — fire-and-forget, never blocks calling thread.
+    // Callbacks are invoked from the dispatcher thread when responses arrive.
+    bool requestFileAsync(const std::string& filename, int32_t targetRank,
+                           FileChunkCallback chunkCallback,
+                           FileCompleteCallback completeCallback,
+                           ErrorCallback errorCallback = nullptr,
+                           int timeoutMs = 30000);
+
 private:
     // Connection management helpers
     bool configureSocket(int timeoutMs);
@@ -304,6 +312,31 @@ private:
 
     // Handle notification message (called from dispatcher thread)
     void handleNotification(const std::vector<uint8_t>& data);
+
+    // Async file download frame handler — called from dispatcher thread.
+    // Returns true if frame was consumed by an async download, false to forward to blocking queue.
+    bool asyncFileFrameHandler(uint32_t requestId, const uint8_t* data, size_t size, uint32_t msgType);
+
+private:
+    // Async file state for non-blocking downloads.
+    struct AsyncFileState {
+        uint32_t request_id;
+        std::string filename;
+        int32_t target_rank;
+        std::chrono::steady_clock::time_point deadline;
+        std::vector<uint8_t> accumulated_data;
+        uint64_t expected_file_size = 0;
+        uint64_t received_bytes = 0;
+        bool completed = false;
+        bool failed = false;
+        FileChunkCallback chunk_callback;
+        FileCompleteCallback complete_callback;
+        ErrorCallback error_callback;
+    };
+
+    // Async download tracking — populated by requestFileAsync, consumed by dispatcher.
+    std::mutex asyncFilesMutex;
+    std::map<uint32_t, std::unique_ptr<AsyncFileState>> asyncFiles;
 };
 
 } // namespace anari_usd_middleware

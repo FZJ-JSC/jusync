@@ -937,7 +937,9 @@ void AJUSYNCFileSpawnerActor::FlushBufferedPointClouds()
             SpawnedActors.Add(Spawned);
             ActorsSpawned++;
             Spawned->SetActorEnableCollision(false);
+#if WITH_EDITORONLY_DATA
             Spawned->SetActorLabel(EleName);
+#endif
 
             // Track for live updates (use element name as key, now includes rank)
             if (!EleName.IsEmpty())

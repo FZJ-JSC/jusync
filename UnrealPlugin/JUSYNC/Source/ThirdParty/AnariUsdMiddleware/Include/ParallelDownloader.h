@@ -9,6 +9,12 @@
 #include <mutex>
 #include <condition_variable>
 
+// ParallelDownloader requires a non-existent method (requestFileAsync) on AnariUsdClient.
+// Use ParallelDownloadManager instead (via AnariUsdMiddleware::requestFilesParallelAsync).
+#ifndef ANARI_USD_DISABLE_PARALLEL_DOWNLOADER_ERROR
+#error "ParallelDownloader is broken — use ParallelDownloadManager instead. Define ANARI_USD_DISABLE_PARALLEL_DOWNLOADER_ERROR to suppress this."
+#endif
+
 namespace anari_usd_middleware {
 
 /**

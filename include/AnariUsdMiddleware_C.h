@@ -781,6 +781,47 @@ ANARI_USD_MIDDLEWARE_C_API int RequestFile_C(
     size_t* out_size,
     int timeout_ms);
 
+// ============================================================================
+// ASYNC FILE DOWNLOAD (Non-Blocking)
+// ============================================================================
+
+/**
+ * Callback signature for async file complete notifications.
+ * Called from the dispatcher thread when a file download finishes or fails.
+ * UE5 must marshal to game thread before using the data.
+ *
+ * @param filename Name of the downloaded file
+ * @param data Pointer to file data (valid until callback returns, DO NOT store)
+ * @param data_size Size of file data in bytes
+ * @param success 1 if download succeeded, 0 if failed
+ * @param userData Opaque pointer passed through from AsyncRequestFile_C
+ */
+typedef void (*AsyncFileComplete_C)(
+    const char* filename,
+    const unsigned char* data,
+    size_t data_size,
+    int success,
+    void* userData);
+
+/**
+ * Async (non-blocking) file request that fires immediately and returns a download handle.
+ * When the download completes or fails, the provided completeCallback is invoked from the
+ * dispatcher thread.
+ *
+ * @param filename Name of file to request
+ * @param target_rank Target worker rank
+ * @param completeCallback Callback to invoke when download completes
+ * @param userData Opaque pointer passed to callback
+ * @param timeout_ms Timeout in milliseconds (size-based recommended)
+ * @return Positive download_id on success (for tracking), 0 on failure
+ */
+ANARI_USD_MIDDLEWARE_C_API int AsyncRequestFile_C(
+    const char* filename,
+    int32_t target_rank,
+    AsyncFileComplete_C completeCallback,
+    void* userData,
+    int timeout_ms);
+
 /**
  * Request frame (collection of files) from worker rank
  *
