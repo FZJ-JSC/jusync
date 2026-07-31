@@ -934,15 +934,15 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
         }
 
         // TRUE ZERO-COPY fast path: scan the raw buffer for any byte that would
-        // require a transform. Binary (.usdc) and clean ASCII files have no
-        // "0: None" / "asset:images/" / "texCoord2f" quirks, so we can hand the
-        // caller's pointer directly to TinyUSDZ with ZERO copies.
+        // require a transform. Binary (.usdc) files never need one. For ASCII
+        // .usda, note that both empty and real timeSampled arrays ("0: None",
+        // "0: [(x,y,z)...]") are handled natively by TinyUSDZ (verified
+        // empirically), so they do NOT force a copy.
         //
-        // Only when a substitution is genuinely required (changes byte length,
-        // so it cannot be done in the read-only caller buffer) do we make a
-        // single working copy.
-        const std::string nonePatternStr = "0: None";
-        const std::string noneReplacement = "0: []";
+        // Only the genuinely length-changing text substitutions below
+        // (which cannot be done in the read-only caller buffer) remain.
+        // When none are present we hand the caller's pointer straight to
+        // TinyUSDZ with ZERO copies.
         const std::string assetPatternStr = "asset:images/";
         const std::string assetReplacement = "@./images/";
         const std::string texCoordPatternStr = "texCoord2f";
@@ -956,10 +956,6 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
             const size_t n = buffer_size;
             while (i <= n) {
                 size_t rem = n - i;
-                if (rem >= nonePatternStr.size() &&
-                    std::memcmp(raw + i, nonePatternStr.data(), nonePatternStr.size()) == 0) {
-                    needsPreprocess = true; break;
-                }
                 if (rem >= assetPatternStr.size() &&
                     std::memcmp(raw + i, assetPatternStr.data(), assetPatternStr.size()) == 0) {
                     needsPreprocess = true; break;
@@ -988,11 +984,6 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
             content.assign(reinterpret_cast<const char*>(buffer), buffer_size);
 
             size_t pos = 0;
-            while ((pos = content.find(nonePatternStr, pos)) != std::string::npos) {
-                content.replace(pos, nonePatternStr.length(), noneReplacement);
-                pos += noneReplacement.length();
-            }
-            pos = 0;
             while ((pos = content.find(assetPatternStr, pos)) != std::string::npos) {
                 content.replace(pos, assetPatternStr.length(), assetReplacement);
                 pos += assetReplacement.length();
@@ -1007,7 +998,7 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
             if (content.find("int[] faceVertexIndices") != std::string::npos ||
                 content.find("point3f[] points") != std::string::npos ||
                 content.find("float3[] points") != std::string::npos) {
-                MIDDLEWARE_LOG_INFO("Large geometry detected - using '0: None' fixed buffer for Unreal RealtimeMesh");
+                MIDDLEWARE_LOG_INFO("Large geometry detected - using working buffer for Unreal RealtimeMesh");
                 fixedContent = content; // keep for clip extraction below
             }
 
