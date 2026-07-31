@@ -960,6 +960,124 @@ bool UJUSYNCSubsystem::LoadUSDFullFromBuffer(const TArray<uint8>& Buffer, const 
 #endif
 }
 
+bool UJUSYNCSubsystem::LoadUSDFullFromBufferNoCopy(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCMeshData>& OutMeshData, TArray<FJUSYNCPointCloudData>& OutPointCloudData)
+{
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (!bIsInitialized.load())
+    {
+        UE_LOG(LogTemp, Error, TEXT("JUSYNC: LoadUSDFullFromBufferNoCopy called but middleware is not initialized"));
+        return false;
+    }
+
+    OutMeshData.Empty();
+    OutPointCloudData.Empty();
+
+    if (Buffer.Num() == 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("JUSYNC: LoadUSDFullFromBufferNoCopy called with empty buffer"));
+        return false;
+    }
+
+    FScopeLock Lock(&MiddlewareMutex);
+
+    FTCHARToUTF8 FilenameConverter(*Filename);
+    const char* FilenameCStr = FilenameConverter.Get();
+
+    CMeshData* CMeshes = nullptr;
+    size_t MeshCount = 0;
+    CPointCloudData* CClouds = nullptr;
+    size_t CloudCount = 0;
+
+    // Use zero-copy variant — bypasses std::vector copy at C API boundary
+    int Result = LoadUSDFullFromPointer_C(
+        Buffer.GetData(), Buffer.Num(), FilenameCStr,
+        &CMeshes, &MeshCount,
+        &CClouds, &CloudCount
+    );
+
+    bool bSuccess = Result == 1;
+
+    if (!bSuccess)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("JUSYNC: LoadUSDFullFromBufferNoCopy failed for '%s' (buffer=%d bytes, C_result=%d MeshCount=%llu CloudCount=%llu)"),
+            *Filename, Buffer.Num(), Result, (uint64)MeshCount, (uint64)CloudCount);
+        if (CMeshes) FreeMeshData_C(CMeshes, MeshCount);
+        if (CClouds) FreePointCloudData_C(CClouds, CloudCount);
+        return false;
+    }
+
+    // Convert meshes
+    if (CMeshes && MeshCount > 0)
+    {
+        OutMeshData.Reserve(MeshCount);
+        for (size_t i = 0; i < MeshCount; ++i)
+        {
+            FJUSYNCMeshData UEMeshData = ConvertCMeshDataToUE_Helper(CMeshes[i]);
+            OutMeshData.Add(UEMeshData);
+        }
+        FreeMeshData_C(CMeshes, MeshCount);
+    }
+
+    // Convert point clouds
+    if (CClouds && CloudCount > 0)
+    {
+        OutPointCloudData.SetNum(static_cast<int32>(CloudCount));
+        for (size_t i = 0; i < CloudCount; ++i)
+        {
+            FJUSYNCPointCloudData& pc = OutPointCloudData[i];
+            const CPointCloudData& cpc = CClouds[i];
+
+            pc.ElementName = ANSI_TO_TCHAR(cpc.element_name);
+            pc.TypeName = ANSI_TO_TCHAR(cpc.type_name);
+            pc.PointCount = static_cast<int32>(cpc.points_count);
+            pc.bHasColors = cpc.has_colors != 0;
+            pc.bHasNormals = cpc.has_normals != 0;
+            pc.BoundingBoxMin = FVector(cpc.bounding_box_min[0], cpc.bounding_box_min[2], -cpc.bounding_box_min[1]);
+            pc.BoundingBoxMax = FVector(cpc.bounding_box_max[0], cpc.bounding_box_max[2], -cpc.bounding_box_max[1]);
+
+            if (cpc.points_count > 0 && cpc.positions)
+            {
+                pc.Positions.SetNum(pc.PointCount);
+                for (size_t j = 0; j < cpc.points_count; ++j)
+                {
+                    float usdX = cpc.positions[j * 3 + 0];
+                    float usdY = cpc.positions[j * 3 + 1];
+                    float usdZ = cpc.positions[j * 3 + 2];
+                    pc.Positions[j] = FVector(usdX, usdZ, -usdY);
+                }
+            }
+
+            if (cpc.has_colors && cpc.colors && pc.PointCount > 0)
+            {
+                pc.Colors.SetNum(pc.PointCount);
+                for (int32 j = 0; j < pc.PointCount; ++j)
+                {
+                    float r = cpc.colors[j * 4 + 0] * 255.0f;
+                    float g = cpc.colors[j * 4 + 1] * 255.0f;
+                    float b = cpc.colors[j * 4 + 2] * 255.0f;
+                    float a = cpc.colors[j * 4 + 3] * 255.0f;
+                    pc.Colors[j] = FColor(static_cast<uint8>(r), static_cast<uint8>(g), static_cast<uint8>(b), static_cast<uint8>(a));
+                }
+            }
+
+            if (cpc.has_widths && cpc.widths)
+            {
+                pc.Widths.SetNum(pc.PointCount);
+                std::memcpy(pc.Widths.GetData(), cpc.widths, pc.PointCount * sizeof(float));
+            }
+        }
+        FreePointCloudData_C(CClouds, CloudCount);
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("JUSYNC: LoadUSDFullFromBufferNoCopy: %d meshes + %d point clouds from '%s' (zero-copy)"),
+           OutMeshData.Num(), OutPointCloudData.Num(), *Filename);
+    return true;
+#else
+    UE_LOG(LogTemp, Warning, TEXT("JUSYNC: LoadUSDFullFromBufferNoCopy called but middleware not available"));
+    return false;
+#endif
+}
+
 FJUSYNCTextureData UJUSYNCSubsystem::CreateTextureFromBuffer(const TArray<uint8>& Buffer)
 {
     FJUSYNCTextureData Result;

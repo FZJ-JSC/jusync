@@ -285,6 +285,19 @@ public:
                        ProgressCallback progressCallback = nullptr);
 
     /**
+     * Pointer-based overload: TRUE zero-copy when no preprocessing is required.
+     * Callers pass raw buffer + size directly (e.g., from TArray<uint8> or external
+     * memory). If the buffer contains no USD quirks (`0: None`, `asset:images/`,
+     * `texCoord2f`) it is handed to TinyUSDZ unchanged with zero copies. Only when
+     * a byte-length-changing rewrite is required is a single working copy made.
+     */
+    bool LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_size,
+                              const std::string& fileName,
+                              std::vector<MeshData>& outMeshData,
+                              std::vector<PointCloudData>* outPointCloudData = nullptr,
+                              ProgressCallback progressCallback = nullptr);
+
+    /**
      * Load USD data directly from disk with file validation
      * @param filePath Path to the USD file (validated)
      * @param outMeshData Output vector for extracted mesh data

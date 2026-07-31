@@ -2416,6 +2416,118 @@ int LoadUSDFull_C(const unsigned char* buffer,
 }
 
 /**
+ * Zero-copy variant: delegates to UsdProcessor::LoadUSDBufferFromRaw.
+ * Avoids std::vector copy at C API boundary for UE5/TArray<uint8> callers.
+ */
+int LoadUSDFullFromPointer_C(const unsigned char* buffer,
+                              size_t buffer_size,
+                              const char* filename,
+                              CMeshData** out_meshes,
+                              size_t* out_mesh_count,
+                              CPointCloudData** out_clouds,
+                              size_t* out_cloud_count) {
+    if (!buffer || !filename || !out_meshes || !out_mesh_count || !out_clouds || !out_cloud_count) {
+        return 0;
+    }
+
+    try {
+        std::string std_filename(filename);
+
+        anari_usd_middleware::UsdProcessor processor;
+        std::vector<anari_usd_middleware::UsdProcessor::MeshData> mesh_data;
+        std::vector<anari_usd_middleware::UsdProcessor::PointCloudData> pc_data;
+
+        g_parse_semaphore.acquire();
+        {
+            ParseGuard guard;
+            // Use pointer-based overload — no std::vector copy
+            bool result = processor.LoadUSDBufferFromRaw(
+                reinterpret_cast<const uint8_t*>(buffer), buffer_size,
+                std_filename, mesh_data, &pc_data);
+
+            if (!result) {
+                MIDDLEWARE_LOG_ERROR("LoadUSDFullFromPointer_C: LoadUSDBufferFromRaw returned false for '%s' (size=%zu bytes)",
+                    std_filename.c_str(), buffer_size);
+                *out_mesh_count = 0;
+                *out_meshes = nullptr;
+                *out_cloud_count = 0;
+                *out_clouds = nullptr;
+                return 0;
+            }
+        } // semaphore released here
+
+        /*
+         * Diagnose: if result is true but pc_data has an entry with 0 positions,
+         * TinyUSDZ parsed the file but ExtractPointCloudData couldn't get point data.
+         */
+        {
+            size_t valid_pc = 0, invalid_pc = 0;
+            for (const auto& pc : pc_data) {
+                if (pc.positions.size() > 0) valid_pc++;
+                else invalid_pc++;
+            }
+            if (invalid_pc > 0) {
+                MIDDLEWARE_LOG_ERROR("LoadUSDFullFromPointer_C: %zu point clouds have 0 positions for '%s' (valid=%zu, invalid=%zu)",
+                    invalid_pc, std_filename.c_str(), valid_pc, invalid_pc);
+            }
+            if (valid_pc == 0 && invalid_pc > 0) {
+                MIDDLEWARE_LOG_ERROR("LoadUSDFullFromPointer_C: no usable point clouds extracted — discarding for '%s'",
+                    std_filename.c_str());
+                pc_data.clear();
+            }
+        }
+
+        if (mesh_data.empty() && pc_data.empty()) {
+            MIDDLEWARE_LOG_WARNING("LoadUSDFullFromPointer_C: LoadUSDBufferFromRaw succeeded but returned 0 meshes + 0 PCs for '%s'",
+                std_filename.c_str());
+        }
+
+        if (!mesh_data.empty()) {
+            *out_mesh_count = mesh_data.size();
+            *out_meshes = new CMeshData[*out_mesh_count];
+            for (size_t i = 0; i < mesh_data.size(); ++i) {
+                ConvertMeshDataToCFormat(mesh_data[i], (*out_meshes)[i]);
+                (*out_meshes)[i].collision_type = COLLISION_NONE;
+                (*out_meshes)[i].collision_vertices = nullptr;
+                (*out_meshes)[i].collision_indices = nullptr;
+                (*out_meshes)[i].collision_vertices_count = 0;
+                (*out_meshes)[i].collision_indices_count = 0;
+                for (int j = 0; j < 3; j++) {
+                    (*out_meshes)[i].bounding_box_min[j] = 0.0f;
+                    (*out_meshes)[i].bounding_box_max[j] = 0.0f;
+                    (*out_meshes)[i].sphere_center[j] = 0.0f;
+                }
+                (*out_meshes)[i].sphere_radius = 0.0f;
+            }
+        } else {
+            *out_mesh_count = 0;
+            *out_meshes = nullptr;
+        }
+
+        if (!pc_data.empty()) {
+            *out_cloud_count = pc_data.size();
+            *out_clouds = new CPointCloudData[*out_cloud_count];
+            for (size_t i = 0; i < pc_data.size(); ++i) {
+                ConvertPointCloudDataToCFormat(pc_data[i], (*out_clouds)[i]);
+            }
+        } else {
+            *out_cloud_count = 0;
+            *out_clouds = nullptr;
+        }
+
+        MIDDLEWARE_LOG_INFO("LoadUSDFullFromPointer_C: extracted %zu meshes + %zu point clouds from '%s' in single pass (zero-copy)",
+                            *out_mesh_count, *out_cloud_count, std_filename.c_str());
+        return 1;
+    } catch (...) {
+        *out_mesh_count = 0;
+        *out_meshes = nullptr;
+        *out_cloud_count = 0;
+        *out_clouds = nullptr;
+        return 0;
+    }
+}
+
+/**
  * Get the most recently cached gradient/colormap texture
  * Returns PNG-encoded raw bytes; caller must decode
  */

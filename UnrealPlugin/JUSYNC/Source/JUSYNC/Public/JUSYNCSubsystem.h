@@ -93,6 +93,12 @@ public:
 
     bool LoadUSDFullFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCMeshData>& OutMeshData, TArray<FJUSYNCPointCloudData>& OutPointCloudData);
 
+    /**
+     * Zero-copy variant: bypasses std::vector copy at C API boundary.
+     * Uses LoadUSDFullFromPointer_C internally.
+     */
+    bool LoadUSDFullFromBufferNoCopy(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCMeshData>& OutMeshData, TArray<FJUSYNCPointCloudData>& OutPointCloudData);
+
     // Texture Processing
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Texture")
     FJUSYNCTextureData CreateTextureFromBuffer(const TArray<uint8>& Buffer);

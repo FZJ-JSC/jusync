@@ -877,19 +877,30 @@ UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vecto
     }
 }
 
-// Enhanced USD buffer loading with comprehensive safety
+// Thin wrapper: delegates to pointer-based overload
 bool UsdProcessor::LoadUSDBuffer(const std::vector<uint8_t>& buffer,
                                  const std::string& fileName,
                                  std::vector<MeshData>& outMeshData,
                                  std::vector<PointCloudData>* outPointCloudData,
                                  ProgressCallback progressCallback) {
+    return LoadUSDBufferFromRaw(buffer.data(), buffer.size(), fileName, outMeshData, outPointCloudData, progressCallback);
+}
+
+// Pointer-based overload: TRUE zero-copy when no preprocessing is required.
+// Callers pass raw buffer + size directly (e.g., from TArray<uint8> or external memory).
+// A single working copy is only made for the "0: None"/"asset:images/"/"texCoord2f" fix.
+bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_size,
+                                        const std::string& fileName,
+                                        std::vector<MeshData>& outMeshData,
+                                        std::vector<PointCloudData>* outPointCloudData,
+                                        ProgressCallback progressCallback) {
     std::unique_lock<std::shared_mutex> lock(processingMutex);
     if (shutdownRequested.load()) {
         MIDDLEWARE_LOG_WARNING("USD loading aborted: shutdown requested");
         return false;
     }
 
-    MIDDLEWARE_LOG_INFO("Loading USD from buffer, size: %zu, filename: %s", buffer.size(), fileName.c_str());
+    MIDDLEWARE_LOG_INFO("Loading USD from buffer, size: %zu, filename: %s", buffer_size, fileName.c_str());
 
     // Clear output data first
     outMeshData.clear();
@@ -898,15 +909,15 @@ bool UsdProcessor::LoadUSDBuffer(const std::vector<uint8_t>& buffer,
     }
 
     // Validate inputs
-    if (buffer.empty()) {
+    if (buffer_size == 0) {
         MIDDLEWARE_LOG_ERROR("Cannot load USD from empty buffer");
         stats.processingErrors.fetch_add(1);
         return false;
     }
 
-    if (buffer.size() > safety::MAX_BUFFER_SIZE) {
+    if (buffer_size > safety::MAX_BUFFER_SIZE) {
         MIDDLEWARE_LOG_ERROR("USD buffer too large: %zu bytes (max: %zu)",
-                            buffer.size(), safety::MAX_BUFFER_SIZE);
+                            buffer_size, safety::MAX_BUFFER_SIZE);
         stats.processingErrors.fetch_add(1);
         return false;
     }
@@ -922,47 +933,98 @@ bool UsdProcessor::LoadUSDBuffer(const std::vector<uint8_t>& buffer,
             progressCallback(0.1f, "Preprocessing USD content");
         }
 
-        // CRITICAL FIX: Preserve full data for Unreal RealtimeMesh processing
-        std::vector<uint8_t> processedBuffer;
-        std::string fixedContent; // holds the "0: None" fixed content for geometry path
+        // TRUE ZERO-COPY fast path: scan the raw buffer for any byte that would
+        // require a transform. Binary (.usdc) and clean ASCII files have no
+        // "0: None" / "asset:images/" / "texCoord2f" quirks, so we can hand the
+        // caller's pointer directly to TinyUSDZ with ZERO copies.
+        //
+        // Only when a substitution is genuinely required (changes byte length,
+        // so it cannot be done in the read-only caller buffer) do we make a
+        // single working copy.
+        const std::string nonePatternStr = "0: None";
+        const std::string noneReplacement = "0: []";
+        const std::string assetPatternStr = "asset:images/";
+        const std::string assetReplacement = "@./images/";
+        const std::string texCoordPatternStr = "texCoord2f";
+        const std::string texCoordReplacement = "texCoord2f[]";
 
-        // Convert buffer to string for processing (single copy)
-        std::string content(reinterpret_cast<const char*>(buffer.data()), buffer.size());
-
-        // ALWAYS apply the '0: None' -> '0: []' fix for ALL files before any parsing.
-        // USD ArrayWriter emits '0: None' for empty timeSampled arrays, which TinyUSDZ
-        // fails to parse.  Without this fix, large geometry files intermittently fail
-        // with C_result=0, MeshCount=0, CloudCount=0.
+        // Single pass scan — no full-buffer copy, no std::string construction.
+        bool needsPreprocess = false;
         {
-            const std::string nonePatternStr = "0: None";
-            const std::string noneReplacement = "0: []";
+            const char* raw = reinterpret_cast<const char*>(buffer);
+            size_t i = 0;
+            const size_t n = buffer_size;
+            while (i <= n) {
+                size_t rem = n - i;
+                if (rem >= nonePatternStr.size() &&
+                    std::memcmp(raw + i, nonePatternStr.data(), nonePatternStr.size()) == 0) {
+                    needsPreprocess = true; break;
+                }
+                if (rem >= assetPatternStr.size() &&
+                    std::memcmp(raw + i, assetPatternStr.data(), assetPatternStr.size()) == 0) {
+                    needsPreprocess = true; break;
+                }
+                if (rem >= texCoordPatternStr.size() &&
+                    std::memcmp(raw + i, texCoordPatternStr.data(), texCoordPatternStr.size()) == 0) {
+                    needsPreprocess = true; break;
+                }
+                ++i;
+            }
+        }
+
+        // Holds the single transformed copy when preprocessing is required.
+        // Kept at function scope so it stays alive for the whole parse + reference
+        // resolution pass; when not needed it is empty and parsePtr points at the
+        // caller's original buffer (the true zero-copy path).
+        std::string content;
+        std::string fixedContent; // holds fixed content for clip extraction
+
+        const uint8_t* parsePtr = buffer;
+        size_t parseSize = buffer_size;
+
+        if (needsPreprocess) {
+            // Copy exactly once, then transform in place. This replaces the old
+            // two-copy chain (std::string content -> std::vector processedBuffer).
+            content.assign(reinterpret_cast<const char*>(buffer), buffer_size);
+
             size_t pos = 0;
             while ((pos = content.find(nonePatternStr, pos)) != std::string::npos) {
                 content.replace(pos, nonePatternStr.length(), noneReplacement);
                 pos += noneReplacement.length();
             }
-        }
+            pos = 0;
+            while ((pos = content.find(assetPatternStr, pos)) != std::string::npos) {
+                content.replace(pos, assetPatternStr.length(), assetReplacement);
+                pos += assetReplacement.length();
+            }
+            pos = 0;
+            while ((pos = content.find(texCoordPatternStr, pos)) != std::string::npos) {
+                content.replace(pos, texCoordPatternStr.length(), texCoordReplacement);
+                pos += texCoordReplacement.length();
+            }
 
-        // Check if this contains large geometry arrays
-        if (content.find("int[] faceVertexIndices") != std::string::npos ||
-            content.find("point3f[] points") != std::string::npos ||
-            content.find("float3[] points") != std::string::npos) {
+            // Check if this contains large geometry arrays
+            if (content.find("int[] faceVertexIndices") != std::string::npos ||
+                content.find("point3f[] points") != std::string::npos ||
+                content.find("float3[] points") != std::string::npos) {
+                MIDDLEWARE_LOG_INFO("Large geometry detected - using '0: None' fixed buffer for Unreal RealtimeMesh");
+                fixedContent = content; // keep for clip extraction below
+            }
 
-            MIDDLEWARE_LOG_INFO("Large geometry detected - using '0: None' fixed buffer for Unreal RealtimeMesh");
-            processedBuffer.assign(content.begin(), content.end());
-            fixedContent = std::move(content); // keep for clip extraction below
+            parsePtr = reinterpret_cast<const uint8_t*>(content.data());
+            parseSize = content.size();
+            MIDDLEWARE_LOG_INFO("USD preprocessed (single copy): %zu -> %zu bytes", buffer_size, parseSize);
         } else {
-            // Apply minimal preprocessing for non-geometry files
-            processedBuffer = pImpl->preprocessUsdContent(buffer);
+            MIDDLEWARE_LOG_INFO("USD content requires no rewrite - parsing caller buffer directly (true zero-copy)");
         }
 
         // LIMITED DEBUG: Only show first 200 characters for debugging
-        if (processedBuffer.size() > 200) {
-            std::string preview(reinterpret_cast<const char*>(processedBuffer.data()), 200);
+        if (parseSize > 200) {
+            std::string preview(reinterpret_cast<const char*>(parsePtr), 200);
             preview += "... [truncated for debug]";
             MIDDLEWARE_LOG_DEBUG("USD content preview: %s", preview.c_str());
         } else {
-            std::string fullContent(reinterpret_cast<const char*>(processedBuffer.data()), processedBuffer.size());
+            std::string fullContent(reinterpret_cast<const char*>(parsePtr), parseSize);
             MIDDLEWARE_LOG_DEBUG("USD content: %s", fullContent.c_str());
         }
 
@@ -990,8 +1052,8 @@ bool UsdProcessor::LoadUSDBuffer(const std::vector<uint8_t>& buffer,
         options.max_memory_limit_in_mb = static_cast<int>(memoryLimitMB.load());
 
         bool loadResult = tinyusdz::LoadUSDFromMemory(
-            processedBuffer.data(),
-            processedBuffer.size(),
+            parsePtr,
+            parseSize,
             fileName.c_str(),
             &stage,
             &warnings,
@@ -1001,10 +1063,10 @@ bool UsdProcessor::LoadUSDBuffer(const std::vector<uint8_t>& buffer,
 
         if (!loadResult) {
             MIDDLEWARE_LOG_ERROR("TinyUSDZ_load_FAILED: file='%s' size=%zu errors='%s' warnings='%s'",
-                fileName.c_str(), processedBuffer.size(), errors.c_str(), warnings.c_str());
+                fileName.c_str(), parseSize, errors.c_str(), warnings.c_str());
             // Log first 300 chars of buffer to diagnose if it's actually USD content
-            size_t previewLen = std::min(processedBuffer.size(), static_cast<size_t>(300));
-            std::string preview(reinterpret_cast<const char*>(processedBuffer.data()), previewLen);
+            size_t previewLen = std::min(parseSize, static_cast<size_t>(300));
+            std::string preview(reinterpret_cast<const char*>(parsePtr), previewLen);
             MIDDLEWARE_LOG_ERROR("TinyUSDZ_buffer_preview: '...%s'...", preview.c_str());
             stats.processingErrors.fetch_add(1);
             return false;
@@ -1050,7 +1112,10 @@ bool UsdProcessor::LoadUSDBuffer(const std::vector<uint8_t>& buffer,
         if (referenceResolutionEnabled.load() && (outMeshData.empty() || hasEmptyGeometry(outMeshData))) {
             MIDDLEWARE_LOG_INFO("Attempting reference resolution for missing geometry");
 
-            if (!resolveReferences(stage, processedBuffer, fileName, outMeshData, progressCallback, &fixedContent)) {
+            // resolveReferences needs a std::vector<uint8_t>; build a view only
+            // on this rare reference-resolution path (which already re-reads from disk).
+            std::vector<uint8_t> refBuffer(parsePtr, parsePtr + parseSize);
+            if (!resolveReferences(stage, refBuffer, fileName, outMeshData, progressCallback, &fixedContent)) {
                 MIDDLEWARE_LOG_WARNING("Reference resolution completed with some failures");
             }
         }
@@ -1077,7 +1142,7 @@ bool UsdProcessor::LoadUSDBuffer(const std::vector<uint8_t>& buffer,
         // Update statistics
         stats.filesProcessed.fetch_add(1);
         stats.meshesExtracted.fetch_add(outMeshData.size());
-        stats.totalBytesProcessed.fetch_add(buffer.size());
+        stats.totalBytesProcessed.fetch_add(buffer_size);
 
         // LIMITED DEBUG: Only show mesh statistics for RealtimeMesh, not full data
         MIDDLEWARE_LOG_INFO("USD processing complete: %zu valid meshes extracted for RealtimeMesh", outMeshData.size());
@@ -1086,10 +1151,10 @@ bool UsdProcessor::LoadUSDBuffer(const std::vector<uint8_t>& buffer,
             const auto& mesh = outMeshData[i];
             MIDDLEWARE_LOG_INFO("Mesh %zu '%s': %zu vertices, %zu triangles, %zu normals, %zu UVs",
                 i, mesh.elementName.c_str(),
-                mesh.points.size(),          // ✅ CORRECT - already vec3
-                mesh.indices.size() / 3,     // ✅ CORRECT - indices to triangles
-                mesh.normals.size(),         // ✅ CORRECT - already vec3
-                mesh.uvs.size());            // ✅ CORRECT - already vec2
+                mesh.points.size(),          // already vec3
+                mesh.indices.size() / 3,     // indices to triangles
+                mesh.normals.size(),         // already vec3
+                mesh.uvs.size());            // already vec2
 
         }
 

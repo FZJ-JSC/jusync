@@ -880,6 +880,53 @@ bool UJUSYNCBlueprintLibrary::LoadUSDFullFromBuffer(const TArray<uint8>& Buffer,
     return bResult;
 }
 
+/**
+ * Zero-copy variant: bypasses std::vector copy at C API boundary.
+ * Accepts raw TArray<uint8> data pointer directly to UsdProcessor::LoadUSDBufferFromRaw.
+ * Use this for performance-critical paths with large payloads.
+ */
+bool UJUSYNCBlueprintLibrary::LoadUSDFullFromBufferNoCopy(const TArray<uint8>& Buffer, const FString& Filename,
+    TArray<FJUSYNCMeshData>& OutMeshData, TArray<FJUSYNCPointCloudData>& OutPointCloudData, FString& OutPreview)
+{
+    if (!ValidateBufferSize(Buffer, TEXT("LoadUSDFullFromBufferNoCopy")))
+    {
+        return false;
+    }
+
+#if JUSYNC_ENABLE_USD_PREVIEW
+    OutPreview = GetUSDAPreview(Buffer, 15);
+#else
+    OutPreview = TEXT("USD preview disabled for performance");
+#endif
+
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Subsystem not available for full USD loading (no-copy)"));
+        return false;
+    }
+
+    bool bResult = Subsystem->LoadUSDFullFromBufferNoCopy(Buffer, Filename, OutMeshData, OutPointCloudData);
+
+    if (bResult)
+    {
+        int32 TotalMeshes = 0;
+        for (const FJUSYNCMeshData& m : OutMeshData)
+        {
+            if (m.IsValid()) TotalMeshes++;
+        }
+        int32 TotalPCs = 0;
+        for (const FJUSYNCPointCloudData& pc : OutPointCloudData)
+        {
+            if (pc.IsValid()) TotalPCs++;
+        }
+        UE_LOG(LogJUSYNC, Log, TEXT("Successfully loaded %d meshes + %d point clouds from USD '%s' (zero-copy)"),
+               TotalMeshes, TotalPCs, *Filename);
+    }
+
+    return bResult;
+}
+
 FString UJUSYNCBlueprintLibrary::GetUSDAPreview(const TArray<uint8>& Buffer, int32 MaxLines)
 {
     return ExtractUSDAPreview(Buffer, MaxLines);

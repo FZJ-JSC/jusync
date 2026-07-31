@@ -173,6 +173,15 @@ public:
     static bool LoadUSDFullFromBuffer(const TArray<uint8>& Buffer, const FString& Filename,
         TArray<FJUSYNCMeshData>& OutMeshData, TArray<FJUSYNCPointCloudData>& OutPointCloudData, FString& OutPreview);
 
+    /**
+     * Zero-copy variant: bypasses std::vector copy at C API boundary.
+     * Accepts raw TArray<uint8> data pointer directly to UsdProcessor.
+     * Use this for performance-critical paths (large payloads).
+     */
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|USD", CallInEditor, DisplayName = "Load USD Full No Copy (Mesh + Point Cloud)")
+    static bool LoadUSDFullFromBufferNoCopy(const TArray<uint8>& Buffer, const FString& Filename,
+        TArray<FJUSYNCMeshData>& OutMeshData, TArray<FJUSYNCPointCloudData>& OutPointCloudData, FString& OutPreview);
+
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|USD", CallInEditor)
     static bool LoadUSDFromDisk(const FString& FilePath,
         TArray<FJUSYNCMeshData>& OutMeshData, FString& OutPreview);

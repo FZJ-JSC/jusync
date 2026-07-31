@@ -500,7 +500,7 @@ void AJUSYNCFileSpawnerActor::OnSingleFileDownloaded(const FString& Filename, co
             TArray<FJUSYNCMeshData> MeshData;
             TArray<FJUSYNCPointCloudData> PointCloudData;
             FString Preview;
-            bool bParsed = UJUSYNCBlueprintLibrary::LoadUSDFullFromBuffer(FileData, Filename, MeshData, PointCloudData, Preview);
+            bool bParsed = UJUSYNCBlueprintLibrary::LoadUSDFullFromBufferNoCopy(FileData, Filename, MeshData, PointCloudData, Preview);
 
             //                     // During live refresh, skip initial-spawn bookkeeping (FilesDownloaded, FilesTotal reset,
                     // OnAllComplete, StartLiveUpdatePolling) — those would corrupt the actor count and restart the pipeline in a loop.
