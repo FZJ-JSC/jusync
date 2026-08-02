@@ -367,161 +367,98 @@ struct JUSYNC_API FJUSYNCNotification
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCNotificationReceived, const FJUSYNCNotification&, Notification);
 
-// ========== BENCHMARKING STRUCTURES ==========
+// ========== BENCHMARKING STRUCTURES (C++ only, not exposed to Blueprints) ==========
 
 /**
- * Benchmark result for a single operation
+ * Benchmark result for a single pipeline run.
  */
-USTRUCT(BlueprintType)
-struct JUSYNC_API FJUSYNCBenchmarkResult
+USTRUCT()
+struct FJUSYNCBenchmarkResult
 {
 	GENERATED_BODY()
 
-	// Test identification
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	FString TestName;
-
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	FDateTime Timestamp;
 
 	// Timing metrics (ms)
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float TotalTimeMs;
+	float ConnectTimeMs;
+	float FileListTimeMs;
+	float DownloadTimeMs;
+	float ParseTimeMs;
+	float MeshSpawnTimeMs;
+	float PointCloudSpawnTimeMs;
+	float MaterialTimeMs;
+	float TeardownTimeMs;
+
+	// Network / data metrics
+	float NetworkThroughput_MBps;
+	int32 FilesRequested;
+	int32 FilesDownloaded;
+	int64 TotalBytesDownloaded;
+
+	// Parse / point cloud / material metrics
+	int32 PointCloudPointsSpawned;
+	int32 MeshCount;
+	int32 PointCloudCount;
+	int32 MaterialsCreated;
 
 	// Complexity metrics
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int32 TriangleCount;
-
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int32 VertexCount;
 
 	// Memory metrics (bytes)
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int64 RAMBeforeBytes;
-
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int64 RAMAfterBytes;
-
-	// Performance metrics
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
-	float FPS;
-
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
-	float FrameTimeMs;
-
-	// Additional metrics
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
-	int32 ActorCount;
-
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
-	int32 ErrorCount;
-
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
-	float SuccessRate;
-
-	// Splitting metrics (for large meshes that exceed RMC limits)
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
-	int32 SplitMeshCount;
-
-	// CPU Usage metrics (percentage)
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
-	float CPUUsagePercent;
-
-	// GPU/VRAM metrics (bytes)
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
-	int64 VRAMBeforeBytes;
-
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
-	int64 VRAMAfterBytes;
-
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
-	int64 VRAMPeakBytes;
-
-	// Detailed RAM metrics
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int64 RAMPeakBytes;
-
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int64 RAMDuringBytes;
 
-	// Thread metrics
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
-	int32 ActiveThreadCount;
+	// GPU/VRAM metrics (bytes)
+	int64 VRAMBeforeBytes;
+	int64 VRAMAfterBytes;
+	int64 VRAMPeakBytes;
 
-	// GPU utilization (percentage)
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	// Performance metrics
+	float FPS;
+	float FrameTimeMs;
+	int32 ActorCount;
+	int32 ErrorCount;
+	float SuccessRate;
+	int32 SplitMeshCount;
+	float CPUUsagePercent;
 	float GPUUsagePercent;
-
-	// Hitch detection metrics (frame time spikes)
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int32 ActiveThreadCount;
 	int32 HitchCount;
-
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float AvgHitchDurationMs;
-
-	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float MaxHitchDurationMs;
 
 	FJUSYNCBenchmarkResult()
-	{
-		TestName = TEXT("");
-		Timestamp = FDateTime::Now();
-		TotalTimeMs = 0.0f;
-		TriangleCount = 0;
-		VertexCount = 0;
-		RAMBeforeBytes = 0;
-		RAMAfterBytes = 0;
-		RAMPeakBytes = 0;
-		RAMDuringBytes = 0;
-		FPS = 0.0f;
-		FrameTimeMs = 0.0f;
-		ActorCount = 0;
-		ErrorCount = 0;
-		SuccessRate = 0.0f;
-		SplitMeshCount = 0;
-		CPUUsagePercent = 0.0f;
-		VRAMBeforeBytes = 0;
-		VRAMAfterBytes = 0;
-		VRAMPeakBytes = 0;
-		ActiveThreadCount = 0;
-		GPUUsagePercent = 0.0f;
-		HitchCount = 0;
-		AvgHitchDurationMs = 0.0f;
-		MaxHitchDurationMs = 0.0f;
-	}
+		: TestName(), Timestamp(FDateTime::Now()), TotalTimeMs(0.0f),
+	  ConnectTimeMs(0.0f), FileListTimeMs(0.0f), DownloadTimeMs(0.0f),
+	  ParseTimeMs(0.0f), MeshSpawnTimeMs(0.0f), PointCloudSpawnTimeMs(0.0f),
+	  MaterialTimeMs(0.0f), TeardownTimeMs(0.0f),
+	  NetworkThroughput_MBps(0.0f), FilesRequested(0), FilesDownloaded(0),
+	  TotalBytesDownloaded(0), PointCloudPointsSpawned(0), MeshCount(0),
+	  PointCloudCount(0), MaterialsCreated(0), TriangleCount(0), VertexCount(0),
+	  RAMBeforeBytes(0), RAMAfterBytes(0), RAMPeakBytes(0), RAMDuringBytes(0),
+	  VRAMBeforeBytes(0), VRAMAfterBytes(0), VRAMPeakBytes(0),
+	  FPS(0.0f), FrameTimeMs(0.0f), ActorCount(0), ErrorCount(0),
+	  SuccessRate(0.0f), SplitMeshCount(0), CPUUsagePercent(0.0f),
+	  GPUUsagePercent(0.0f), ActiveThreadCount(0), HitchCount(0),
+	  AvgHitchDurationMs(0.0f), MaxHitchDurationMs(0.0f) {}
 };
 
 /**
- * Benchmark configuration
+ * Benchmark configuration (used internally by AJUSYNCBenchmarkActor).
  */
-USTRUCT(BlueprintType)
-struct JUSYNC_API FJUSYNCBenchmarkConfig
+USTRUCT()
+struct FJUSYNCBenchmarkConfig
 {
 	GENERATED_BODY()
-
-	// Enable/disable benchmarking
-	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Benchmark")
 	bool bEnableBenchmarking = false;
-
-	// Output directory for benchmark files
-	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Benchmark")
 	FString OutputDirectory;
-
-	// Append timestamp to filename
-	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Benchmark")
 	bool bAppendTimestamp = true;
-
-	// Output format (0 = CSV, 1 = JSON, 2 = Both)
-	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Benchmark")
-	int32 OutputFormat = 0;
-
-	FJUSYNCBenchmarkConfig()
-	{
-		bEnableBenchmarking = false;
-		OutputDirectory = TEXT("");
-		bAppendTimestamp = true;
-		OutputFormat = 0; // Default to CSV for backward compatibility
-	}
+	int32 OutputFormat = 0; // 0=CSV, 1=JSON, 2=Both
 };
 
 // ========== PERFORMANCE METRICS STRUCTURES ==========
