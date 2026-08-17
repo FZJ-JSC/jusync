@@ -1399,10 +1399,13 @@ bool UJUSYNCBlueprintLibrary::CheckForReceivedFiles(TArray<FJUSYNCFileData>& Out
 
     if (ReceivedFiles.Num() > 0)
     {
-        OutReceivedFiles = ReceivedFiles;
+        // Move (not deep-copy) the accumulated files into the out param. This avoids a full
+        // memcpy of every file byte AND drains ReceivedFiles so it can't grow without bound
+        // across a long session (it was only reset by ClearReceivedData before).
+        OutReceivedFiles = MoveTemp(ReceivedFiles);
 
         // Log received files for debugging
-        for (const FJUSYNCFileData& FileData : ReceivedFiles)
+        for (const FJUSYNCFileData& FileData : OutReceivedFiles)
         {
             FString Message = FString::Printf(TEXT("Received File: %s (%d bytes, %s)"),
                 *FileData.Filename, FileData.Data.Num(), *FileData.FileType);

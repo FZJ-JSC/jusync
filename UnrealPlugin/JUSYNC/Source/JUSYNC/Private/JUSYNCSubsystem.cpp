@@ -64,7 +64,7 @@ static FCriticalSection ProcessedFilesCriticalSection;
 // Enhanced callback functions with detailed debugging
 extern "C" void FileReceivedCallback_Static(const CFileData* file_data)
 {
-    UE_LOG(LogJUSYNC, Log, TEXT("=== ZMQ CALLBACK TRIGGERED ==="));
+    UE_LOG(LogJUSYNC, Verbose, TEXT("File received callback triggered"));
     
     if (!file_data)
     {
@@ -83,13 +83,17 @@ extern "C" void FileReceivedCallback_Static(const CFileData* file_data)
             return;
         }
         ProcessedFiles.Add(Filename);
+
+        // Bound memory: this set only needs recent entries to drop multi-rank duplicates within a
+        // single broadcast. Reset the window once it grows large (long sessions with live updates).
+        if (ProcessedFiles.Num() >= 4096)
+        {
+            ProcessedFiles.Reset();
+        }
     }
     
-    UE_LOG(LogJUSYNC, Log, TEXT("ZMQ File Received:"));
-    UE_LOG(LogJUSYNC, Log, TEXT("  - Filename: %s"), *Filename);
-    UE_LOG(LogJUSYNC, Log, TEXT("  - File Type: %s"), UTF8_TO_TCHAR(file_data->file_type));
-    UE_LOG(LogJUSYNC, Log, TEXT("  - Data Size: %d bytes"), file_data->data_size);
-    UE_LOG(LogJUSYNC, Log, TEXT("  - Hash: %s"), UTF8_TO_TCHAR(file_data->hash));
+    UE_LOG(LogJUSYNC, Verbose, TEXT("ZMQ file received: %s (type=%s, %d bytes)"),
+           *Filename, UTF8_TO_TCHAR(file_data->file_type), file_data->data_size);
     
     UJUSYNCSubsystem* Subsystem = g_SubsystemInstance.load();
     if (!Subsystem)
@@ -747,6 +751,10 @@ void UJUSYNCSubsystem::HandleMessageReceivedForLibrary(const FString& Message)
 bool UJUSYNCSubsystem::LoadUSDFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCMeshData>& OutMeshData)
 {
 #ifdef WITH_ANARI_USD_MIDDLEWARE
+    // Serialize the USD parse (tinyusdz is not thread-safe). Uses ParseMutex, not the general
+    // MiddlewareMutex, so a long parse on a background thread never stalls game-thread ops.
+    FScopeLock Lock(&ParseMutex);
+
     if (!bIsInitialized.load())
     {
         UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC Middleware not initialized"));
@@ -860,7 +868,7 @@ bool UJUSYNCSubsystem::LoadUSDFullFromBuffer(const TArray<uint8>& Buffer, const 
         return false;
     }
 
-    FScopeLock Lock(&MiddlewareMutex);
+    FScopeLock Lock(&ParseMutex);
 
     FTCHARToUTF8 FilenameConverter(*Filename);
     const char* FilenameCStr = FilenameConverter.Get();
@@ -978,7 +986,7 @@ bool UJUSYNCSubsystem::LoadUSDFullFromBufferNoCopy(const TArray<uint8>& Buffer, 
         return false;
     }
 
-    FScopeLock Lock(&MiddlewareMutex);
+    FScopeLock Lock(&ParseMutex);
 
     FTCHARToUTF8 FilenameConverter(*Filename);
     const char* FilenameCStr = FilenameConverter.Get();

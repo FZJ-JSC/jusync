@@ -182,7 +182,7 @@ private:
     void OnFileListReceived_Internal_Common(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<int32>& FileRanks, bool bSuccess);
     void OnFileListError(const FString& ErrorMessage);
     void OnFileDownloaded(const FString& Filename, const TArray<uint8>& FileData);
-    void OnSingleFileDownloaded(const FString& Filename, const TArray<uint8>& FileData, bool bSuccess, int32 FileIndex, int32 TargetRank);
+    void OnSingleFileDownloaded(const FString& Filename, TUniquePtr<TArray<uint8>> FileData, bool bSuccess, int32 FileIndex, int32 TargetRank);
     void OnFileDownloadError(const FString& ErrorMessage);
     void DownloadGradientPng(UJUSYNCSubsystem* Subsystem);
     void PipelineDownloadNext(UJUSYNCSubsystem* Subsystem);

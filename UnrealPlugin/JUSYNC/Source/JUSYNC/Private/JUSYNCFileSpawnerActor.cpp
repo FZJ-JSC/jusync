@@ -7,6 +7,7 @@
 #include "IImageWrapper.h"
 #include "IImageWrapperModule.h"
 #include "Kismet/GameplayStatics.h"
+#include "Templates/UniquePtr.h"
 
 AJUSYNCFileSpawnerActor::AJUSYNCFileSpawnerActor()
 {
@@ -438,27 +439,27 @@ void AJUSYNCFileSpawnerActor::PipelineDownloadNext(UJUSYNCSubsystem* Subsystem)
                 return;
             }
 
-            TArray<uint8> FileData;
-            bool bSuccess = WeakSubsystem->RequestFile(Filename, TargetRank, DynamicTimeout, FileData);
+            TUniquePtr<TArray<uint8>> FileData = MakeUnique<TArray<uint8>>();
+            bool bSuccess = WeakSubsystem->RequestFile(Filename, TargetRank, DynamicTimeout, *FileData);
 
             TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThisCopy = WeakThis;
             FFunctionGraphTask::CreateAndDispatchWhenReady(
-                [WeakThisCopy, Filename, FileData, bSuccess, FileIndex, TargetRank]()
+                [WeakThisCopy, Filename, FileData = MoveTemp(FileData), bSuccess, FileIndex, TargetRank]() mutable
                 {
                     if (!WeakThisCopy.IsValid()) return;
-                    WeakThisCopy->OnSingleFileDownloaded(Filename, FileData, bSuccess, FileIndex, TargetRank);
+                    WeakThisCopy->OnSingleFileDownloaded(Filename, MoveTemp(FileData), bSuccess, FileIndex, TargetRank);
                 },
                 TStatId(), nullptr, ENamedThreads::GameThread);
         });
 }
 
-void AJUSYNCFileSpawnerActor::OnSingleFileDownloaded(const FString& Filename, const TArray<uint8>& FileData, bool bSuccess, int32 FileIndex, int32 TargetRank)
+void AJUSYNCFileSpawnerActor::OnSingleFileDownloaded(const FString& Filename, TUniquePtr<TArray<uint8>> FileData, bool bSuccess, int32 FileIndex, int32 TargetRank)
 {
     if (bIsCancelled) return;
 
     PipelineActive = FMath::Max(0, PipelineActive - 1);
-    
-    if (!bSuccess || FileData.Num() == 0)
+
+    if (!bSuccess || !FileData || FileData->Num() == 0)
     {
         UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: [DOWNLOAD FAILED] '%s' (rank %d)"), *Filename, FilteredRanks.IsValidIndex(FileIndex) ? FilteredRanks[FileIndex] : -1);
         if (!FailedFileIndices.Contains(FileIndex))
@@ -493,14 +494,14 @@ void AJUSYNCFileSpawnerActor::OnSingleFileDownloaded(const FString& Filename, co
 
     // Move USD parse (heavy) to background thread — game thread stays responsive
     TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThis = this;
-    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakThis, Filename, FileData, FileIndex, TargetRank]() mutable
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakThis, Filename, FileData = MoveTemp(FileData), FileIndex, TargetRank]() mutable
         {
             if (!WeakThis.IsValid()) return;
 
             TArray<FJUSYNCMeshData> MeshData;
             TArray<FJUSYNCPointCloudData> PointCloudData;
             FString Preview;
-            bool bParsed = UJUSYNCBlueprintLibrary::LoadUSDFullFromBufferNoCopy(FileData, Filename, MeshData, PointCloudData, Preview);
+            bool bParsed = UJUSYNCBlueprintLibrary::LoadUSDFullFromBufferNoCopy(*FileData, Filename, MeshData, PointCloudData, Preview);
 
             //                     // During live refresh, skip initial-spawn bookkeeping (FilesDownloaded, FilesTotal reset,
                     // OnAllComplete, StartLiveUpdatePolling) — those would corrupt the actor count and restart the pipeline in a loop.
@@ -531,7 +532,9 @@ void AJUSYNCFileSpawnerActor::OnSingleFileDownloaded(const FString& Filename, co
 
 void AJUSYNCFileSpawnerActor::OnFileDownloaded(const FString& Filename, const TArray<uint8>& FileData)
 {
-    OnSingleFileDownloaded(Filename, FileData, true, FilesDownloaded, 0);
+    // Broadcast/live-refresh path: the buffer arrives as an external const ref, so hand the
+    // parse an owned heap copy (the single copy this path always paid).
+    OnSingleFileDownloaded(Filename, MakeUnique<TArray<uint8>>(FileData), true, FilesDownloaded, 0);
 }
 
 void AJUSYNCFileSpawnerActor::OnFileDownloadError(const FString& ErrorMessage)
@@ -1213,14 +1216,14 @@ void AJUSYNCFileSpawnerActor::RetryFailedDownloads()
             {
                 if (!WeakSubsystem.IsValid() || !WeakThis.IsValid()) return;
 
-                TArray<uint8> FileData;
-                bool bSuccess = WeakSubsystem->RequestFile(Filename, TargetRank, DynamicTimeout, FileData);
+                TUniquePtr<TArray<uint8>> FileData = MakeUnique<TArray<uint8>>();
+                bool bSuccess = WeakSubsystem->RequestFile(Filename, TargetRank, DynamicTimeout, *FileData);
 
                 FFunctionGraphTask::CreateAndDispatchWhenReady(
-                    [WeakThis, Filename, FileData, bSuccess, idx, TargetRank]()
+                    [WeakThis, Filename, FileData = MoveTemp(FileData), bSuccess, idx, TargetRank]() mutable
                     {
                         if (!WeakThis.IsValid()) return;
-                        WeakThis->OnSingleFileDownloaded(Filename, FileData, bSuccess, idx, TargetRank);
+                        WeakThis->OnSingleFileDownloaded(Filename, MoveTemp(FileData), bSuccess, idx, TargetRank);
                     },
                     TStatId(), nullptr, ENamedThreads::GameThread);
             });
@@ -1273,14 +1276,14 @@ void AJUSYNCFileSpawnerActor::ChainRefreshNext()
             {
                 if (!WeakSubsystem.IsValid() || !WeakThis.IsValid()) return;
 
-                TArray<uint8> FileData;
-                bool bSuccess = WeakSubsystem->RequestFile(Fname, Rank, 30000, FileData);
+                TUniquePtr<TArray<uint8>> FileData = MakeUnique<TArray<uint8>>();
+                bool bSuccess = WeakSubsystem->RequestFile(Fname, Rank, 30000, *FileData);
 
                 FFunctionGraphTask::CreateAndDispatchWhenReady(
-                    [WeakThis, Fname, FileData, bSuccess, Rank]()
+                    [WeakThis, Fname, FileData = MoveTemp(FileData), bSuccess, Rank]() mutable
                     {
                         if (!WeakThis.IsValid()) return;
-                        WeakThis->OnSingleFileDownloaded(Fname, FileData, bSuccess, -1, Rank);
+                        WeakThis->OnSingleFileDownloaded(Fname, MoveTemp(FileData), bSuccess, -1, Rank);
                         WeakThis->RefreshActive--;
                         if (WeakThis->RefreshActive <= 0 && WeakThis->RefreshRemainingFiles.Num() == 0)
                         {

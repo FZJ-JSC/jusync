@@ -393,6 +393,12 @@ private:
 #endif
 
     mutable FCriticalSection MiddlewareMutex;
+
+    // Serializes USD parsing. tinyusdz is NOT thread-safe, so parses must run one-at-a-time.
+    // Deliberately SEPARATE from MiddlewareMutex: a single parse (up to ~500MB) runs on a
+    // background thread, and holding the general MiddlewareMutex for its whole duration would
+    // stall any game-thread state op (init/connect/worker-list) that also takes it.
+    mutable FCriticalSection ParseMutex;
     std::atomic<bool> bIsInitialized{ false };
 
     // Material caching
