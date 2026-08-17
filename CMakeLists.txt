@@ -123,8 +123,6 @@ add_library(${PROJECT_NAME} SHARED
     src/UsdProcessor.cpp
     src/AnariUsdMiddleware_C.cpp
     src/CollisionProcessor.cpp
-    src/ParallelDownloadManager.cpp
-    src/MemoryMonitor.cpp
     src/GpuContext.cpp
     src/GpuValidation.cpp
     external/xxhash/xxhash.c
@@ -146,6 +144,15 @@ if(ENABLE_CUDA AND CUDA_FOUND)
     message(STATUS "CUDA architectures: ${CUDA_ARCHITECTURES}")
 else()
     message(STATUS "CUDA GPU acceleration: DISABLED (build with -DENABLE_CUDA=ON)")
+endif()
+
+# Disable debug/verbose logging in optimized (non-Debug) builds so the hot-path
+# printf-style logging is zero-cost in the shipping .so.  INFO/WARNING/ERROR stay.
+if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_definitions(${PROJECT_NAME} PRIVATE DISABLE_DEBUG_LOGGING)
+    message(STATUS "Debug logging: DISABLED (build type ${CMAKE_BUILD_TYPE})")
+else()
+    message(STATUS "Debug logging: ENABLED (Debug build)")
 endif()
 
 # Add include directories

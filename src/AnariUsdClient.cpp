@@ -1,6 +1,5 @@
 #include "AnariUsdClient.h"
 #include "MiddlewareLogging.h"
-#include "ParallelDownloadManager.h"
 
 #include <regex>
 #include <algorithm>
@@ -797,7 +796,7 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
         request.chunk_size = DEFAULT_CHUNK_SIZE;
         request.setFilename(filename);
 
-        MIDDLEWARE_LOG_INFO("Requesting file '%s' from rank %d (request_id: %u)", 
+        MIDDLEWARE_LOG_DEBUG("Requesting file '%s' from rank %d (request_id: %u)", 
                             filename.c_str(), targetRank, request.request_id);
 
         // Send request
@@ -879,7 +878,7 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
                         completeCallback(complete->getFilename(), complete->total_size);
                     }
 
-                    MIDDLEWARE_LOG_INFO("File transfer complete: %s (%zu bytes)",
+                    MIDDLEWARE_LOG_DEBUG("File transfer complete: %s (%zu bytes)",
                                         complete->getFilename().c_str(), complete->total_size);
                     break;
                 }
@@ -952,7 +951,7 @@ bool AnariUsdClient::requestFrame(int32_t frameNumber, int32_t targetRank,
         std::string frameFilename = "frame_" + std::to_string(frameNumber);
         request.setFilename(frameFilename);
 
-        MIDDLEWARE_LOG_INFO("Requesting frame %d from rank %d (request_id: %u)", 
+        MIDDLEWARE_LOG_DEBUG("Requesting frame %d from rank %d (request_id: %u)", 
                             frameNumber, targetRank, request.request_id);
 
         // Send request
@@ -961,16 +960,30 @@ bool AnariUsdClient::requestFrame(int32_t frameNumber, int32_t targetRank,
             return false;
         }
 
-        // Receive frame files (similar to requestFile but may receive multiple files)
-        bool frameComplete = false;
+        // Receive frame files from the dispatcher-backed response index.  This used
+        // to recv() directly from the socket here, which raced the dispatcher thread
+        // (the sole recv owner) and could steal/desync frames.  Now requestFrame
+        // matches its own request_id from the index exactly like requestFile.
+        //
+        // A frame spans multiple files with no single terminal marker, so — as before —
+        // we treat the frame as delivered once the broker stays quiet for `timeoutMs`
+        // and keep the original return-value semantics (quiescence returns false).
+        uint32_t myRequestId = request.request_id;
         int filesReceived = 0;
 
-        while (!frameComplete && !shutdownRequested.load()) {
-            // Poll for message
-            zmq::pollitem_t items[] = {{ zmqSocket->handle(), 0, ZMQ_POLLIN, 0 }};
-            int pollResult = zmq::poll(items, 1, std::chrono::milliseconds(timeoutMs));
+        auto drain = [this, myRequestId]() {
+            std::lock_guard<std::mutex> lock(responseQueueMutex);
+            auto it = responseByRequest.find(myRequestId);
+            if (it != responseByRequest.end()) {
+                totalQueuedFrames.fetch_sub(it->second.size(), std::memory_order_relaxed);
+                responseByRequest.erase(it); // release any not-yet-consumed frames
+            }
+        };
 
-            if (pollResult <= 0) {
+        while (!shutdownRequested.load()) {
+            std::vector<uint8_t> dummyDelim, dataFrame;
+            if (!waitForMatchingFrames(myRequestId, timeoutMs, dummyDelim, dataFrame)) {
+                drain();
                 MIDDLEWARE_LOG_ERROR("Timeout waiting for frame data");
                 if (errorCallback) {
                     errorCallback("Timeout waiting for frame data");
@@ -978,60 +991,56 @@ bool AnariUsdClient::requestFrame(int32_t frameNumber, int32_t targetRank,
                 return false;
             }
 
-            // Receive message type (serialized via recvMutex)
-            uint32_t messageType;
-            zmq::message_t msgType;
-            {
-                std::lock_guard<std::mutex> recvLock(recvMutex);
-                auto res = zmqSocket->recv(msgType, zmq::recv_flags::none);
-                if (!res || res.value() != sizeof(messageType)) {
-                    MIDDLEWARE_LOG_ERROR("Failed to receive message type");
-                    return false;
-                }
+            if (dataFrame.size() < 8) {
+                continue; // skip malformed frame
             }
-            messageType = *static_cast<uint32_t*>(msgType.data());
 
-            // Handle based on message type
+            const uint8_t* combinedData = dataFrame.data();
+            uint32_t magic = *reinterpret_cast<const uint32_t*>(combinedData);
+            uint32_t messageType = *reinterpret_cast<const uint32_t*>(combinedData + 4);
+            size_t combinedSize = dataFrame.size();
+
+            if (!MessageUtils::isValidMagic(magic)) {
+                MIDDLEWARE_LOG_ERROR("Invalid magic number in frame response: 0x%08X", magic);
+                continue;
+            }
+
             switch (static_cast<ZmqMessageType>(messageType)) {
                 case ZmqMessageType::RESP_FILE_CHUNK: {
-                    ZmqFileChunk chunk;
-                    if (!receiveResponse(&chunk, sizeof(chunk), timeoutMs)) {
-                        MIDDLEWARE_LOG_ERROR("Failed to receive file chunk header");
-                        return false;
+                    if (combinedSize < sizeof(ZmqFileChunk)) {
+                        MIDDLEWARE_LOG_ERROR("Frame chunk response too small: %zu bytes", combinedSize);
+                        break;
                     }
-
-                    // Receive chunk data
-                    std::vector<uint8_t> chunkData(chunk.chunk_size);
-                    if (chunk.chunk_size > 0) {
-                        if (!receiveResponse(chunkData.data(), chunkData.size(), timeoutMs)) {
-                            MIDDLEWARE_LOG_ERROR("Failed to receive chunk data");
-                            return false;
-                        }
+                    const ZmqFileChunk* chunk = reinterpret_cast<const ZmqFileChunk*>(combinedData);
+                    size_t dataSize = combinedSize - sizeof(ZmqFileChunk);
+                    if (dataSize != chunk->chunk_size) {
+                        MIDDLEWARE_LOG_WARNING("Chunk size mismatch: header %u, data %zu",
+                                               chunk->chunk_size, dataSize);
                     }
-
-                    // Trigger chunk callback
+                    std::vector<uint8_t> chunkData;
+                    if (dataSize > 0) {
+                        chunkData.assign(combinedData + sizeof(ZmqFileChunk),
+                                         combinedData + sizeof(ZmqFileChunk) + dataSize);
+                    }
                     if (chunkCallback) {
-                        chunkCallback(chunk.getFilename(), chunkData, chunk.chunk_offset, chunk.file_size);
+                        chunkCallback(chunk->getFilename(), chunkData, chunk->chunk_offset, chunk->file_size);
                     }
-
-                    connectionStats.totalBytesReceived.fetch_add(chunk.chunk_size);
+                    connectionStats.totalBytesReceived.fetch_add(dataSize);
                     break;
                 }
 
                 case ZmqMessageType::RESP_FILE_COMPLETE: {
-                    ZmqFileComplete complete;
-                    if (!receiveResponse(&complete, sizeof(complete), timeoutMs)) {
-                        MIDDLEWARE_LOG_ERROR("Failed to receive file complete message");
-                        return false;
+                    if (combinedSize < sizeof(ZmqFileComplete)) {
+                        MIDDLEWARE_LOG_ERROR("Frame complete response too small: %zu bytes", combinedSize);
+                        break;
                     }
-
+                    const ZmqFileComplete* complete = reinterpret_cast<const ZmqFileComplete*>(combinedData);
                     filesReceived++;
                     if (completeCallback) {
-                        completeCallback(complete.getFilename(), complete.total_size);
+                        completeCallback(complete->getFilename(), complete->total_size);
                     }
-
-                    MIDDLEWARE_LOG_INFO("Frame file %d complete: %s (%zu bytes)", 
-                                        filesReceived, complete.getFilename().c_str(), complete.total_size);
+                    MIDDLEWARE_LOG_DEBUG("Frame file %d complete: %s (%zu bytes)",
+                                        filesReceived, complete->getFilename().c_str(), complete->total_size);
                     break;
                 }
 
@@ -1040,33 +1049,30 @@ bool AnariUsdClient::requestFrame(int32_t frameNumber, int32_t targetRank,
                     if (errorCallback) {
                         errorCallback("Frame not found: " + std::to_string(frameNumber));
                     }
+                    drain();
                     return false;
                 }
 
                 case ZmqMessageType::RESP_ERROR: {
-                    ZmqErrorResponse error;
-                    if (!receiveResponse(&error, sizeof(error), timeoutMs)) {
-                        MIDDLEWARE_LOG_ERROR("Failed to receive error message");
-                        return false;
-                    }
-
-                    MIDDLEWARE_LOG_ERROR("Error response: %s", error.getErrorMessage().c_str());
+                    MIDDLEWARE_LOG_ERROR("Error response in frame request");
                     if (errorCallback) {
-                        errorCallback(error.getErrorMessage());
+                        errorCallback("Error response in frame request");
                     }
+                    drain();
                     return false;
                 }
 
                 default:
-                    MIDDLEWARE_LOG_WARNING("Unknown message type: %u", messageType);
+                    MIDDLEWARE_LOG_WARNING("Unknown frame message type: %u", messageType);
                     break;
             }
 
             connectionStats.totalResponsesReceived.fetch_add(1);
         }
 
-        connectionStats.lastActivityTime = std::chrono::steady_clock::now();
-        return true;
+        // Shutdown requested while in flight.
+        drain();
+        return false;
 
     } catch (const zmq::error_t& e) {
         MIDDLEWARE_LOG_ERROR("ZeroMQ error in requestFrame: %s (errno: %d)", e.what(), e.num());
@@ -1145,7 +1151,7 @@ bool AnariUsdClient::sendRequest(const void* data, size_t size, uint32_t request
         
         // DEBUG: Log request details
         const ZmqFileRequest* req = static_cast<const ZmqFileRequest*>(data);
-        MIDDLEWARE_LOG_INFO("DEBUG sendRequest: magic=0x%08x, type=%u, size=%zu, request_id=%u",
+        MIDDLEWARE_LOG_DEBUG("DEBUG sendRequest: magic=0x%08x, type=%u, size=%zu, request_id=%u",
                            req->magic, req->message_type, size, requestId);
         
         // Send empty delimiter frame with SNDMORE flag (first frame of 2-frame message)
@@ -1160,7 +1166,7 @@ bool AnariUsdClient::sendRequest(const void* data, size_t size, uint32_t request
             return false;
         }
         
-        MIDDLEWARE_LOG_INFO("DEBUG sendRequest: Empty delimiter sent successfully");
+        MIDDLEWARE_LOG_DEBUG("DEBUG sendRequest: Empty delimiter sent successfully");
         
         // Send binary struct (second/last frame, no SNDMORE flag)
         zmq::message_t msg(size);
@@ -1173,7 +1179,7 @@ bool AnariUsdClient::sendRequest(const void* data, size_t size, uint32_t request
             return false;
         }
 
-        MIDDLEWARE_LOG_INFO("DEBUG sendRequest: Request data sent successfully (%zu bytes)", size);
+        MIDDLEWARE_LOG_DEBUG("DEBUG sendRequest: Request data sent successfully (%zu bytes)", size);
         connectionStats.totalRequestsSent.fetch_add(1);
         return true;
 
@@ -1184,69 +1190,8 @@ bool AnariUsdClient::sendRequest(const void* data, size_t size, uint32_t request
     }
 }
 
-bool AnariUsdClient::receiveResponse(void* buffer, size_t size, int timeoutMs) {
-    // First wait for data to be available with cancellation support
-    if (!waitForResponse(0, timeoutMs)) { // Use 0 as requestId since we already waited
-        return false;
-    }
-
-    try {
-        std::lock_guard<std::mutex> recvLock(recvMutex);
-        zmq::message_t msg;
-        auto result = zmqSocket->recv(msg, zmq::recv_flags::none);
-
-        if (!result || result.value() != size) {
-            MIDDLEWARE_LOG_ERROR("Failed to receive response (expected %zu bytes, got %zu)",
-                                size, result ? result.value() : 0);
-            return false;
-        }
-
-        memcpy(buffer, msg.data(), size);
-        return true;
-
-    } catch (const zmq::error_t& e) {
-        MIDDLEWARE_LOG_ERROR("ZeroMQ error receiving response: %s (errno: %d)", e.what(), e.num());
-        return false;
-    }
-}
-
 uint32_t AnariUsdClient::generateRequestId() {
     return nextRequestId.fetch_add(1);
-}
-
-bool AnariUsdClient::waitForResponse(uint32_t requestId, int timeoutMs) {
-    // For DEALER socket, we just poll for availability
-    // Use polling with smaller intervals to allow cancellation checks
-    const int POLL_INTERVAL_MS = 100; // Check every 100ms
-    
-    int remainingTime = timeoutMs;
-    auto startTime = std::chrono::steady_clock::now();
-    
-    while (remainingTime > 0) {
-        // Check if we should cancel (connection status changed or shutdown requested)
-        auto status = connectionStatus.load();
-        if (status != ConnectionStatus::Connected || shutdownRequested.load()) {
-            MIDDLEWARE_LOG_WARNING("Connection status changed during wait (status: %d, shutdown: %d), cancelling",
-                                  static_cast<int>(status), shutdownRequested.load());
-            return false;
-        }
-        
-        // Poll with smaller interval
-        int pollTimeout = std::min(POLL_INTERVAL_MS, remainingTime);
-        zmq::pollitem_t items[] = {{ zmqSocket->handle(), 0, ZMQ_POLLIN, 0 }};
-        int pollResult = zmq::poll(items, 1, std::chrono::milliseconds(pollTimeout));
-        
-        if (pollResult > 0) {
-            return true; // Data available
-        }
-        
-        // Update remaining time
-        auto currentTime = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(currentTime - startTime);
-        remainingTime = timeoutMs - static_cast<int>(elapsed.count());
-    }
-    
-    return false; // Timeout
 }
 
 AnariUsdClient::ConnectionStats::Snapshot AnariUsdClient::getConnectionStats() const {
@@ -1381,31 +1326,18 @@ bool AnariUsdClient::requestWorkerListString(std::vector<std::tuple<int32_t, std
             connectionStats.totalRequestsSent.fetch_add(1);
         } // ✅ Lock released here before blocking receive
 
-        // Wait for response with cancellation support
-        if (!waitForResponse(0, timeoutMs)) {
+        // Wait for the raw-string response via the dispatcher-backed index.
+        // The GET_WORKERS reply carries no ANARI magic/request_id, so it is routed
+        // to the id==0 FIFO by enqueueResponseFrame (the dispatcher is still the
+        // sole owner of the socket recv).
+        std::vector<uint8_t> dummyDelim, responseData;
+        if (!waitForMatchingFrames(0, timeoutMs, dummyDelim, responseData)) {
             MIDDLEWARE_LOG_ERROR("Timeout waiting for worker list response");
             return false;
         }
 
-        // Receive response (2 frames: serialized via recvMutex)
-        zmq::message_t delimiterMsg, responseMsg;
-        {
-            std::lock_guard<std::mutex> recvLock(recvMutex);
-            auto delimResult = zmqSocket->recv(delimiterMsg, zmq::recv_flags::none);
-            if (!delimResult) {
-                MIDDLEWARE_LOG_ERROR("Failed to receive delimiter frame");
-                return false;
-            }
-
-            auto recvResult = zmqSocket->recv(responseMsg, zmq::recv_flags::none);
-            if (!recvResult) {
-                MIDDLEWARE_LOG_ERROR("Failed to receive worker list response");
-                return false;
-            }
-        }
-
         // Parse response: "WORKER_LIST|rank1:hostname1:ip1;rank2:hostname2:ip2;..."
-        std::string responseStr(static_cast<const char*>(responseMsg.data()), responseMsg.size());
+        std::string responseStr(reinterpret_cast<const char*>(responseData.data()), responseData.size());
         MIDDLEWARE_LOG_INFO("Received worker list response: %s", responseStr.c_str());
 
         // Check if response starts with "WORKER_LIST|"
@@ -1829,7 +1761,7 @@ bool AnariUsdClient::requestFilesParallel(
     
     // Extreme crash protection - check for stack corruption
     try {
-        MIDDLEWARE_LOG_INFO("=== ENTERING requestFilesParallel ===");
+        MIDDLEWARE_LOG_DEBUG("=== ENTERING requestFilesParallel ===");
     } catch (...) {
         // If logging fails, we have serious memory corruption
         return false;
@@ -1853,7 +1785,7 @@ bool AnariUsdClient::requestFilesParallel(
         return false;
     }
     
-    MIDDLEWARE_LOG_INFO("Client is connected");
+    MIDDLEWARE_LOG_DEBUG("Client is connected");
     
     if (filenames.size() != target_ranks.size()) {
         MIDDLEWARE_LOG_ERROR("Filename count (%zu) doesn't match target_ranks count (%zu)",
@@ -1861,55 +1793,9 @@ bool AnariUsdClient::requestFilesParallel(
         return false;
     }
     
-    MIDDLEWARE_LOG_INFO("Input validation passed");
-    
-    // Create parallel download manager if not already created
-    MIDDLEWARE_LOG_INFO("Checking parallelDownloadManager: %p", parallelDownloadManager.get());
-    if (!parallelDownloadManager) {
-        MIDDLEWARE_LOG_INFO("Creating new ParallelDownloadManager instance");
-        try {
-            MIDDLEWARE_LOG_INFO("Attempting to create shared_ptr from this: %p", this);
-            auto shared_this = std::shared_ptr<AnariUsdClient>(this, [](auto*) {});
-            MIDDLEWARE_LOG_INFO("shared_ptr created successfully");
-            
-            MIDDLEWARE_LOG_INFO("Calling std::make_unique<ParallelDownloadManager>");
-            parallelDownloadManager = std::make_unique<ParallelDownloadManager>(
-                shared_this, // shared_ptr with no-op deleter
-                4 // max parallel downloads
-            );
-            MIDDLEWARE_LOG_INFO("ParallelDownloadManager created successfully at: %p", parallelDownloadManager.get());
-        } catch (const std::exception& e) {
-            MIDDLEWARE_LOG_ERROR("Failed to create ParallelDownloadManager: %s", e.what());
-            if (error_callback) {
-                for (const auto& filename : filenames) {
-                    error_callback(filename, std::string("Failed to create download manager: ") + e.what());
-                }
-            }
-            return false;
-        } catch (...) {
-            MIDDLEWARE_LOG_ERROR("Failed to create ParallelDownloadManager: unknown exception");
-            if (error_callback) {
-                for (const auto& filename : filenames) {
-                    error_callback(filename, "Failed to create download manager: unknown exception");
-                }
-            }
-            return false;
-        }
-    }
-    
-    MIDDLEWARE_LOG_INFO("parallelDownloadManager after creation: %p", parallelDownloadManager.get());
-    
-    if (!parallelDownloadManager) {
-        MIDDLEWARE_LOG_ERROR("ParallelDownloadManager is null after creation attempt");
-        if (error_callback) {
-            for (const auto& filename : filenames) {
-                error_callback(filename, "Download manager is null");
-            }
-        }
-        return false;
-    }
-    
-    MIDDLEWARE_LOG_INFO("Starting parallel download of %zu files using same logic as async node", filenames.size());
+    MIDDLEWARE_LOG_DEBUG("Input validation passed");
+
+    MIDDLEWARE_LOG_DEBUG("Starting parallel download of %zu files using same logic as async node", filenames.size());
     
     // Create shared state for tracking all downloads
     struct ParallelDownloadState {
@@ -1921,7 +1807,23 @@ bool AnariUsdClient::requestFilesParallel(
     auto state = std::make_shared<ParallelDownloadState>();
     size_t total_files = filenames.size();
     
-    // Start a download for each file (same pattern as getFileSync but async)
+    // Ensure the bounded parallel-download worker pool is running.
+    {
+        std::lock_guard<std::mutex> lock(downloadTaskMutex);
+        if (!downloadPoolActive.load(std::memory_order_acquire)) {
+            downloadPoolActive.store(true, std::memory_order_release);
+            const unsigned int hw = std::thread::hardware_concurrency();
+            const size_t n = std::min<size_t>(MAX_PARALLEL_DOWNLOADS,
+                                              hw > 0 ? hw : static_cast<unsigned int>(MAX_PARALLEL_DOWNLOADS));
+            downloadWorkers.reserve(n);
+            for (size_t i = 0; i < n; ++i) {
+                downloadWorkers.emplace_back(&AnariUsdClient::downloadWorkerLoop, this);
+            }
+            MIDDLEWARE_LOG_INFO("Parallel download pool started with %zu workers", n);
+        }
+    }
+
+    // Build a per-file download task and hand it to the worker pool for overlap.
     for (size_t i = 0; i < filenames.size(); ++i) {
         std::string filename = filenames[i];
         int32_t target_rank = target_ranks[i];
@@ -2000,22 +1902,35 @@ bool AnariUsdClient::requestFilesParallel(
                 }
             };
         
-        // Start the async download (non-blocking)
-        bool started = this->requestFile(filename, target_rank, 
-                                        chunk_callback, complete_callback, 
-                                        error_callback_wrapper, timeout_ms);
-        
-        if (!started) {
-            MIDDLEWARE_LOG_ERROR("Failed to start parallel download for: %s", filename.c_str());
-            
-            if (error_callback) {
-                error_callback(filename, "Failed to start download");
+        // Hand off this file to the worker pool so downloads overlap (up to
+        // MAX_PARALLEL_DOWNLOADS concurrent transfers).  Previously requestFile
+        // ran synchronously here, serializing all N files on a single thread
+        // despite the "parallel" name.
+        auto task = FileDownloadTask{};
+        task.run = [this, filename, target_rank, timeout_ms,
+                    chunk_callback, complete_callback, error_callback_wrapper,
+                    error_callback, state]() {
+            if (!this->requestFile(filename, target_rank,
+                                   chunk_callback, complete_callback,
+                                   error_callback_wrapper, timeout_ms)) {
+                // requestFile only returns false without routing an error through
+                // error_callback_wrapper in this "not started" (send) case.
+                MIDDLEWARE_LOG_ERROR("Failed to start parallel download for: %s", filename.c_str());
+                if (error_callback) {
+                    error_callback(filename, "Failed to start download");
+                }
+                // Count as completed (with error)
+                state->completed_files.fetch_add(1);
             }
-            
-            // Count as completed (with error)
-            state->completed_files.fetch_add(1);
+        };
+
+        {
+            std::lock_guard<std::mutex> lock(downloadTaskMutex);
+            downloadTaskQueue.push_back(std::move(task));
         }
     }
+
+    downloadTaskCv.notify_all();
     
     // Return true immediately - downloads run asynchronously
     // Callbacks will handle completion and spawning
@@ -2102,22 +2017,41 @@ void AnariUsdClient::enqueueResponseFrame(const std::vector<uint8_t>& delimiter,
         uint32_t msgType = *reinterpret_cast<const uint32_t*>(data.data() + 4);
         if (magic == ANARI_USD_MAGIC && MessageUtils::isNotificationType(msgType)) {
             handleNotification(data);
-            return; // Don't enqueue notification into response queue
+            return; // Don't enqueue notification into response index
         }
     }
 
-    auto entry = std::make_shared<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>>(
+    // Extract the request_id BEFORE moving `data` (move leaves it empty).
+    const uint32_t requestId = extractRequestId(data.data(), data.size());
+
+    auto entry = std::make_shared<FramePair>(
         std::move(const_cast<std::vector<uint8_t>&>(delimiter)),
         std::move(const_cast<std::vector<uint8_t>&>(data)));
 
     {
         std::lock_guard<std::mutex> lock(responseQueueMutex);
-        responseQueue.push(std::move(entry));
-        if (responseQueue.size() > 500) {
-            responseQueue.pop(); // Safety cap
+        if (requestId == 0) {
+            // Raw-string response (e.g. GET_WORKERS) carrying no ANARI magic/id.
+            noIdResponseQueue.push_back(std::move(entry));
+        } else {
+            responseByRequest[requestId].push_back(std::move(entry));
+        }
+        totalQueuedFrames.fetch_add(1, std::memory_order_relaxed);
+
+        // High-watermark safety valve: warn (never drop) if the index grows
+        // unbounded because a consumer stalled.  A stuck consumer only leaks its
+        // own request_id entry, which is drained when it completes/times out.
+        if (totalQueuedFrames.load(std::memory_order_relaxed) > 4000) {
+            const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now().time_since_epoch()).count();
+            const int64_t last = lastQueueWarnMs.exchange(nowMs);
+            if (nowMs - last > 1000) {
+                MIDDLEWARE_LOG_WARNING("Response index high watermark (%zu frames) — a consumer may be stalled",
+                                       totalQueuedFrames.load(std::memory_order_relaxed));
+            }
         }
     }
-    responseQueueCv.notify_one(); // Wake one waiting thread
+    responseQueueCv.notify_all(); // Wake waiting threads matching their id
 }
 
 // ---------------------------------------------------------------------------
@@ -2128,26 +2062,29 @@ bool AnariUsdClient::tryDequeueMatching(uint32_t requestId,
                                         std::vector<uint8_t>& outDelimiter,
                                         std::vector<uint8_t>& outData) {
     std::lock_guard<std::mutex> lock(responseQueueMutex);
-    std::vector<std::shared_ptr<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>>> stash;
-    std::shared_ptr<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> match;
-    while (!responseQueue.empty()) {
-        auto entry = responseQueue.front();
-        responseQueue.pop();
-        uint32_t msgId = extractRequestId(entry->second.data(), entry->second.size());
-        if (msgId == requestId) {
-            match = std::move(entry);
-            break;
+    FramePairPtr entry;
+    if (requestId == 0) {
+        if (!noIdResponseQueue.empty()) {
+            entry = std::move(noIdResponseQueue.front());
+            noIdResponseQueue.pop_front();
         }
-        stash.push_back(std::move(entry));
+    } else {
+        auto it = responseByRequest.find(requestId);
+        if (it != responseByRequest.end() && !it->second.empty()) {
+            entry = std::move(it->second.front());
+            it->second.pop_front();
+            if (it->second.empty()) {
+                responseByRequest.erase(it); // bound memory once a request fully drains
+            }
+        }
     }
-    if (match) {
-        outDelimiter = std::move(match->first);
-        outData = std::move(match->second);
+    if (!entry) {
+        return false;
     }
-    for (auto& s : stash) {
-        responseQueue.push(std::move(s));
-    }
-    return !!match;
+    totalQueuedFrames.fetch_sub(1, std::memory_order_relaxed);
+    outDelimiter = std::move(entry->first);
+    outData = std::move(entry->second);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -2158,10 +2095,10 @@ bool AnariUsdClient::tryDequeueMatching(uint32_t requestId,
 bool AnariUsdClient::waitForMatchingFrames(uint32_t requestId, int timeoutMs,
                                             std::vector<uint8_t>& outDelimiter,
                                             std::vector<uint8_t>& outData) {
-    // Fast path: frame already in queue
+    // Fast path: frame already in the index
     if (tryDequeueMatching(requestId, outDelimiter, outData)) return true;
 
-    // Slow path: wait on condition_variable
+    // Slow path: wait on the condition_variable until a frame for THIS id arrives.
     auto deadline = std::chrono::steady_clock::now()
                     + std::chrono::milliseconds(timeoutMs);
 
@@ -2172,37 +2109,60 @@ bool AnariUsdClient::waitForMatchingFrames(uint32_t requestId, int timeoutMs,
             return false;
         }
 
-        // Search queue for match
-        std::vector<std::shared_ptr<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>>> stash;
-        std::shared_ptr<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> match;
-        while (!responseQueue.empty()) {
-            auto entry = responseQueue.front();
-            responseQueue.pop();
-            uint32_t msgId = extractRequestId(entry->second.data(), entry->second.size());
-            if (msgId == requestId) {
-                match = std::move(entry);
-                break;
+        // O(1) predicate: is there a frame buffered for this specific request_id?
+        auto hasFrame = [this, requestId]() -> bool {
+            if (requestId == 0) {
+                return !noIdResponseQueue.empty();
             }
-            stash.push_back(std::move(entry));
-        }
-        if (match) {
-            outDelimiter = std::move(match->first);
-            outData = std::move(match->second);
-            for (auto& s : stash) responseQueue.push(std::move(s));
-            return true;
-        }
-        for (auto& s : stash) responseQueue.push(std::move(s));
+            auto it = responseByRequest.find(requestId);
+            return it != responseByRequest.end() && !it->second.empty();
+        };
+        if (hasFrame()) break;
 
         // Wait on condition_variable with deadline
         if (responseQueueCv.wait_until(lock, deadline) == std::cv_status::timeout) {
-            auto now = std::chrono::steady_clock::now();
-            if (now >= deadline) {
-                MIDDLEWARE_LOG_WARNING("Timeout %d ms waiting for request_id %u",
-                                       timeoutMs, requestId);
-                return false;
+            MIDDLEWARE_LOG_WARNING("Timeout %d ms waiting for request_id %u",
+                                   timeoutMs, requestId);
+            return false;
+        }
+    }
+
+    // A frame is present — dequeue our own id's frame.
+    return tryDequeueMatching(requestId, outDelimiter, outData);
+}
+
+// ---------------------------------------------------------------------------
+// downloadWorkerLoop — pool worker.  Runs per-file download tasks (requestFile)
+// so requestFilesParallel can overlap up to MAX_PARALLEL_DOWNLOADS transfers.
+// Exits cleanly when cleanup() stops the pool and the task queue drains.
+// ---------------------------------------------------------------------------
+void AnariUsdClient::downloadWorkerLoop() {
+    for (;;) {
+        FileDownloadTask task;
+        {
+            std::unique_lock<std::mutex> lock(downloadTaskMutex);
+            downloadTaskCv.wait(lock, [this]() {
+                return !downloadPoolActive.load(std::memory_order_acquire) ||
+                       !downloadTaskQueue.empty();
+            });
+            if (!downloadPoolActive.load(std::memory_order_acquire)) {
+                break; // pool stopped: finish without starting queued tasks
+            }
+            if (downloadTaskQueue.empty()) {
+                break; // spurious wake
+            }
+            task = std::move(downloadTaskQueue.front());
+            downloadTaskQueue.pop_front();
+        }
+        if (task.run) {
+            try {
+                task.run();
+            } catch (const std::exception& e) {
+                MIDDLEWARE_LOG_ERROR("Parallel download worker exception: %s", e.what());
+            } catch (...) {
+                MIDDLEWARE_LOG_ERROR("Parallel download worker unknown exception");
             }
         }
-        // Notify fired — loop back and check queue
     }
 }
 
@@ -2211,7 +2171,19 @@ bool AnariUsdClient::waitForMatchingFrames(uint32_t requestId, int timeoutMs,
 // ============================================================================
 
 void AnariUsdClient::cleanup() {
-    // Stop dispatcher thread first — it owns all ZMQ receive
+    // 1) Stop the parallel-download worker pool FIRST.  Its workers run
+    //    requestFile (send path + response index), so join them before the
+    //    dispatcher / socket / context are torn down.
+    downloadPoolActive.store(false, std::memory_order_release);
+    downloadTaskCv.notify_all();
+    for (auto& w : downloadWorkers) {
+        if (w.joinable()) {
+            w.join();
+        }
+    }
+    downloadWorkers.clear();
+
+    // 2) Stop dispatcher thread — it owns all ZMQ receive
     dispatcherActive.store(false);
     responseQueueCv.notify_all();
     if (dispatchThread.joinable()) {
@@ -2237,6 +2209,18 @@ void AnariUsdClient::cleanup() {
     }
 
     pendingRequests.clear();
+
+    // 3) Empty the response index and the download task queue.
+    {
+        std::lock_guard<std::mutex> lock(responseQueueMutex);
+        responseByRequest.clear();
+        noIdResponseQueue.clear();
+    }
+    totalQueuedFrames.store(0, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(downloadTaskMutex);
+        downloadTaskQueue.clear();
+    }
 }
 
 } // namespace anari_usd_middleware

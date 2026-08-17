@@ -12,7 +12,8 @@
 #include <chrono>
 #include <functional>
 #include <map>
-#include <queue>
+#include <deque>
+#include <unordered_map>
 #include <condition_variable>
 #include <thread>
 
@@ -29,9 +30,6 @@
 #endif
 
 namespace anari_usd_middleware {
-
-// Forward declaration
-class ParallelDownloadManager;
 
 /**
  * ANARI USD ZMQ DEALER Client
@@ -212,7 +210,6 @@ private:
 
     // Message sending helpers
     bool sendRequest(const void* data, size_t size, uint32_t requestId);
-    bool receiveResponse(void* buffer, size_t size, int timeoutMs);
 
     // Response handling
     bool handleFileChunkResponse(const ZmqFileChunk& chunk,
@@ -231,7 +228,6 @@ private:
 
     // Request ID management
     uint32_t generateRequestId();
-    bool waitForResponse(uint32_t requestId, int timeoutMs);
 
     // Platform-specific configuration
 #if PLATFORM_WINDOWS
@@ -243,7 +239,6 @@ private:
     // Member variables
     std::unique_ptr<zmq::context_t> zmqContext;
     std::unique_ptr<zmq::socket_t> zmqSocket;
-    std::unique_ptr<ParallelDownloadManager> parallelDownloadManager;
 
     // Connection state
     std::atomic<ConnectionStatus> connectionStatus{ConnectionStatus::Disconnected};
@@ -262,17 +257,43 @@ private:
     std::atomic<uint32_t> nextRequestId{1};
     std::map<uint32_t, bool> pendingRequests;
 
-    // Out-of-order response queue for multi-threaded safety.
-    // A dedicated dispatcher thread continuously pulls frames from the ZMQ
-    // socket and enqueues them here.  Request threads never call recv() —
-    // they only dequeue from this queue, making the receive path truly async.
+    // Incoming frame pair pulled by the dispatcher: <delimiterFrame, dataFrame>.
+    using FramePair = std::pair<std::vector<uint8_t>, std::vector<uint8_t>>;
+    using FramePairPtr = std::shared_ptr<FramePair>;
+
+    // Out-of-order response buffering for multi-threaded safety.
+    // A dedicated dispatcher thread continuously pulls frame pairs from the ZMQ
+    // socket and indexes them by request_id (O(1) lookup for requesters).
+    // Request threads never call recv() — they only dequeue from this index,
+    // making the receive path truly async and contention-free.
+    //
+    // request_id 0 is reserved for the raw-string GET_WORKERS response, which
+    // carries no ANARI magic/request_id, so it is routed to a separate FIFO.
     mutable std::mutex responseQueueMutex;
     std::condition_variable responseQueueCv;
-    std::queue<std::shared_ptr<std::pair<std::vector<uint8_t>, /*delimiterFrame*/ std::vector<uint8_t>/*dataFrame*/>>> responseQueue;
+    std::unordered_map<uint32_t, std::deque<FramePairPtr>> responseByRequest;
+    std::deque<FramePairPtr> noIdResponseQueue;
+    std::atomic<size_t> totalQueuedFrames{0};
+    std::atomic<int64_t> lastQueueWarnMs{0};
 
     // Dispatcher thread — owns ALL ZMQ recv operations.
     std::thread dispatchThread;
     std::atomic<bool> dispatcherActive{false};
+
+    // Bounded parallel-download worker pool used by requestFilesParallel.
+    // Owned by the client and torn down in cleanup() BEFORE the socket closes,
+    // so in-flight download threads are always joined and cannot outlive the
+    // ZMQ context.
+    struct FileDownloadTask {
+        std::function<void()> run;
+    };
+    void downloadWorkerLoop();
+    std::atomic<bool> downloadPoolActive{false};
+    std::deque<FileDownloadTask> downloadTaskQueue;
+    std::mutex downloadTaskMutex;
+    std::condition_variable downloadTaskCv;
+    std::vector<std::thread> downloadWorkers;
+    static constexpr int MAX_PARALLEL_DOWNLOADS = 8;
 private:
     // Dedicated background dispatcher: continuously polls the ZMQ socket
     // and enqueues every incoming frame pair into responseQueue.

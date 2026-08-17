@@ -19,7 +19,6 @@
 #include <atomic>
 #include <mutex>
 #include <shared_mutex>
-#include <unordered_set>
 #include <sstream>
 #include <map>
 
@@ -59,12 +58,6 @@ public:
     std::atomic<bool> initialized{false};
     std::chrono::steady_clock::time_point initializationTime;
 
-    // File tracking for duplicate prevention
-    std::unordered_set<std::string> processedFiles;
-    std::mutex processedFilesMutex;
-    std::chrono::steady_clock::time_point lastCleanup;
-    std::atomic<size_t> maxTrackedFiles{10000};
-
     // ✅ Gradient/colormap texture caching (for point cloud color baking)
     std::map<std::string, std::vector<uint8_t>> cachedTextures;
     std::mutex textureCacheMutex;
@@ -77,7 +70,6 @@ public:
     Impl() : nextCallbackId(1), running(false), shutdownRequested(false) {
         MIDDLEWARE_LOG_INFO("AnariUsdMiddleware::Impl created with collision support");
         initializationTime = std::chrono::steady_clock::now();
-        lastCleanup = std::chrono::steady_clock::now();
     }
 
     ~Impl() {
@@ -796,216 +788,6 @@ private:
         } catch (const std::exception& e) {
             MIDDLEWARE_LOG_ERROR("Exception reading file %s: %s", filePath.c_str(), e.what());
             return false;
-        }
-    }
-
-    void receiverLoop() {
-        MIDDLEWARE_LOG_INFO("Enhanced receiver thread started with collision support");
-        auto lastStatsLog = std::chrono::steady_clock::now();
-        const auto STATS_LOG_INTERVAL = std::chrono::minutes(5);
-
-        while (running.load() && !shutdownRequested.load()) {
-            try {
-                // Use polling with timeout instead of blocking receive
-                zmq::pollitem_t items[] = {
-                    { zmqConnector.getSocket(), 0, ZMQ_POLLIN, 0 }
-                };
-
-                int pollResult = zmq::poll(items, 1, std::chrono::milliseconds(100));
-                if (pollResult > 0 && (items[0].revents & ZMQ_POLLIN)) {
-                    // Socket has data available
-                    if (!processIncomingMessage()) {
-                        MIDDLEWARE_LOG_DEBUG("Failed to process incoming message");
-                    }
-                }
-
-                // Periodic statistics logging
-                auto now = std::chrono::steady_clock::now();
-                if (now - lastStatsLog > STATS_LOG_INTERVAL) {
-                    logStatistics();
-                    lastStatsLog = now;
-                }
-
-                // Small sleep to prevent CPU spinning
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            } catch (const std::exception& e) {
-                MIDDLEWARE_LOG_ERROR("Exception in receiver loop: %s", e.what());
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
-        }
-
-        MIDDLEWARE_LOG_INFO("Enhanced receiver thread stopped");
-    }
-
-    bool processIncomingMessage() {
-        try {
-            FileData fileData;
-
-            // Try to receive as file first
-            if (zmqConnector.receiveFile(fileData.filename, fileData.data, fileData.hash, 0)) {
-                MIDDLEWARE_LOG_INFO("Successfully received file via ZMQ: %s (%zu bytes)",
-                                   fileData.filename.c_str(), fileData.data.size());
-                return processReceivedFile(fileData);
-            }
-
-            // If not a file, try to receive as generic message
-            if (zmqConnector.receiveAnyMessage(0)) {
-                MIDDLEWARE_LOG_INFO("Successfully received generic message via ZMQ");
-                return processReceivedMessage();
-            }
-
-            return false;
-        } catch (const std::exception& e) {
-            MIDDLEWARE_LOG_ERROR("Exception in processIncomingMessage: %s", e.what());
-            return false;
-        }
-    }
-
-    bool processReceivedFile(FileData& fileData) {
-        MIDDLEWARE_LOG_INFO("Processing received file: %s (size: %zu bytes, hash: %s)",
-                           fileData.filename.c_str(), fileData.data.size(), fileData.hash.c_str());
-
-        try {
-            // Basic validation
-            if (fileData.filename.empty() || fileData.data.empty()) {
-                MIDDLEWARE_LOG_ERROR("File data validation failed: empty filename or data");
-                return false;
-            }
-
-            // Check for duplicate files
-            if (isDuplicateFile(fileData.filename, fileData.hash)) {
-                MIDDLEWARE_LOG_WARNING("Duplicate file detected, skipping: %s", fileData.filename.c_str());
-                return true;
-            }
-
-            // Determine file type
-            std::string fileType = "UNKNOWN";
-            if (fileData.filename.find(".usda") != std::string::npos ||
-                fileData.filename.find(".usd") != std::string::npos) {
-                fileType = "USD";
-            } else if (fileData.filename.find(".png") != std::string::npos ||
-                      fileData.filename.find(".jpg") != std::string::npos) {
-                fileType = "IMAGE";
-            }
-
-            fileData.fileType = fileType;
-            MIDDLEWARE_LOG_INFO("File type detected: %s", fileType.c_str());
-
-            // Cache gradient/colormap textures (for point cloud color baking)
-            if (fileType == "IMAGE") {
-                std::lock_guard<std::mutex> lock(textureCacheMutex);
-                cachedTextures[fileData.filename] = fileData.data;
-                MIDDLEWARE_LOG_INFO("Cached gradient texture: %s (%zu bytes)",
-                    fileData.filename.c_str(), fileData.data.size());
-            }
-
-            // Mark file as processed BEFORE notifying callbacks
-            markFileAsProcessed(fileData.filename, fileData.hash);
-
-            // Notify callbacks
-            notifyFileCallbacks(fileData);
-            return true;
-        } catch (const std::exception& e) {
-            MIDDLEWARE_LOG_ERROR("Exception processing received file: %s", e.what());
-            return false;
-        }
-    }
-
-    bool processReceivedMessage() {
-        try {
-            const std::string& message = zmqConnector.getLastReceivedMessage();
-            MIDDLEWARE_LOG_INFO("Processing received message: %s", message.c_str());
-
-            // Notify callbacks with error handling
-            notifyMessageCallbacks(message);
-            return true;
-        } catch (const std::exception& e) {
-            MIDDLEWARE_LOG_ERROR("Exception processing received message: %s", e.what());
-            return false;
-        }
-    }
-
-    bool isDuplicateFile(const std::string& filename, const std::string& hash) {
-        std::lock_guard<std::mutex> lock(processedFilesMutex);
-        std::string fileIdentifier = filename + ":" + hash;
-        bool isDuplicate = processedFiles.find(fileIdentifier) != processedFiles.end();
-
-        // Periodic cleanup to prevent memory growth
-        auto now = std::chrono::steady_clock::now();
-        if (now - lastCleanup > std::chrono::hours(1)) {
-            cleanupOldEntries();
-            lastCleanup = now;
-        }
-
-        return isDuplicate;
-    }
-
-    void markFileAsProcessed(const std::string& filename, const std::string& hash) {
-        std::lock_guard<std::mutex> lock(processedFilesMutex);
-        std::string fileIdentifier = filename + ":" + hash;
-        processedFiles.insert(fileIdentifier);
-
-        // Prevent memory growth by limiting tracked files
-        if (processedFiles.size() > maxTrackedFiles.load()) {
-            auto it = processedFiles.begin();
-            size_t toRemove = processedFiles.size() / 10;
-            for (size_t i = 0; i < toRemove && it != processedFiles.end(); ++i) {
-                it = processedFiles.erase(it);
-            }
-            MIDDLEWARE_LOG_INFO("Cleaned up %zu old file entries", toRemove);
-        }
-    }
-
-    void cleanupOldEntries() {
-        if (processedFiles.size() > maxTrackedFiles.load() / 2) {
-            size_t originalSize = processedFiles.size();
-            processedFiles.clear();
-            MIDDLEWARE_LOG_INFO("Cleared %zu processed file entries during cleanup", originalSize);
-        }
-    }
-
-    void notifyFileCallbacks(const FileData& fileData) {
-        std::lock_guard<std::mutex> lock(callbackMutex);
-        for (const auto& pair : updateCallbacks) {
-            try {
-                pair.second(fileData);
-            } catch (const std::exception& e) {
-                MIDDLEWARE_LOG_ERROR("Exception in file callback (ID: %d): %s", pair.first, e.what());
-            } catch (...) {
-                MIDDLEWARE_LOG_ERROR("Unknown exception in file callback (ID: %d)", pair.first);
-            }
-        }
-    }
-
-    void notifyMessageCallbacks(const std::string& message) {
-        std::lock_guard<std::mutex> lock(callbackMutex);
-        for (const auto& pair : messageCallbacks) {
-            try {
-                pair.second(message);
-            } catch (const std::exception& e) {
-                MIDDLEWARE_LOG_ERROR("Exception in message callback (ID: %d): %s", pair.first, e.what());
-            } catch (...) {
-                MIDDLEWARE_LOG_ERROR("Unknown exception in message callback (ID: %d)", pair.first);
-            }
-        }
-    }
-
-    void logStatistics() {
-        try {
-            auto zmqStats = zmqConnector.getMessageStats();
-            if (usdProcessor) {
-                auto usdStats = usdProcessor->getProcessingStats();
-                MIDDLEWARE_LOG_INFO("Middleware Statistics - ZMQ: %llu msgs, %llu files, %llu bytes | "
-                                   "USD: %llu files, %llu meshes, %llu errors",
-                                   static_cast<unsigned long long>(zmqStats.totalMessagesReceived),
-                                   static_cast<unsigned long long>(zmqStats.totalFilesReceived),
-                                   static_cast<unsigned long long>(zmqStats.totalBytesReceived),
-                                   static_cast<unsigned long long>(usdStats.filesProcessed),
-                                   static_cast<unsigned long long>(usdStats.meshesExtracted),
-                                   static_cast<unsigned long long>(usdStats.processingErrors));
-            }
-        } catch (const std::exception& e) {
-            MIDDLEWARE_LOG_ERROR("Exception logging statistics: %s", e.what());
         }
     }
 

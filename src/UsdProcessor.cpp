@@ -152,27 +152,22 @@ public:
             return buffer;
         }
 
-        // Check for large geometry early to avoid unnecessary processing
-        // Use streaming detection to avoid converting entire buffer to string
-        const char* data = reinterpret_cast<const char*>(buffer.data());
-        size_t dataSize = buffer.size();
-        
-        // Quick scan for geometry markers without full string conversion
+        // Check for large geometry early to avoid unnecessary processing.
+        // Use a buffered string_view find over the head of the buffer instead of
+        // a per-byte strncmp loop (up to 3 comparisons per byte for the first 1MB
+        // of every large file).
+        const size_t dataSize = buffer.size();
         bool hasLargeGeometry = false;
-        const char* searchPtr = data;
-        size_t remaining = dataSize;
-        const size_t scanLimit = std::min(dataSize, static_cast<size_t>(1024 * 1024)); // Scan first 1MB
-        
-        while (remaining > 0 && (dataSize - remaining) < scanLimit) {
-            // Look for geometry markers
-            if (strncmp(searchPtr, "int[] faceVertexIndices", 23) == 0 ||
-                strncmp(searchPtr, "point3f[] points", 16) == 0 ||
-                strncmp(searchPtr, "float3[] points", 15) == 0) {
-                hasLargeGeometry = true;
-                break;
+        {
+            const size_t scanLimit = std::min(dataSize, static_cast<size_t>(1024 * 1024)); // first 1 MB
+            if (scanLimit > 0) {
+                const std::string_view head(reinterpret_cast<const char*>(buffer.data()), scanLimit);
+                if (head.find("int[] faceVertexIndices") != std::string_view::npos ||
+                    head.find("point3f[] points") != std::string_view::npos ||
+                    head.find("float3[] points") != std::string_view::npos) {
+                    hasLargeGeometry = true;
+                }
             }
-            searchPtr++;
-            remaining--;
         }
 
         if (hasLargeGeometry) {
@@ -573,7 +568,7 @@ private:
 
 public:
     std::atomic<size_t> memoryLimitBytes{std::numeric_limits<int64_t>::max()}; // unlimited, synced by setMemoryLimit
-    std::vector<std::string> extractClipsFromString(const std::string& content);
+    std::vector<std::string> extractClipsFromString(std::string_view content);
 };
 
 // Enhanced MeshData validation methods
@@ -948,23 +943,15 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
         const std::string texCoordPatternStr = "texCoord2f";
         const std::string texCoordReplacement = "texCoord2f[]";
 
-        // Single pass scan — no full-buffer copy, no std::string construction.
+        // Zero-copy scan for any transform-forcing token. A buffered string_view
+        // find uses block-wise comparison instead of the old per-byte loop (up to
+        // 2 memcmps per byte across the entire buffer).
         bool needsPreprocess = false;
-        {
-            const char* raw = reinterpret_cast<const char*>(buffer);
-            size_t i = 0;
-            const size_t n = buffer_size;
-            while (i <= n) {
-                size_t rem = n - i;
-                if (rem >= assetPatternStr.size() &&
-                    std::memcmp(raw + i, assetPatternStr.data(), assetPatternStr.size()) == 0) {
-                    needsPreprocess = true; break;
-                }
-                if (rem >= texCoordPatternStr.size() &&
-                    std::memcmp(raw + i, texCoordPatternStr.data(), texCoordPatternStr.size()) == 0) {
-                    needsPreprocess = true; break;
-                }
-                ++i;
+        if (buffer_size > 0) {
+            const std::string_view raw(reinterpret_cast<const char*>(buffer), buffer_size);
+            if (raw.find(assetPatternStr) != std::string_view::npos ||
+                raw.find(texCoordPatternStr) != std::string_view::npos) {
+                needsPreprocess = true;
             }
         }
 
@@ -2065,24 +2052,27 @@ void UsdProcessor::ExtractReferencePaths(const tinyusdz::Stage& stage,
 }
 
 std::vector<std::string> UsdProcessor::ExtractClipsFromRawContent(const std::vector<uint8_t>& buffer) {
-    std::string content(reinterpret_cast<const char*>(buffer.data()), buffer.size());
-    return pImpl->extractClipsFromString(content);
+    // Pass the buffer straight through (no full-buffer std::string copy).
+    return pImpl->extractClipsFromString(
+        std::string_view(reinterpret_cast<const char*>(buffer.data()), buffer.size()));
 }
 
-std::vector<std::string> UsdProcessor::UsdProcessorImpl::extractClipsFromString(const std::string& content) {
+std::vector<std::string> UsdProcessor::UsdProcessorImpl::extractClipsFromString(std::string_view content) {
     std::vector<std::string> clipPaths;
 
-    // Look for clips patterns in the USD content
-    std::regex clipsPattern(R"(asset\[\]\s+assetPaths\s*=\s*\[@([^@]+)@\])");
+    // Look for clips patterns in the USD content (regex compiled once, not per call).
+    static const std::regex clipsPattern(R"(asset\[\]\s+assetPaths\s*=\s*\[@([^@]+)@\])");
 
-    std::sregex_iterator iter(content.begin(), content.end(), clipsPattern);
-    std::sregex_iterator end;
+    // std::regex_iterator<const char*> matches std::string_view (const char* base);
+    // std::sregex_iterator is only bound to std::string iterators.
+    std::regex_iterator<const char*> it(content.begin(), content.end(), clipsPattern);
+    const std::regex_iterator<const char*> end;
 
-    while (iter != end) {
-        std::string clipPath = (*iter)[1].str();
-        MIDDLEWARE_LOG_INFO("Found clip asset path: %s", clipPath.c_str());
-        clipPaths.push_back(clipPath);
-        ++iter;
+    while (it != end) {
+        std::string clipPath = (*it)[1].str();
+        MIDDLEWARE_LOG_DEBUG("Found clip asset path: %s", clipPath.c_str());
+        clipPaths.push_back(std::move(clipPath));
+        ++it;
     }
 
     return clipPaths;

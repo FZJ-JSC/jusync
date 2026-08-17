@@ -1574,22 +1574,6 @@ const char* GetSupportedUSDExtensions_C() {
     return extensions;
 }
 
-/**
- * Reset processing statistics
- */
-void ResetProcessingStats_C() {
-    // Implementation would reset internal statistics
-    // For now, this is a placeholder
-}
-
-/**
- * Get processing statistics as formatted string
- */
-const char* GetProcessingStats_C() {
-    static std::string stats = "Processing statistics not yet implemented";
-    return stats.c_str();
-}
-
 // ============================================================================
 // MEMORY MANAGEMENT FUNCTIONS
 // ============================================================================

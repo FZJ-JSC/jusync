@@ -3,8 +3,7 @@
 
 #include <regex>
 #include <filesystem>
-#include <algorithm>
-#include <thread>
+#include <stdexcept>
 
 // Platform detection
 #if defined(_WIN32)
@@ -33,8 +32,6 @@ namespace anari_usd_middleware {
 
 ZmqConnector::ZmqConnector() {
     MIDDLEWARE_LOG_INFO("ZmqConnector created with enhanced cross-platform safety features");
-    messageStats.reset();
-    lastHealthCheck = std::chrono::steady_clock::now();
 }
 
 ZmqConnector::~ZmqConnector() {
@@ -63,7 +60,7 @@ bool ZmqConnector::initialize(const char* endpoint, int timeoutMs) {
         // DEALER-ONLY ARCHITECTURE: No ZMQ context or ROUTER socket is created here.
         // All communication is handled by AnariUsdClient (DEALER socket).
         // ZmqConnector in this mode is a stub for endpoint validation and health tracking.
-        
+
         // Determine and validate endpoint (but don't bind)
         currentEndpoint = endpoint ? endpoint : getDefaultEndpoint();
 
@@ -76,11 +73,8 @@ bool ZmqConnector::initialize(const char* endpoint, int timeoutMs) {
 
         MIDDLEWARE_LOG_INFO("ZmqConnector initialized in DEALER-only stub mode");
 
-        // Reset statistics
-        messageStats.reset();
-
-        // In stub mode, socket is null so isConnected() will return false
-        // This is intentional - use AnariUsdClient for actual communication
+        // In stub mode, socket is null. This is intentional - use AnariUsdClient
+        // for actual communication.
         connectionStatus.store(ConnectionStatus::Connected);
         shutdownRequested.store(false);
 
@@ -100,96 +94,59 @@ bool ZmqConnector::initialize(const char* endpoint, int timeoutMs) {
     }
 }
 
-bool ZmqConnector::configurePlatformSpecificSocket(int timeoutMs) {
-    // DEALER-ONLY ARCHITECTURE: No socket to configure
-    // In DEALER-only mode, we don't have a ROUTER socket to configure
-    // Socket configuration will be handled by AnariUsdClient for the DEALER socket
-    if (!zmqSocket) {
-        MIDDLEWARE_LOG_INFO("No socket to configure in DEALER-only mode");
-        return true;
-    }
-    
-    try {
-        // Set comprehensive socket options for safety and performance
-        zmqSocket->set(zmq::sockopt::linger, 0); // No lingering on close
-        zmqSocket->set(zmq::sockopt::sndhwm, 1000); // Send high water mark
-        zmqSocket->set(zmq::sockopt::rcvhwm, 1000); // Receive high water mark
-        zmqSocket->set(zmq::sockopt::sndtimeo, timeoutMs); // Send timeout
-        zmqSocket->set(zmq::sockopt::rcvtimeo, timeoutMs); // Receive timeout
-        zmqSocket->set(zmq::sockopt::maxmsgsize, static_cast<int64_t>(maxMessageSize.load())); // Max message size
-        zmqSocket->set(zmq::sockopt::router_mandatory, 1); // Mandatory routing
+void ZmqConnector::disconnect(int gracefulTimeoutMs) {
+    MIDDLEWARE_LOG_INFO("Disconnecting ZmqConnector with cross-platform cleanup (timeout: %dms)", gracefulTimeoutMs);
+    shutdownRequested.store(true);
+    connectionStatus.store(ConnectionStatus::ShuttingDown);
 
-#if PLATFORM_WINDOWS
-        return configureWindowsSpecific();
-#elif PLATFORM_LINUX
-        return configureLinuxSpecific();
-#else
-        MIDDLEWARE_LOG_WARNING("Unknown platform - using default socket configuration");
-        return true;
-#endif
-
-    } catch (const zmq::error_t& e) {
-        MIDDLEWARE_LOG_ERROR("Failed to configure socket options: %s (errno: %d)", e.what(), e.num());
-        return false;
-    }
-}
-
-#if PLATFORM_WINDOWS
-bool ZmqConnector::configureWindowsSpecific() {
-    MIDDLEWARE_LOG_INFO("Applying Windows-specific ZMQ socket configuration");
+    std::lock_guard<std::mutex> lock(connectionMutex);
 
     try {
-        // Windows-specific TCP keep-alive settings
-        zmqSocket->set(zmq::sockopt::tcp_keepalive, 1);
-        zmqSocket->set(zmq::sockopt::tcp_keepalive_idle, 300);
-        zmqSocket->set(zmq::sockopt::tcp_keepalive_cnt, 3);
-        zmqSocket->set(zmq::sockopt::tcp_keepalive_intvl, 30);
+        // Close socket first
+        if (zmqSocket) {
+            if (!currentEndpoint.empty()) {
+                try {
+                    zmqSocket->unbind(currentEndpoint);
+                    MIDDLEWARE_LOG_DEBUG("Unbound from %s", currentEndpoint.c_str());
+                } catch (const zmq::error_t& e) {
+                    MIDDLEWARE_LOG_WARNING("Error during unbind: %s (errno: %d)", e.what(), e.num());
+                }
+            }
+            zmqSocket->close();
+            zmqSocket.reset();
+        }
 
-        // Windows-specific buffer sizes
-        zmqSocket->set(zmq::sockopt::sndbuf, 65536);  // 64KB send buffer
-        zmqSocket->set(zmq::sockopt::rcvbuf, 65536);  // 64KB receive buffer
+        if (zmqContext) {
+            try {
+                zmqContext->close();
+                MIDDLEWARE_LOG_DEBUG("ZMQ context closed");
+            } catch (const zmq::error_t& e) {
+                MIDDLEWARE_LOG_WARNING("Error closing context: %s (errno: %d)", e.what(), e.num());
+            }
+            zmqContext.reset();
+        }
 
-        MIDDLEWARE_LOG_INFO("Windows ZMQ socket configuration applied successfully");
-        return true;
-    } catch (const zmq::error_t& e) {
-        MIDDLEWARE_LOG_ERROR("Windows socket configuration failed: %s (errno: %d)", e.what(), e.num());
-        return false;
+    } catch (const std::exception& e) {
+        MIDDLEWARE_LOG_ERROR("Exception during disconnect: %s", e.what());
+    }
+
+    currentEndpoint.clear();
+    connectionStatus.store(ConnectionStatus::Disconnected);
+    MIDDLEWARE_LOG_INFO("ZmqConnector disconnected successfully");
+}
+
+void ZmqConnector::setMaxMessageSize(size_t maxSizeBytes) {
+    if (maxSizeBytes > 0 && maxSizeBytes <= safety::MAX_BUFFER_SIZE) {
+        maxMessageSize.store(maxSizeBytes);
+        MIDDLEWARE_LOG_INFO("Max message size set to %zu bytes", maxSizeBytes);
+    } else {
+        MIDDLEWARE_LOG_ERROR("Invalid max message size: %zu (must be 1-%zu)",
+                            maxSizeBytes, safety::MAX_BUFFER_SIZE);
     }
 }
-#endif
-
-#if PLATFORM_LINUX
-bool ZmqConnector::configureLinuxSpecific() {
-    MIDDLEWARE_LOG_INFO("Applying Linux-specific ZMQ socket configuration");
-
-    try {
-        // Linux-specific TCP settings
-        zmqSocket->set(zmq::sockopt::tcp_keepalive, 1);
-        zmqSocket->set(zmq::sockopt::tcp_keepalive_idle, 600);  // Different from Windows
-        zmqSocket->set(zmq::sockopt::tcp_keepalive_cnt, 5);
-        zmqSocket->set(zmq::sockopt::tcp_keepalive_intvl, 60);
-
-        // Linux-specific socket buffer sizes
-        zmqSocket->set(zmq::sockopt::sndbuf, 1048576);  // 1MB send buffer
-        zmqSocket->set(zmq::sockopt::rcvbuf, 1048576);  // 1MB receive buffer
-
-        MIDDLEWARE_LOG_INFO("Linux ZMQ socket configuration applied successfully");
-        return true;
-    } catch (const zmq::error_t& e) {
-        MIDDLEWARE_LOG_ERROR("Linux socket configuration failed: %s (errno: %d)", e.what(), e.num());
-        return false;
-    }
-}
-#endif
 
 std::string ZmqConnector::getDefaultEndpoint() const {
-#if PLATFORM_WINDOWS
-    return "tcp://*:5556";  // Windows default
-#elif PLATFORM_LINUX
-    return "tcp://*:5556";  // Linux default (same for now)
-#else
-    return "tcp://*:5556";  // Generic default
-#endif
+    return "tcp://*:5556";
 }
 
 bool ZmqConnector::validateEndpoint(const std::string& endpoint) const {
@@ -243,226 +200,6 @@ bool ZmqConnector::validateInprocEndpoint(const std::string& endpoint) const {
     return !name.empty() && name.find_first_of(":/\\") == std::string::npos;
 }
 
-bool ZmqConnector::receiveFile(std::string& filename, std::vector<uint8_t>& data,
-                              std::string& hash, int timeoutMs) {
-    MIDDLEWARE_LOG_WARNING("receiveFile is not supported in DEALER-only mode — use AnariUsdClient::requestFile()");
-    messageStats.failedReceives.fetch_add(1);
-    return false;
-}
-
-bool ZmqConnector::validateFilename(const std::string& filename) const {
-    // Check basic constraints
-    if (filename.empty() || filename.size() > 255) {
-        MIDDLEWARE_LOG_ERROR("Invalid filename length: %zu", filename.size());
-        return false;
-    }
-
-    // Platform-specific dangerous characters
-#if PLATFORM_WINDOWS
-    const std::string dangerous = "\\:*?\"<>|";
-    // Windows absolute path detection
-    if (filename.size() >= 2 && filename[1] == ':') {
-        MIDDLEWARE_LOG_ERROR("Windows absolute path detected: %s", filename.c_str());
-        return false;
-    }
-#elif PLATFORM_LINUX
-    const std::string dangerous = ":*?\"<>|";  // Allow backslash on Linux
-    // Linux absolute path detection
-    if (!filename.empty() && filename[0] == '/') {
-        MIDDLEWARE_LOG_ERROR("Linux absolute path detected: %s", filename.c_str());
-        return false;
-    }
-#else
-    const std::string dangerous = "\\:*?\"<>|";  // Default to Windows-style
-#endif
-
-    if (filename.find_first_of(dangerous) != std::string::npos) {
-        MIDDLEWARE_LOG_ERROR("Filename contains dangerous characters: %s", filename.c_str());
-        return false;
-    }
-
-    // Cross-platform path traversal check
-    if (filename.find("..") != std::string::npos) {
-        MIDDLEWARE_LOG_ERROR("Path traversal attempt detected: %s", filename.c_str());
-        return false;
-    }
-
-    // Platform-specific reserved name checks
-#if PLATFORM_WINDOWS
-    if (!validateWindowsReservedNames(filename)) {
-        return false;
-    }
-#endif
-
-    return true;
-}
-
-#if PLATFORM_WINDOWS
-bool ZmqConnector::validateWindowsReservedNames(const std::string& filename) const {
-    const std::vector<std::string> reserved = {
-        "CON", "PRN", "AUX", "NUL",
-        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
-    };
-
-    // Extract filename without path and extension
-    std::string filenameOnly = filename;
-    size_t lastSlash = filename.find_last_of("/\\");
-    if (lastSlash != std::string::npos) {
-        filenameOnly = filename.substr(lastSlash + 1);
-    }
-
-    std::string upperFilename = filenameOnly;
-    std::transform(upperFilename.begin(), upperFilename.end(), upperFilename.begin(), ::toupper);
-
-    size_t dotPos = upperFilename.find_last_of('.');
-    std::string nameWithoutExt = (dotPos != std::string::npos) ? upperFilename.substr(0, dotPos) : upperFilename;
-
-    for (const auto& reservedName : reserved) {
-        if (nameWithoutExt == reservedName) {
-            MIDDLEWARE_LOG_ERROR("Reserved Windows filename detected: %s", filename.c_str());
-            return false;
-        }
-    }
-
-    return true;
-}
-#endif
-
-bool ZmqConnector::validateHashFormatPermissive(const std::string& hash) const {
-    // More permissive hash validation - allow different hash lengths
-    if (hash.empty() || hash.length() > 128) {
-        return false;
-    }
-
-    // Check if all characters are valid hexadecimal
-    return std::all_of(hash.begin(), hash.end(), [](char c) {
-        return std::isxdigit(static_cast<unsigned char>(c));
-    });
-}
-
-bool ZmqConnector::receiveAnyMessage(int timeoutMs) {
-    MIDDLEWARE_LOG_WARNING("receiveAnyMessage is not supported in DEALER-only mode — use AnariUsdClient");
-    messageStats.failedReceives.fetch_add(1);
-    return false;
-}
-
-void ZmqConnector::disconnect(int gracefulTimeoutMs) {
-    MIDDLEWARE_LOG_INFO("Disconnecting ZmqConnector with cross-platform cleanup (timeout: %dms)", gracefulTimeoutMs);
-    shutdownRequested.store(true);
-    connectionStatus.store(ConnectionStatus::ShuttingDown);
-
-    std::lock_guard<std::mutex> lock(connectionMutex);
-
-    try {
-        // Close socket first
-        if (zmqSocket) {
-            // Try graceful unbind if we have an endpoint
-            if (!currentEndpoint.empty()) {
-                try {
-                    zmqSocket->unbind(currentEndpoint);
-                    MIDDLEWARE_LOG_DEBUG("Unbound from %s", currentEndpoint.c_str());
-                } catch (const zmq::error_t& e) {
-                    MIDDLEWARE_LOG_WARNING("Error during unbind: %s (errno: %d)", e.what(), e.num());
-                }
-            }
-
-            // Set linger time for graceful shutdown
-            try {
-                zmqSocket->set(zmq::sockopt::linger, gracefulTimeoutMs);
-            } catch (const zmq::error_t& e) {
-                MIDDLEWARE_LOG_WARNING("Failed to set linger time: %s", e.what());
-            }
-
-            // Close socket
-            try {
-                zmqSocket->close();
-                MIDDLEWARE_LOG_DEBUG("ZMQ socket closed");
-            } catch (const zmq::error_t& e) {
-                MIDDLEWARE_LOG_WARNING("Error closing socket: %s (errno: %d)", e.what(), e.num());
-            }
-
-            zmqSocket.reset();
-        }
-
-        // Close context
-        if (zmqContext) {
-            try {
-                zmqContext->close();
-                MIDDLEWARE_LOG_DEBUG("ZMQ context closed");
-            } catch (const zmq::error_t& e) {
-                MIDDLEWARE_LOG_WARNING("Error closing context: %s (errno: %d)", e.what(), e.num());
-            }
-
-            zmqContext.reset();
-        }
-
-    } catch (const std::exception& e) {
-        MIDDLEWARE_LOG_ERROR("Exception during disconnect: %s", e.what());
-    }
-
-    // Clear state
-    currentEndpoint.clear();
-
-    {
-        std::lock_guard<std::mutex> msgLock(messageMutex);
-        lastReceivedMessage.clear();
-    }
-
-    connectionStatus.store(ConnectionStatus::Disconnected);
-    MIDDLEWARE_LOG_INFO("ZmqConnector disconnected successfully");
-}
-
-// Getter methods with thread safety
-bool ZmqConnector::isConnected() const {
-    return connectionStatus.load() == ConnectionStatus::Connected &&
-           zmqSocket != nullptr &&
-           !shutdownRequested.load();
-}
-
-ZmqConnector::ConnectionStatus ZmqConnector::getConnectionStatus() const {
-    return connectionStatus.load();
-}
-
-void* ZmqConnector::getSocket() const {
-    std::lock_guard<std::mutex> lock(connectionMutex);
-    return zmqSocket ? zmqSocket->handle() : nullptr;
-}
-
-std::string ZmqConnector::getLastReceivedMessage() const {
-    std::lock_guard<std::mutex> lock(messageMutex);
-    return lastReceivedMessage; // Return copy for thread safety
-}
-
-std::string ZmqConnector::getCurrentEndpoint() const {
-    std::lock_guard<std::mutex> lock(connectionMutex);
-    return currentEndpoint;
-}
-
-ZmqConnector::MessageStats::Snapshot ZmqConnector::getMessageStats() const {
-    return messageStats.getSnapshot(); // Return the copyable snapshot
-}
-
-void ZmqConnector::resetMessageStats() {
-    messageStats.reset();
-    MIDDLEWARE_LOG_INFO("Message statistics reset");
-}
-
-void ZmqConnector::setMaxMessageSize(size_t maxSizeBytes) {
-    if (maxSizeBytes > 0 && maxSizeBytes <= safety::MAX_BUFFER_SIZE) {
-        maxMessageSize.store(maxSizeBytes);
-        MIDDLEWARE_LOG_INFO("Max message size set to %zu bytes", maxSizeBytes);
-    } else {
-        MIDDLEWARE_LOG_ERROR("Invalid max message size: %zu (must be 1-%zu)",
-                            maxSizeBytes, safety::MAX_BUFFER_SIZE);
-    }
-}
-
-size_t ZmqConnector::getMaxMessageSize() const {
-    return maxMessageSize.load();
-}
-
-// Private helper methods
 void ZmqConnector::cleanup() {
     try {
         if (zmqSocket) {
@@ -480,174 +217,6 @@ void ZmqConnector::cleanup() {
     }
 
     currentEndpoint.clear();
-
-    {
-        std::lock_guard<std::mutex> lock(messageMutex);
-        lastReceivedMessage.clear();
-    }
-}
-
-bool ZmqConnector::sendReply(zmq::message_t& identity, const std::string& response, int timeoutMs) {
-    if (!zmqSocket || shutdownRequested.load()) {
-        return false;
-    }
-
-    try {
-        // Validate response size
-        if (response.size() > maxMessageSize.load()) {
-            MIDDLEWARE_LOG_ERROR("Reply too large: %zu bytes", response.size());
-            return false;
-        }
-
-        // Send identity frame
-        auto sendIdRes = zmqSocket->send(identity, zmq::send_flags::sndmore);
-        if (!sendIdRes) {
-            MIDDLEWARE_LOG_ERROR("Failed to send identity in reply");
-            return false;
-        }
-
-        // Send response frame
-        zmq::message_t replyMsg(response.data(), response.size());
-        auto sendReplyRes = zmqSocket->send(replyMsg, zmq::send_flags::none);
-        if (!sendReplyRes) {
-            MIDDLEWARE_LOG_ERROR("Failed to send reply message");
-            return false;
-        }
-
-        MIDDLEWARE_LOG_DEBUG("Reply sent successfully: %s", response.c_str());
-        return true;
-
-    } catch (const zmq::error_t& e) {
-        MIDDLEWARE_LOG_ERROR("ZMQ error in sendReply: %s (errno: %d)", e.what(), e.num());
-        return false;
-    } catch (const std::exception& e) {
-        MIDDLEWARE_LOG_ERROR("Exception in sendReply: %s", e.what());
-        return false;
-    }
-}
-
-bool ZmqConnector::tryAlternativeEndpoints(const std::string& primaryEndpoint) {
-    std::vector<std::string> alternatives;
-
-    // Extract port from primary endpoint
-    size_t colonPos = primaryEndpoint.find_last_of(':');
-    if (colonPos != std::string::npos) {
-        std::string port = primaryEndpoint.substr(colonPos + 1);
-
-        // Try localhost instead of wildcard
-        if (primaryEndpoint.find("*") != std::string::npos) {
-            alternatives.push_back("tcp://127.0.0.1:" + port);
-            alternatives.push_back("tcp://localhost:" + port);
-        }
-
-        // Try different ports
-        int basePort = std::stoi(port);
-        for (int offset : {1, -1, 1000, -1000}) {
-            int newPort = basePort + offset;
-            if (newPort > 1024 && newPort < 65536) {
-                alternatives.push_back("tcp://*:" + std::to_string(newPort));
-            }
-        }
-    }
-
-    // Platform-specific alternatives
-#if PLATFORM_WINDOWS
-    // Try Windows-specific alternatives
-    alternatives.push_back("tcp://0.0.0.0:5556");
-#elif PLATFORM_LINUX
-    // Try Linux-specific alternatives
-    alternatives.push_back("tcp://0.0.0.0:5556");
-    alternatives.push_back("ipc:///tmp/zmq_connector");
-#endif
-
-    // Try each alternative
-    for (const auto& alt : alternatives) {
-        try {
-            MIDDLEWARE_LOG_INFO("Trying alternative endpoint: %s", alt.c_str());
-            zmqSocket->bind(alt);
-            currentEndpoint = alt;
-            MIDDLEWARE_LOG_INFO("Successfully bound to alternative endpoint: %s", alt.c_str());
-            return true;
-        } catch (const zmq::error_t& e) {
-            MIDDLEWARE_LOG_DEBUG("Alternative endpoint %s failed: %s", alt.c_str(), e.what());
-            continue;
-        }
-    }
-
-    return false;
-}
-
-int ZmqConnector::drainRemainingParts() {
-    int drainedCount = 0;
-    try {
-        zmq::message_t drainMsg;
-        while (zmqSocket && zmqSocket->get(zmq::sockopt::rcvmore)) {
-            if (zmqSocket->recv(drainMsg, zmq::recv_flags::dontwait)) {
-                drainedCount++;
-                if (drainedCount > 10) { // Prevent infinite loop
-                    MIDDLEWARE_LOG_ERROR("Too many message parts to drain, stopping");
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
-    } catch (const zmq::error_t& e) {
-        MIDDLEWARE_LOG_WARNING("Error draining message parts: %s", e.what());
-    }
-
-    return drainedCount;
-}
-
-bool ZmqConnector::receiveMessagePart(zmq::message_t& message, int timeoutMs, bool expectMore) {
-    if (!zmqSocket) {
-        return false;
-    }
-
-    try {
-        auto result = zmqSocket->recv(message, zmq::recv_flags::none);
-        if (!result || result.value() == 0) {
-            return false;
-        }
-
-        // Check if more parts are expected
-        bool hasMore = zmqSocket->get(zmq::sockopt::rcvmore);
-        if (expectMore && !hasMore) {
-            MIDDLEWARE_LOG_ERROR("Expected more message parts but none available");
-            return false;
-        }
-
-        if (!expectMore && hasMore) {
-            MIDDLEWARE_LOG_WARNING("Unexpected additional message parts available");
-        }
-
-        return true;
-    } catch (const zmq::error_t& e) {
-        MIDDLEWARE_LOG_ERROR("Error receiving message part: %s (errno: %d)", e.what(), e.num());
-        return false;
-    }
-}
-
-bool ZmqConnector::testConnection() {
-    if (!isConnected()) {
-        return false;
-    }
-
-    try {
-        // Simple connection health check
-        updateHealthStatus();
-        return connectionStatus.load() == ConnectionStatus::Connected;
-    } catch (const std::exception& e) {
-        MIDDLEWARE_LOG_ERROR("Connection test failed: %s", e.what());
-        return false;
-    }
-}
-
-void ZmqConnector::updateHealthStatus() {
-    auto now = std::chrono::steady_clock::now();
-    lastHealthCheck = now;
-    // Additional health checks can be implemented here
-    // For now, just update the timestamp
 }
 
 } // namespace anari_usd_middleware

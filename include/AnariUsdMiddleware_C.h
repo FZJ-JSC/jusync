@@ -655,21 +655,6 @@ ANARI_USD_MIDDLEWARE_C_API int ValidateUSDFormat_C(const unsigned char* buffer,
  */
 ANARI_USD_MIDDLEWARE_C_API const char* GetSupportedUSDExtensions_C(void);
 
-/**
- * Reset processing statistics
- * Clears all internal counters and statistics
- * Useful for performance monitoring and testing
- */
-ANARI_USD_MIDDLEWARE_C_API void ResetProcessingStats_C(void);
-
-/**
- * Get processing statistics as formatted string
- * Returns detailed information about processed files, meshes, errors, etc.
- *
- * @return Pointer to statistics string (valid until next call)
- */
-ANARI_USD_MIDDLEWARE_C_API const char* GetProcessingStats_C(void);
-
 // ============================================================================
 // BROKER CONNECTION AND FILE REQUEST FUNCTIONS
 // ============================================================================
