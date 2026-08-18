@@ -989,6 +989,13 @@ bool AnariUsdMiddleware::requestFrame(int32_t frameNumber, int32_t targetRank,
     };
     
     auto completeCallback = [&frameFiles, &frameFilesMutex, &frameComplete](const std::string& fname, uint64_t totalSize) {
+        // The "__frame_complete__" marker is a terminal signal from the broker,
+        // not a file — never turn it into a phantom file entry.
+        if (fname == "__frame_complete__") {
+            std::lock_guard<std::mutex> lock(frameFilesMutex);
+            frameComplete = true;
+            return;
+        }
         std::lock_guard<std::mutex> lock(frameFilesMutex);
         frameFiles[fname].resize(totalSize);
         frameComplete = true;

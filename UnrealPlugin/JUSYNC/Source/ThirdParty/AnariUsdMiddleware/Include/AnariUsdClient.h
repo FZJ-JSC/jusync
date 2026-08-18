@@ -287,8 +287,11 @@ private:
     std::mutex notificationCallbackMutex;
     NotificationCallback notificationCallback;
 
-    // Default chunk size for file requests
-    static constexpr uint32_t DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024; // 4MB
+    // Default chunk size for file requests. 32MB (was 4MB): fewer ZMQ
+    // round-trips through the single-loop broker per file. Still well under
+    // maxMessageSize (100MB). Broker/worker honor the requested size
+    // (capped server-side at 128MB).
+    static constexpr uint32_t DEFAULT_CHUNK_SIZE = 32 * 1024 * 1024; // 32MB
 
 private:
     // Extract request_id from a data frame (first 4 bytes = magic, next 4 = type, next 4 = request_id)

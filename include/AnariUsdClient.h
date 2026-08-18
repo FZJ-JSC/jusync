@@ -309,7 +309,10 @@ private:
     NotificationCallback notificationCallback;
 
     // Default chunk size for file requests
-    static constexpr uint32_t DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024; // 4MB
+    // Larger chunks = fewer ZMQ round-trips through the (single-loop) broker:
+    // a 76MB file is ~2-3 messages instead of 19. The broker/worker honor the
+    // requested size (capped server-side at 128MB).
+    static constexpr uint32_t DEFAULT_CHUNK_SIZE = 32 * 1024 * 1024; // 32MB
 
 private:
     // Extract request_id from a data frame (first 4 bytes = magic, next 4 = type, next 4 = request_id)

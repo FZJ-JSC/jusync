@@ -95,6 +95,30 @@ message(STATUS "OpenSSL Include: ${OPENSSL_INCLUDE_DIR}")
 message(STATUS "OpenSSL Libraries: ${OPENSSL_LIBRARIES}")
 
 # ------------------------------
+# zstd Configuration (Portable)
+# ------------------------------
+# The ANARI-USD broker zstd-compresses USD payloads before streaming. The client
+# detects the zstd frame magic in the first 4 bytes and decompresses in the
+# middleware (UsdProcessor::LoadUSDBufferFromRaw) — self-describing, no wire
+# struct changes.
+option(ENABLE_ZSTD "Enable zstd decompression of broker USD payloads" ON)
+if(ENABLE_ZSTD)
+    find_library(ZSTD_LIBRARY NAMES zstd libzstd
+        HINTS /usr/lib /usr/lib64 /usr/local/lib $ENV{ZSTD_ROOT}/lib)
+    find_path(ZSTD_INCLUDE_DIR NAMES zstd.h
+        HINTS /usr/include /usr/local/include $ENV{ZSTD_ROOT}/include)
+    if(ZSTD_LIBRARY AND ZSTD_INCLUDE_DIR)
+        message(STATUS "zstd: Found at ${ZSTD_LIBRARY}")
+        set(JUSYNC_HAS_ZSTD 1)
+    else()
+        message(WARNING "zstd: not found (set ZSTD_ROOT or install libzstd-dev) - broker zstd-compressed payloads will not decode")
+    endif()
+else()
+    message(STATUS "zstd: disabled via -DENABLE_ZSTD=OFF")
+    set(JUSYNC_HAS_ZSTD 0)
+endif()
+
+# ------------------------------
 # Platform-specific configurations
 # ------------------------------
 if(WIN32)
@@ -153,6 +177,13 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
     message(STATUS "Debug logging: DISABLED (build type ${CMAKE_BUILD_TYPE})")
 else()
     message(STATUS "Debug logging: ENABLED (Debug build)")
+endif()
+
+# zstd (detection done earlier; linked here where the target exists)
+if(JUSYNC_HAS_ZSTD)
+    target_include_directories(${PROJECT_NAME} PRIVATE ${ZSTD_INCLUDE_DIR})
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${ZSTD_LIBRARY})
+    target_compile_definitions(${PROJECT_NAME} PRIVATE JUSYNC_HAS_ZSTD=1)
 endif()
 
 # Add include directories

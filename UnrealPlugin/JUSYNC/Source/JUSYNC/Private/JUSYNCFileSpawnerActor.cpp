@@ -1917,7 +1917,7 @@ bool AJUSYNCFileSpawnerActor::RefreshSingleFile(const FString& Filename, int32 T
         TArray<FJUSYNCMeshData> MeshData;
         TArray<FJUSYNCPointCloudData> PointCloudData;
         FString Preview;
-        bool bParsed = UJUSYNCBlueprintLibrary::LoadUSDFullFromBuffer(FileData, FilenameCopy, MeshData, PointCloudData, Preview);
+        bool bParsed = UJUSYNCBlueprintLibrary::LoadUSDFullFromBufferNoCopy(FileData, FilenameCopy, MeshData, PointCloudData, Preview);
 
         TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakCopy = WeakThis;
         FFunctionGraphTask::CreateAndDispatchWhenReady(

@@ -10,6 +10,7 @@
 
 // Standard library includes with enhanced safety
 #include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <regex>
@@ -33,6 +34,12 @@
 #define PAR_POLICY std::execution::par,
 #endif
 #include <numeric>      // For parallel reduce
+
+// zstd: broker USD payloads arrive zstd-frame-wrapped (magic-detected,
+// self-describing). JUSYNC_HAS_ZSTD is defined by CMake when libzstd was found.
+#if defined(JUSYNC_HAS_ZSTD)
+#include <zstd.h>
+#endif
 
 // Include TinyUSDZ with error handling
 #include "tinyusdz.hh"
@@ -928,6 +935,97 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
             progressCallback(0.1f, "Preprocessing USD content");
         }
 
+        // ---- Self-describing wire format: zstd framing -------------------------
+        // The broker zstd-compresses USD payloads at store time. The frame is
+        // detected by the zstd magic (0xFD2FB528) in the first 4 bytes, so no
+        // wire-protocol change is involved: uncompressed payloads pass through
+        // untouched, and compressed ones are transparently decompressed here
+        // (the single C API choke point every parse path funnels through).
+        const uint8_t* wirePtr = buffer;
+        size_t wireSize = buffer_size;
+        std::vector<uint8_t> decompressed;  // allocated only for zstd payloads
+#if defined(JUSYNC_HAS_ZSTD)
+        // Explicit byte compare (not an endianness-dependent uint32_t compare):
+        // zstd frames begin with 28 B5 2F FD on the wire.
+        if (wireSize >= 4 &&
+            wirePtr[0] == 0x28 && wirePtr[1] == 0xB5 &&
+            wirePtr[2] == 0x2F && wirePtr[3] == 0xFD) {
+            unsigned long long contentSize = ZSTD_getFrameContentSize(wirePtr, wireSize);
+            if (contentSize == ZSTD_CONTENTSIZE_ERROR) {
+                MIDDLEWARE_LOG_ERROR("Invalid zstd frame in USD payload for '%s'", fileName.c_str());
+                stats.processingErrors.fetch_add(1);
+                return false;
+            }
+
+            if (contentSize == 0) {
+                wirePtr = decompressed.data();
+                wireSize = 0;
+            } else {
+                size_t dstCapacity;
+                if (contentSize != ZSTD_CONTENTSIZE_UNKNOWN) {
+                    if (contentSize > static_cast<unsigned long long>(safety::MAX_BUFFER_SIZE)) {
+                        MIDDLEWARE_LOG_ERROR("zstd USD payload too large after decompression: %llu bytes for '%s'",
+                                             contentSize, fileName.c_str());
+                        stats.processingErrors.fetch_add(1);
+                        return false;
+                    }
+                    dstCapacity = static_cast<size_t>(contentSize);
+                } else {
+                    // Unknown content size: start small and grow if the static API
+                    // reports dstSize_tooSmall, rather than guessing a fixed ratio.
+                    const size_t initialGuess = std::max<size_t>(
+                        1u << 20,
+                        wireSize < (size_t(1) << 60) ? wireSize * 4 : size_t(1) << 60);
+                    dstCapacity = std::min(initialGuess, static_cast<size_t>(safety::MAX_BUFFER_SIZE));
+                }
+
+                decompressed.resize(dstCapacity);
+                bool success = false;
+                for (;;) {
+                    size_t actual = ZSTD_decompress(decompressed.data(), decompressed.size(), wirePtr, wireSize);
+                    if (!ZSTD_isError(actual)) {
+                        if (actual > static_cast<size_t>(safety::MAX_BUFFER_SIZE)) {
+                            MIDDLEWARE_LOG_ERROR("zstd USD payload too large after decompression: %zu bytes for '%s'",
+                                                 actual, fileName.c_str());
+                            stats.processingErrors.fetch_add(1);
+                            return false;
+                        }
+                        decompressed.resize(actual);
+                        success = true;
+                        break;
+                    }
+                    if (ZSTD_getErrorCode(actual) != ZSTD_error_dstSize_tooSmall) {
+                        MIDDLEWARE_LOG_ERROR("zstd decompression FAILED for '%s': %s",
+                                             fileName.c_str(), ZSTD_getErrorName(actual));
+                        stats.processingErrors.fetch_add(1);
+                        return false;
+                    }
+                    if (decompressed.size() >= static_cast<size_t>(safety::MAX_BUFFER_SIZE)) {
+                        MIDDLEWARE_LOG_ERROR("zstd USD payload too large after decompression for '%s'",
+                                             fileName.c_str());
+                        stats.processingErrors.fetch_add(1);
+                        return false;
+                    }
+                    size_t nextCapacity = std::min(
+                        decompressed.size() * 2,
+                        static_cast<size_t>(safety::MAX_BUFFER_SIZE));
+                    decompressed.resize(nextCapacity);
+                }
+
+                wirePtr = decompressed.data();
+                wireSize = decompressed.size();
+                MIDDLEWARE_LOG_INFO("Decompressed zstd USD payload for '%s': %zu -> %zu bytes",
+                                    fileName.c_str(), buffer_size, wireSize);
+            }
+        }
+#endif // JUSYNC_HAS_ZSTD
+
+        // Binary USDC detection (checked AFTER zstd, since the broker compresses
+        // binary USD). The ASCII text transforms below must NOT run on binary
+        // content: a byte replacement inside a USDC string table would corrupt
+        // its length-prefixed records.
+        const bool isBinaryUsdc = wireSize >= 8 && std::memcmp(wirePtr, "PXR-USDC", 8) == 0;
+
         // TRUE ZERO-COPY fast path: scan the raw buffer for any byte that would
         // require a transform. Binary (.usdc) files never need one. For ASCII
         // .usda, note that both empty and real timeSampled arrays ("0: None",
@@ -945,10 +1043,11 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
 
         // Zero-copy scan for any transform-forcing token. A buffered string_view
         // find uses block-wise comparison instead of the old per-byte loop (up to
-        // 2 memcmps per byte across the entire buffer).
+        // 2 memcmps per byte across the entire buffer). Skipped entirely for
+        // binary USDC (see isBinaryUsdc).
         bool needsPreprocess = false;
-        if (buffer_size > 0) {
-            const std::string_view raw(reinterpret_cast<const char*>(buffer), buffer_size);
+        if (!isBinaryUsdc && wireSize > 0) {
+            const std::string_view raw(reinterpret_cast<const char*>(wirePtr), wireSize);
             if (raw.find(assetPatternStr) != std::string_view::npos ||
                 raw.find(texCoordPatternStr) != std::string_view::npos) {
                 needsPreprocess = true;
@@ -962,13 +1061,13 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
         std::string content;
         std::string fixedContent; // holds fixed content for clip extraction
 
-        const uint8_t* parsePtr = buffer;
-        size_t parseSize = buffer_size;
+        const uint8_t* parsePtr = wirePtr;
+        size_t parseSize = wireSize;
 
         if (needsPreprocess) {
             // Copy exactly once, then transform in place. This replaces the old
             // two-copy chain (std::string content -> std::vector processedBuffer).
-            content.assign(reinterpret_cast<const char*>(buffer), buffer_size);
+            content.assign(reinterpret_cast<const char*>(wirePtr), wireSize);
 
             size_t pos = 0;
             while ((pos = content.find(assetPatternStr, pos)) != std::string::npos) {

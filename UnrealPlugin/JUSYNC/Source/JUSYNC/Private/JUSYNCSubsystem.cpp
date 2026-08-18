@@ -751,9 +751,10 @@ void UJUSYNCSubsystem::HandleMessageReceivedForLibrary(const FString& Message)
 bool UJUSYNCSubsystem::LoadUSDFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCMeshData>& OutMeshData)
 {
 #ifdef WITH_ANARI_USD_MIDDLEWARE
-    // Serialize the USD parse (tinyusdz is not thread-safe). Uses ParseMutex, not the general
-    // MiddlewareMutex, so a long parse on a background thread never stalls game-thread ops.
-    FScopeLock Lock(&ParseMutex);
+    // ParseMutex is taken only around the C-call below (brace-scoped), not the whole
+    // function — this lets the single-threaded C->UE conversion overlap the next parse.
+    // (Uses ParseMutex, not the general MiddlewareMutex, so a long parse on a background
+    // thread never stalls game-thread ops.)
 
     if (!bIsInitialized.load())
     {
@@ -768,8 +769,14 @@ bool UJUSYNCSubsystem::LoadUSDFromBuffer(const TArray<uint8>& Buffer, const FStr
     CMeshData* CMeshes = nullptr;
     size_t MeshCount = 0;
     
-    // Call C interface
-    int Result = LoadUSDBuffer_C(Buffer.GetData(), Buffer.Num(), FilenameCStr, &CMeshes, &MeshCount);
+    // Serialize ONLY the tinyusdz C-call (not thread-safe for concurrent loads). The
+    // single-threaded conversion below runs OUTSIDE the lock so the next queued parse can
+    // overlap this file's conversion and keep all cores busy.
+    int Result = 0;
+    {
+        FScopeLock Lock(&ParseMutex);
+        Result = LoadUSDBuffer_C(Buffer.GetData(), Buffer.Num(), FilenameCStr, &CMeshes, &MeshCount);
+    }
     
     if (Result == 1 && CMeshes && MeshCount > 0)
     {
@@ -986,8 +993,6 @@ bool UJUSYNCSubsystem::LoadUSDFullFromBufferNoCopy(const TArray<uint8>& Buffer, 
         return false;
     }
 
-    FScopeLock Lock(&ParseMutex);
-
     FTCHARToUTF8 FilenameConverter(*Filename);
     const char* FilenameCStr = FilenameConverter.Get();
 
@@ -996,12 +1001,19 @@ bool UJUSYNCSubsystem::LoadUSDFullFromBufferNoCopy(const TArray<uint8>& Buffer, 
     CPointCloudData* CClouds = nullptr;
     size_t CloudCount = 0;
 
-    // Use zero-copy variant — bypasses std::vector copy at C API boundary
-    int Result = LoadUSDFullFromPointer_C(
-        Buffer.GetData(), Buffer.Num(), FilenameCStr,
-        &CMeshes, &MeshCount,
-        &CClouds, &CloudCount
-    );
+    // Serialize ONLY the tinyusdz C-call (not thread-safe for concurrent loads). The
+    // single-threaded C->UE conversion below deliberately runs OUTSIDE the lock so the
+    // next queued file's parse can overlap this file's conversion and keep all cores busy.
+    int Result = 0;
+    {
+        FScopeLock Lock(&ParseMutex);
+        // Zero-copy variant — bypasses the std::vector copy at the C API boundary.
+        Result = LoadUSDFullFromPointer_C(
+            Buffer.GetData(), Buffer.Num(), FilenameCStr,
+            &CMeshes, &MeshCount,
+            &CClouds, &CloudCount
+        );
+    }
 
     bool bSuccess = Result == 1;
 

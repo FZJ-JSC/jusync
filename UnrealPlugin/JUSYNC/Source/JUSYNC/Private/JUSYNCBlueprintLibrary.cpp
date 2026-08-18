@@ -1425,10 +1425,12 @@ bool UJUSYNCBlueprintLibrary::CheckForReceivedMessages(TArray<FString>& OutRecei
 
     if (ReceivedMessages.Num() > 0)
     {
-        OutReceivedMessages = ReceivedMessages;
+        // Move (not deep-copy) the accumulated messages into the out param, and drain
+        // ReceivedMessages so it can't grow without bound (was only reset by ClearReceivedData).
+        OutReceivedMessages = MoveTemp(ReceivedMessages);
 
         // Log received messages for debugging
-        for (const FString& Message : ReceivedMessages)
+        for (const FString& Message : OutReceivedMessages)
         {
             UE_LOG(LogJUSYNC, Log, TEXT("Received Message: %s"), *Message);
             // Use FLinearColor constructor for Cyan color

@@ -518,7 +518,13 @@ TestMode parseMode(int argc, char* argv[], std::string& collisionType) {
 fs::path findTestDataDir(int argc, char* argv[]) {
     // Check if last argument is a path (not a flag)
     if (argc > 1 && std::string(argv[argc-1]).substr(0, 2) != "--") {
-        return argv[argc-1];
+        fs::path p = argv[argc-1];
+        // The validator scans a directory of USD files. CTest may pass a single
+        // sample file, so fall back to its parent directory in that case.
+        if (fs::is_regular_file(p)) {
+            return p.parent_path();
+        }
+        return p;
     }
 
     // Try common test data locations

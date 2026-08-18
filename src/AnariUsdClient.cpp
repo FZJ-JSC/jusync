@@ -1041,6 +1041,17 @@ bool AnariUsdClient::requestFrame(int32_t frameNumber, int32_t targetRank,
                     }
                     MIDDLEWARE_LOG_DEBUG("Frame file %d complete: %s (%zu bytes)",
                                         filesReceived, complete->getFilename().c_str(), complete->total_size);
+
+                    // Terminal frame marker from the broker: every file of this
+                    // frame has already been delivered (wire ordering), so the
+                    // frame is definitively complete. Return immediately instead
+                    // of waiting out the legacy "broker stays quiet" quiescence
+                    // heuristic (which cost a full timeout after every frame).
+                    if (complete->getFilename() == "__frame_complete__") {
+                        MIDDLEWARE_LOG_INFO("Frame %d complete marker received (%d file completes)",
+                                            frameNumber, filesReceived);
+                        return true;
+                    }
                     break;
                 }
 
