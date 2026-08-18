@@ -202,6 +202,19 @@ target_include_directories(${PROJECT_NAME}
         ${CMAKE_CURRENT_SOURCE_DIR}/external/cppzmq
 )
 
+# tinyusdz is compiled with per-file -Werror when pulled in via add_subdirectory()
+# (TINYUSDZ_DEFAULT_NO_WERROR=OFF). On GCC 14+ that turns the dependency's own
+# dangling-pointer/dangling-reference diagnostics (e.g. tydra/scene-access.cc)
+# into hard errors and breaks a clean build. Keep building tinyusdz; just don't
+# treat its third-party warnings as errors. (Mirrors the GCC>=15 -fpermissive
+# workaround below.) Forced (not just if-undefined) so a stale cache value cannot
+# survive a reconfigure.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU"
+   AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 14)
+    set(TINYUSDZ_NO_WERROR ON CACHE BOOL
+        "Don't set -Werror for the bundled tinyusdz on GCC >= 14" FORCE)
+endif()
+
 # Add external dependencies
 add_subdirectory(external/tinyusdz external/tinyusdz_build)
 add_subdirectory(external/glm external/glm_build)
