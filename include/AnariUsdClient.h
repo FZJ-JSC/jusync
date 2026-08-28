@@ -334,6 +334,13 @@ private:
                              std::vector<uint8_t>& outDelimiter,
                              std::vector<uint8_t>& outData);
 
+    // Same as tryDequeueMatching, but assumes responseQueueMutex is ALREADY held
+    // by the caller.  Calling tryDequeueMatching while holding responseQueueMutex
+    // self-deadlocks (re-locking the same non-recursive mutex).
+    bool tryDequeueMatchingLocked(uint32_t requestId,
+                                  std::vector<uint8_t>& outDelimiter,
+                                  std::vector<uint8_t>& outData);
+
     // Handle notification message (called from dispatcher thread)
     void handleNotification(const std::vector<uint8_t>& data);
 

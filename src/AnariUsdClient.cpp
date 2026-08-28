@@ -2073,6 +2073,12 @@ bool AnariUsdClient::tryDequeueMatching(uint32_t requestId,
                                         std::vector<uint8_t>& outDelimiter,
                                         std::vector<uint8_t>& outData) {
     std::lock_guard<std::mutex> lock(responseQueueMutex);
+    return tryDequeueMatchingLocked(requestId, outDelimiter, outData);
+}
+
+bool AnariUsdClient::tryDequeueMatchingLocked(uint32_t requestId,
+                                              std::vector<uint8_t>& outDelimiter,
+                                              std::vector<uint8_t>& outData) {
     FramePairPtr entry;
     if (requestId == 0) {
         if (!noIdResponseQueue.empty()) {
@@ -2139,7 +2145,10 @@ bool AnariUsdClient::waitForMatchingFrames(uint32_t requestId, int timeoutMs,
     }
 
     // A frame is present — dequeue our own id's frame.
-    return tryDequeueMatching(requestId, outDelimiter, outData);
+    // Use the locked variant: we already hold responseQueueMutex, and
+    // re-locking the same non-recursive mutex self-deadlocks (glibc parks
+    // the thread in the futex forever; UE Stop then hangs in cleanup()).
+    return tryDequeueMatchingLocked(requestId, outDelimiter, outData);
 }
 
 // ---------------------------------------------------------------------------
@@ -2182,11 +2191,19 @@ void AnariUsdClient::downloadWorkerLoop() {
 // ============================================================================
 
 void AnariUsdClient::cleanup() {
-    // 1) Stop the parallel-download worker pool FIRST.  Its workers run
+    // 1) Signal ALL background loops to stop and wake ALL waiters BEFORE any
+    //    join.  Download workers run requestFile, which blocks in
+    //    waitForMatchingFrames on responseQueueCv; if we joined them first, a
+    //    worker mid-request would sleep out its full timeout (up to 10 minutes
+    //    for large files) before noticing shutdownRequested, stalling Stop.
+    downloadPoolActive.store(false, std::memory_order_release);
+    dispatcherActive.store(false);
+    downloadTaskCv.notify_all();
+    responseQueueCv.notify_all();
+
+    // 2) Stop the parallel-download worker pool.  Its workers run
     //    requestFile (send path + response index), so join them before the
     //    dispatcher / socket / context are torn down.
-    downloadPoolActive.store(false, std::memory_order_release);
-    downloadTaskCv.notify_all();
     for (auto& w : downloadWorkers) {
         if (w.joinable()) {
             w.join();
@@ -2194,9 +2211,7 @@ void AnariUsdClient::cleanup() {
     }
     downloadWorkers.clear();
 
-    // 2) Stop dispatcher thread — it owns all ZMQ receive
-    dispatcherActive.store(false);
-    responseQueueCv.notify_all();
+    // 3) Stop dispatcher thread — it owns all ZMQ receive
     if (dispatchThread.joinable()) {
         dispatchThread.join();
     }
@@ -2221,7 +2236,7 @@ void AnariUsdClient::cleanup() {
 
     pendingRequests.clear();
 
-    // 3) Empty the response index and the download task queue.
+    // 4) Empty the response index and the download task queue.
     {
         std::lock_guard<std::mutex> lock(responseQueueMutex);
         responseByRequest.clear();
