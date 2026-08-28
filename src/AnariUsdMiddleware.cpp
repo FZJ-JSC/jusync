@@ -957,12 +957,78 @@ bool AnariUsdMiddleware::requestFileListWithSizes(int32_t targetRank, std::vecto
 }
 
 bool AnariUsdMiddleware::requestFile(const std::string& filename, int32_t targetRank,
-                                      std::vector<uint8_t>& outFileData, int timeoutMs) {
+                                       std::vector<uint8_t>& outFileData, int timeoutMs) {
     if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
         MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
         return false;
     }
     return pImpl->anariUsdClient->getFileSync(filename, targetRank, outFileData, timeoutMs);
+}
+
+bool AnariUsdMiddleware::requestFileIntoBuffer(const std::string& filename, int32_t targetRank,
+                                                uint8_t* outBuffer, size_t outCapacity,
+                                                size_t& outSize, int& outStatus, int timeoutMs) {
+    outSize = 0;
+    outStatus = 0;
+    if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
+        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
+        return false;
+    }
+    if (!outBuffer && outCapacity > 0) {
+        MIDDLEWARE_LOG_ERROR("RequestFileIntoBuffer: null buffer with nonzero capacity");
+        return false;
+    }
+
+    size_t written = 0;
+    bool overflow = false;
+    size_t totalSize = 0;
+
+    auto chunkCallback = [&outBuffer, outCapacity, &written, &overflow](
+                             const std::string& /*fname*/, const uint8_t* chunk,
+                             size_t chunkSize, uint64_t offset, uint64_t /*totalSize*/) {
+        if (overflow) return;
+        if (offset >= outCapacity || chunkSize > outCapacity - offset) {
+            overflow = true;
+            return;
+        }
+        std::memcpy(outBuffer + offset, chunk, chunkSize);
+        if (offset + chunkSize > written) written = offset + chunkSize;
+    };
+
+    auto completeCallback = [&outBuffer, outCapacity, &written, &totalSize, &overflow](
+                                const std::string& /*fname*/, uint64_t size) {
+        if (overflow) return;
+        if (size > outCapacity) {
+            overflow = true;
+            return;
+        }
+        // Match getFileSync semantics: the final buffer is exactly totalSize
+        // bytes, any gap left by sparse chunk delivery zero-filled.
+        if (written < size) {
+            std::memset(outBuffer + written, 0, size - written);
+            written = size;
+        }
+        totalSize = size;
+    };
+
+    if (!pImpl->anariUsdClient->requestFile(filename, targetRank,
+                                            chunkCallback, completeCallback,
+                                            nullptr, timeoutMs)) {
+        outSize = 0;
+        outStatus = 0;
+        return false;
+    }
+
+    if (overflow) {
+        MIDDLEWARE_LOG_ERROR("File '%s' does not fit into %zu byte buffer", filename.c_str(), outCapacity);
+        outSize = 0;
+        outStatus = -1;
+        return true;
+    }
+
+    outSize = totalSize;
+    outStatus = 1;
+    return true;
 }
 
 bool AnariUsdMiddleware::requestFrame(int32_t frameNumber, int32_t targetRank,
@@ -979,13 +1045,13 @@ bool AnariUsdMiddleware::requestFrame(int32_t frameNumber, int32_t targetRank,
     bool frameComplete = false;
     
     auto chunkCallback = [&frameFiles, &frameFilesMutex](const std::string& fname,
-                                                          const std::vector<uint8_t>& chunk,
+                                                          const uint8_t* chunk, size_t chunkSize,
                                                           uint64_t offset, uint64_t totalSize) {
         std::lock_guard<std::mutex> lock(frameFilesMutex);
-        if (frameFiles[fname].size() < offset + chunk.size()) {
-            frameFiles[fname].resize(offset + chunk.size());
+        if (frameFiles[fname].size() < offset + chunkSize) {
+            frameFiles[fname].resize(offset + chunkSize);
         }
-        std::copy(chunk.begin(), chunk.end(), frameFiles[fname].begin() + offset);
+        std::memcpy(frameFiles[fname].data() + offset, chunk, chunkSize);
     };
     
     auto completeCallback = [&frameFiles, &frameFilesMutex, &frameComplete](const std::string& fname, uint64_t totalSize) {

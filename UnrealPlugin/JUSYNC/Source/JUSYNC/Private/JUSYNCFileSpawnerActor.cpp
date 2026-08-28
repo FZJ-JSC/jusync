@@ -432,7 +432,7 @@ void AJUSYNCFileSpawnerActor::PipelineDownloadNext(UJUSYNCSubsystem* Subsystem)
     int32 FileIndex = i;
     TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
 
-    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, WeakThis, Filename, TargetRank, DynamicTimeout, FileIndex]()
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, WeakThis, Filename, TargetRank, DynamicTimeout, FileIndex, FileSize]()
         {
             if (!WeakSubsystem.IsValid() || !WeakThis.IsValid())
             {
@@ -440,7 +440,8 @@ void AJUSYNCFileSpawnerActor::PipelineDownloadNext(UJUSYNCSubsystem* Subsystem)
             }
 
             TUniquePtr<TArray<uint8>> FileData = MakeUnique<TArray<uint8>>();
-            bool bSuccess = WeakSubsystem->RequestFile(Filename, TargetRank, DynamicTimeout, *FileData);
+            // In-situ: download straight into FileData (wire size is known).
+            bool bSuccess = WeakSubsystem->RequestFileSized(Filename, TargetRank, DynamicTimeout, *FileData, static_cast<uint64>(FileSize));
 
             TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThisCopy = WeakThis;
             FFunctionGraphTask::CreateAndDispatchWhenReady(
@@ -740,7 +741,9 @@ void AJUSYNCFileSpawnerActor::SpawnMeshFromData(const FString& Filename, bool bP
                 if (!MeshData[i].IsValid()) continue;
                 if (SpawnCount >= SpawnThisFrame)
                 {
-                    RemainingMeshes.Add(MeshData[i]);
+                    // Move (not copy): the deferred batch owns this mesh from
+                    // now on; MeshData[i] is not read again after this point.
+                    RemainingMeshes.Add(MoveTemp(MeshData[i]));
                     continue;
                 }
 
@@ -845,12 +848,14 @@ void AJUSYNCFileSpawnerActor::SpawnMeshFromData(const FString& Filename, bool bP
                     Spawner->SetSpawnScale(bUseUniformScaling ? SpawnScale.X : 1.0f);
 
                     bool bHasGradient = Spawner->GetGradientLUT().Num() > 0;
-                    for (const FJUSYNCPointCloudData& PC : PointCloudData)
+                    // Move each cloud into the async task (this is the last
+                    // use of PointCloudData in this function).
+                    for (FJUSYNCPointCloudData& PC : PointCloudData)
                     {
                         if (PC.IsValid())
                         {
                             PendingAsyncPCS++;
-                            Spawner->EnqueuePointCloud(PC, TargetRank);
+                            Spawner->EnqueuePointCloud(MoveTemp(PC), TargetRank);
                         }
                     }
 
@@ -910,10 +915,11 @@ void AJUSYNCFileSpawnerActor::FlushBufferedPointClouds()
     if (!Spawner) return;
 
     UE_LOG(LogTemp, Warning, TEXT("[Spawner] Flushing %d buffered PCs (gradient LUT unavailable, using white)"), PendingPointClouds.Num());
+    // Move each cloud into the async task; the buffer is emptied right after.
     for (FJUSYNCPointCloudData& PC : PendingPointClouds)
     {
         PendingAsyncPCS++;
-        Spawner->EnqueuePointCloud(PC);
+        Spawner->EnqueuePointCloud(MoveTemp(PC));
     }
     PendingPointClouds.Empty();
 }
@@ -1212,12 +1218,13 @@ void AJUSYNCFileSpawnerActor::RetryFailedDownloads()
 
         TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThis = this;
         TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = WeakSubsystemCopy;
-        AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, WeakThis, Filename, TargetRank, DynamicTimeout, idx]()
+        AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, WeakThis, Filename, TargetRank, DynamicTimeout, idx, FileSize]()
             {
                 if (!WeakSubsystem.IsValid() || !WeakThis.IsValid()) return;
 
                 TUniquePtr<TArray<uint8>> FileData = MakeUnique<TArray<uint8>>();
-                bool bSuccess = WeakSubsystem->RequestFile(Filename, TargetRank, DynamicTimeout, *FileData);
+                // In-situ: download straight into FileData (wire size is known).
+                bool bSuccess = WeakSubsystem->RequestFileSized(Filename, TargetRank, DynamicTimeout, *FileData, static_cast<uint64>(FileSize));
 
                 FFunctionGraphTask::CreateAndDispatchWhenReady(
                     [WeakThis, Filename, FileData = MoveTemp(FileData), bSuccess, idx, TargetRank]() mutable
@@ -2010,12 +2017,14 @@ bool AJUSYNCFileSpawnerActor::RefreshSingleFile(const FString& Filename, int32 T
                         Spawner->SetSpawnLocation(WeakCopy->GetNextSpawnLocation());
                         Spawner->SetSpawnScale(WeakCopy->bUseUniformScaling ? WeakCopy->SpawnScale.X : 1.0f);
 
-                        for (const FJUSYNCPointCloudData& PC : PointCloudData)
+                        // Move each cloud into the async task (last use of
+                        // PointCloudData in this lambda).
+                        for (FJUSYNCPointCloudData& PC : PointCloudData)
                         {
                             if (PC.IsValid())
                             {
                                 WeakCopy->PendingAsyncPCS++;
-                                Spawner->EnqueuePointCloud(PC, RankCopy);
+                                Spawner->EnqueuePointCloud(MoveTemp(PC), RankCopy);
                             }
                         }
                     }

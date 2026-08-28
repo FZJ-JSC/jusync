@@ -12,6 +12,9 @@
 
 #include <memory>
 #include <cstring>
+#include <cstdlib>
+#include <cstdint>
+#include <cmath>
 #include <fstream>
 #include <map>
 #include <string>
@@ -71,6 +74,18 @@ static CountingSemaphore g_parse_semaphore{4}; // allow 4 concurrent USD parses
 struct ParseGuard {
     ~ParseGuard() { g_parse_semaphore.release(); }
 };
+
+// One UsdProcessor per thread (constructed lazily on first use). The
+// constructor compiles several std::regex patterns and runs startup checks;
+// reusing the instance across parses on the same thread avoids paying that
+// cost (and a fresh heap round-trip) on every single C API call.
+static anari_usd_middleware::UsdProcessor& GetThreadLocalUsdProcessor() {
+    // One processor per thread (pImpl-allocated on first use per thread).
+    // NOTE: this must be an object, not a reference initialized from this
+    // function — a self-initializing thread_local reference recurses forever.
+    static thread_local anari_usd_middleware::UsdProcessor processor;
+    return processor;
+}
 
 // ============================================================================
 // C INTERFACE IMPLEMENTATION
@@ -662,6 +677,297 @@ int RequestFile_C(const char* filename, int32_t target_rank,
     }
 }
 
+// ============================================================================
+// IN-SITU FILE DOWNLOAD
+// ============================================================================
+
+int64_t RequestFileIntoBuffer_C(const char* filename,
+                                int32_t target_rank,
+                                int timeout_ms,
+                                unsigned char* out_buffer,
+                                size_t out_capacity,
+                                size_t* out_size) {
+    if (out_size) *out_size = 0;
+    if (!g_middleware || !filename) {
+        return -1;
+    }
+    try {
+        size_t size = 0;
+        int status = 0;
+        if (!g_middleware->requestFileIntoBuffer(filename, target_rank,
+                                                 out_buffer, out_capacity,
+                                                 size, status, timeout_ms)) {
+            return -1; // failure / timeout / not connected
+        }
+        if (out_size) *out_size = size;
+        if (status == -1) return -2; // overflow
+        return static_cast<int64_t>(size);
+    } catch (...) {
+        MIDDLEWARE_LOG_ERROR("RequestFileIntoBuffer_C: exception for '%s'", filename);
+        return -1;
+    }
+}
+
+// ============================================================================
+// IN-SITU (TWO-PHASE) PARSE API
+// ============================================================================
+
+namespace {
+
+struct ParsedUSDHandle {
+    std::vector<anari_usd_middleware::UsdProcessor::MeshData> meshes;
+    std::vector<anari_usd_middleware::UsdProcessor::PointCloudData> clouds;
+};
+
+// FMath::Clamp(c*255, 0, 255) then truncate — legacy UE mesh color conversion.
+static inline uint8_t ScaleColorToFColor(float v) {
+    float c = v * 255.0f;
+    if (c < 0.0f) c = 0.0f;
+    if (c > 255.0f) c = 255.0f;
+    return static_cast<uint8_t>(c);
+}
+
+// Unclamped (uint8)(c*255) — legacy UE point-cloud color conversion.
+static inline uint8_t ScaleColorRaw(float v) {
+    return static_cast<uint8_t>(v * 255.0f);
+}
+
+// In-situ mesh fill: writes straight into the caller's final UE-layout
+// arrays (double[3] per vertex == FVector, double[2] per UV == FVector2D,
+// int32 indices, uint8[4] colors == FColor). Float->double promotion is
+// exact, so this is bit-identical to the legacy per-element conversion.
+static bool FillMeshIntoBuffer(const anari_usd_middleware::UsdProcessor::MeshData& src,
+                                CMeshDataFill& dst) {
+    const size_t nVerts = src.points.size();
+
+    // Positions: USD (x,y,z) -> UE (x,-y,z)
+    if (dst.points && nVerts > 0) {
+        for (size_t i = 0; i < nVerts; ++i) {
+            dst.points[i * 3 + 0] = static_cast<double>(src.points[i].x);
+            dst.points[i * 3 + 1] = static_cast<double>(-src.points[i].y);
+            dst.points[i * 3 + 2] = static_cast<double>(src.points[i].z);
+        }
+    }
+
+    // Triangle indices (uint32 source -> int32, legacy behavior)
+    if (dst.indices && !src.indices.empty()) {
+        for (size_t i = 0; i < src.indices.size(); ++i) {
+            dst.indices[i] = static_cast<int32_t>(src.indices[i]);
+        }
+    }
+
+    // Normals: flip Y like positions; the caller re-normalizes afterwards
+    // (exactly like the legacy UE conversion).
+    const size_t nNormals = src.normals.size();
+    if (dst.normals && nNormals > 0) {
+        for (size_t i = 0; i < nNormals; ++i) {
+            dst.normals[i * 3 + 0] = static_cast<double>(src.normals[i].x);
+            dst.normals[i * 3 + 1] = static_cast<double>(-src.normals[i].y);
+            dst.normals[i * 3 + 2] = static_cast<double>(src.normals[i].z);
+        }
+    }
+
+    // UV pairs (float[2] source -> double[2])
+    const size_t nUv = src.uvs.size();
+    if (dst.uvs && nUv > 0) {
+        for (size_t i = 0; i < nUv; ++i) {
+            dst.uvs[i * 2 + 0] = static_cast<double>(src.uvs[i].x);
+            dst.uvs[i * 2 + 1] = static_cast<double>(src.uvs[i].y);
+        }
+    }
+
+    // Vertex colors (always per-vertex after extraction: padded/trimmed there)
+    if (src.vertex_colors.size() == nVerts && nVerts > 0 && dst.vertex_colors8) {
+        for (size_t i = 0; i < nVerts; ++i) {
+            const auto& c = src.vertex_colors[i];
+            dst.vertex_colors8[i * 4 + 0] = ScaleColorToFColor(c.r);
+            dst.vertex_colors8[i * 4 + 1] = ScaleColorToFColor(c.g);
+            dst.vertex_colors8[i * 4 + 2] = ScaleColorToFColor(c.b);
+            dst.vertex_colors8[i * 4 + 3] = ScaleColorToFColor(c.a);
+        }
+    }
+
+    return true;
+}
+
+// In-situ point-cloud fill: same UE-layout conventions as the mesh fill.
+static bool FillCloudIntoBuffer(const anari_usd_middleware::UsdProcessor::PointCloudData& src,
+                                CPointCloudDataFill& dst) {
+    const size_t n = src.positions.size();
+
+    // Positions: USD (x,y,z) -> UE (x,z,-y)
+    if (dst.positions && n > 0) {
+        for (size_t i = 0; i < n; ++i) {
+            dst.positions[i * 3 + 0] = static_cast<double>(src.positions[i].x);
+            dst.positions[i * 3 + 1] = static_cast<double>(src.positions[i].z);
+            dst.positions[i * 3 + 2] = static_cast<double>(-src.positions[i].y);
+        }
+    }
+
+    // Colors
+    if (!src.vertex_colors.empty() && dst.colors8) {
+        const size_t c = src.vertex_colors.size();
+        for (size_t i = 0; i < c; ++i) {
+            const auto& col = src.vertex_colors[i];
+            dst.colors8[i * 4 + 0] = ScaleColorRaw(col.r);
+            dst.colors8[i * 4 + 1] = ScaleColorRaw(col.g);
+            dst.colors8[i * 4 + 2] = ScaleColorRaw(col.b);
+            dst.colors8[i * 4 + 3] = ScaleColorRaw(col.a);
+        }
+    }
+
+    // Widths — legacy fallback: scalarAttributes.x (attribute0 colormap value)
+    if (!src.widths.empty() && dst.widths) {
+        std::memcpy(dst.widths, src.widths.data(), src.widths.size() * sizeof(float));
+    } else if (!src.scalarAttributes.empty() && n > 0 && dst.widths) {
+        const size_t wcount = std::min(src.scalarAttributes.size(), n);
+        for (size_t i = 0; i < wcount; ++i) {
+            dst.widths[i] = src.scalarAttributes[i].x;
+        }
+    }
+
+    // Bounding box in USD space, initialized at the origin (legacy quirk: the
+    // box always contains the origin) before the UE-side (x, z, -y) transform.
+    for (int i = 0; i < 3; ++i) {
+        dst.bounding_box_min[i] = 0.0f;
+        dst.bounding_box_max[i] = 0.0f;
+    }
+    if (n > 0) {
+        for (size_t i = 0; i < n; ++i) {
+            dst.bounding_box_min[0] = fminf(dst.bounding_box_min[0], src.positions[i].x);
+            dst.bounding_box_min[1] = fminf(dst.bounding_box_min[1], src.positions[i].y);
+            dst.bounding_box_min[2] = fminf(dst.bounding_box_min[2], src.positions[i].z);
+            dst.bounding_box_max[0] = fmaxf(dst.bounding_box_max[0], src.positions[i].x);
+            dst.bounding_box_max[1] = fmaxf(dst.bounding_box_max[1], src.positions[i].y);
+            dst.bounding_box_max[2] = fmaxf(dst.bounding_box_max[2], src.positions[i].z);
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+int QueryUSDFullLayout_C(const unsigned char* buffer,
+                         size_t buffer_size,
+                         const char* filename,
+                         void** out_handle,
+                         CMeshLayout** out_mesh_layouts,
+                         size_t* out_mesh_count,
+                         CPointCloudLayout** out_cloud_layouts,
+                         size_t* out_cloud_count) {
+    if (!buffer || !filename || !out_handle || !out_mesh_layouts || !out_mesh_count ||
+        !out_cloud_layouts || !out_cloud_count) {
+        return 0;
+    }
+    *out_handle = nullptr;
+    *out_mesh_layouts = nullptr;
+    *out_mesh_count = 0;
+    *out_cloud_layouts = nullptr;
+    *out_cloud_count = 0;
+
+    try {
+        anari_usd_middleware::UsdProcessor& processor = GetThreadLocalUsdProcessor();
+        std::vector<anari_usd_middleware::UsdProcessor::MeshData> mesh_data;
+        std::vector<anari_usd_middleware::UsdProcessor::PointCloudData> pc_data;
+
+        g_parse_semaphore.acquire();
+        {
+            ParseGuard guard;
+            bool result = processor.LoadUSDBufferFromRaw(
+                reinterpret_cast<const uint8_t*>(buffer), buffer_size,
+                std::string(filename), mesh_data, &pc_data);
+            if (!result) {
+                MIDDLEWARE_LOG_ERROR("QueryUSDFullLayout_C: parse failed for '%s' (size=%zu bytes)",
+                                     filename, buffer_size);
+                return 0;
+            }
+        } // semaphore released here
+
+        ParsedUSDHandle* handle = new ParsedUSDHandle{std::move(mesh_data), std::move(pc_data)};
+        *out_handle = handle;
+
+        CMeshLayout* ml = nullptr;
+        if (!handle->meshes.empty()) {
+            ml = static_cast<CMeshLayout*>(std::calloc(handle->meshes.size(), sizeof(CMeshLayout)));
+            for (size_t i = 0; i < handle->meshes.size(); ++i) {
+                const auto& m = handle->meshes[i];
+                snprintf(ml[i].element_name, sizeof(ml[i].element_name), "%s", m.elementName.c_str());
+                snprintf(ml[i].type_name, sizeof(ml[i].type_name), "%s", m.typeName.c_str());
+                ml[i].points_count = m.points.size();
+                ml[i].indices_count = m.indices.size();
+                ml[i].normals_count = m.normals.size();
+                ml[i].uvs_count = m.uvs.size();
+                // Colors are always per-vertex after extraction (padded/trimmed).
+                ml[i].vertex_colors_count = m.vertex_colors.empty() ? 0 : m.points.size();
+            }
+        }
+        *out_mesh_layouts = ml;
+        *out_mesh_count = handle->meshes.size();
+
+        CPointCloudLayout* cl = nullptr;
+        if (!handle->clouds.empty()) {
+            cl = static_cast<CPointCloudLayout*>(std::calloc(handle->clouds.size(), sizeof(CPointCloudLayout)));
+            for (size_t i = 0; i < handle->clouds.size(); ++i) {
+                const auto& c = handle->clouds[i];
+                snprintf(cl[i].element_name, sizeof(cl[i].element_name), "%s", c.elementName.c_str());
+                cl[i].point_count = c.positions.size();
+                cl[i].has_colors = c.vertex_colors.empty() ? 0 : 1;
+                cl[i].has_normals = c.normals.empty() ? 0 : 1;
+                cl[i].has_widths = (!c.widths.empty() || !c.scalarAttributes.empty()) ? 1 : 0;
+            }
+        }
+        *out_cloud_layouts = cl;
+        *out_cloud_count = handle->clouds.size();
+
+        MIDDLEWARE_LOG_INFO("QueryUSDFullLayout_C: %zu meshes + %zu point clouds for '%s'",
+                            *out_mesh_count, *out_cloud_count, filename);
+        return 1;
+    } catch (...) {
+        MIDDLEWARE_LOG_ERROR("QueryUSDFullLayout_C: exception for '%s'", filename);
+        return 0;
+    }
+}
+
+int FillUSDFull_C(void* handle,
+                  CMeshDataFill* meshes,
+                  size_t mesh_count,
+                  CPointCloudDataFill* clouds,
+                  size_t cloud_count) {
+    auto* h = static_cast<ParsedUSDHandle*>(handle);
+    if (!h) return 0;
+    if (mesh_count > h->meshes.size() || cloud_count > h->clouds.size()) {
+        MIDDLEWARE_LOG_ERROR("FillUSDFull_C: requested more elements than parsed (%zu meshes, %zu clouds)",
+                             h->meshes.size(), h->clouds.size());
+        return 0;
+    }
+    try {
+        for (size_t i = 0; i < mesh_count; ++i) {
+            if (!FillMeshIntoBuffer(h->meshes[i], meshes[i])) return 0;
+        }
+        for (size_t i = 0; i < cloud_count; ++i) {
+            if (!FillCloudIntoBuffer(h->clouds[i], clouds[i])) return 0;
+        }
+        return 1;
+    } catch (...) {
+        MIDDLEWARE_LOG_ERROR("FillUSDFull_C: exception");
+        return 0;
+    }
+}
+
+void FreeParsedUSD_C(void* handle) {
+    delete static_cast<ParsedUSDHandle*>(handle);
+}
+
+void FreeUSDFullLayouts_C(CMeshLayout* mesh_layouts,
+                          size_t mesh_count,
+                          CPointCloudLayout* cloud_layouts,
+                          size_t cloud_count) {
+    (void)mesh_count;
+    (void)cloud_count;
+    std::free(mesh_layouts);
+    std::free(cloud_layouts);
+}
+
 /**
  * Request all files for a specific frame number
  */
@@ -895,7 +1201,7 @@ int LoadUSDBuffer_C(const unsigned char* buffer, size_t buffer_size, const char*
         std::vector<anari_usd_middleware::UsdProcessor::MeshData> mesh_data;
 
         // Create UsdProcessor instance and call ProcessFile directly
-        anari_usd_middleware::UsdProcessor processor;
+        anari_usd_middleware::UsdProcessor& processor = GetThreadLocalUsdProcessor();
         g_parse_semaphore.acquire();
         {
             ParseGuard guard;
@@ -973,7 +1279,7 @@ int LoadUSDFromDisk_C(const char* filepath, CMeshData** out_meshes, size_t* out_
         std::vector<anari_usd_middleware::UsdProcessor::MeshData> mesh_data;
 
         // Create UsdProcessor instance and call ProcessFile directly
-        anari_usd_middleware::UsdProcessor processor;
+        anari_usd_middleware::UsdProcessor& processor = GetThreadLocalUsdProcessor();
         bool result = processor.LoadUSDFromDisk(std_filepath, mesh_data);
 
 
@@ -1056,7 +1362,7 @@ int LoadUSDBufferWithCollision_C(const unsigned char* buffer,
         std::vector<anari_usd_middleware::UsdProcessor::MeshData> mesh_data;
 
         // Call middleware USD processing (existing function)
-        anari_usd_middleware::UsdProcessor processor;
+        anari_usd_middleware::UsdProcessor& processor = GetThreadLocalUsdProcessor();
         bool result = processor.LoadUSDBuffer(std_buffer, std_filename, mesh_data);
 
         if (!result || mesh_data.empty()) {
@@ -2240,7 +2546,7 @@ int ProcessPointCloudFromUSD_C(const unsigned char* buffer,
         std::vector<uint8_t> std_buffer(buffer, buffer + buffer_size);
         std::string std_filename(filename);
 
-        anari_usd_middleware::UsdProcessor processor;
+        anari_usd_middleware::UsdProcessor& processor = GetThreadLocalUsdProcessor();
         std::vector<anari_usd_middleware::UsdProcessor::PointCloudData> pc_data;
 
         // Load USD with point cloud extraction
@@ -2293,110 +2599,12 @@ int LoadUSDFull_C(const unsigned char* buffer,
                   size_t* out_mesh_count,
                   CPointCloudData** out_clouds,
                   size_t* out_cloud_count) {
-    if (!buffer || !filename || !out_meshes || !out_mesh_count || !out_clouds || !out_cloud_count) {
-        return 0;
-    }
-
-    try {
-        std::vector<uint8_t> std_buffer(buffer, buffer + buffer_size);
-        std::string std_filename(filename);
-
-        anari_usd_middleware::UsdProcessor processor;
-        std::vector<anari_usd_middleware::UsdProcessor::MeshData> mesh_data;
-        std::vector<anari_usd_middleware::UsdProcessor::PointCloudData> pc_data;
-
-        g_parse_semaphore.acquire();
-        {
-            ParseGuard guard;
-            bool result = processor.LoadUSDBuffer(std_buffer, std_filename, mesh_data, &pc_data);
-
-            if (!result) {
-            MIDDLEWARE_LOG_ERROR("LoadUSDFull_C: LoadUSDBuffer returned false for '%s' (size=%zu bytes)",
-                std_filename.c_str(), buffer_size);
-            // Show first 200 bytes of the buffer to diagnose
-            size_t previewLen = std::min(std_buffer.size(), static_cast<size_t>(200));
-            std::string preview(reinterpret_cast<const char*>(std_buffer.data()), previewLen);
-            MIDDLEWARE_LOG_ERROR("LoadUSDFull_C_raw_preview: '%.200s'...", preview.c_str());
-            *out_mesh_count = 0;
-            *out_meshes = nullptr;
-            *out_cloud_count = 0;
-            *out_clouds = nullptr;
-            return 0;
-            }
-        } // semaphore released here
-
-        /*
-         * Diagnose: if result is true but pc_data has an entry with 0 positions,
-         * TinyUSDZ parsed the file but ExtractPointCloudData couldn't get point data.
-         */
-        {
-            size_t valid_pc = 0, invalid_pc = 0;
-            for (const auto& pc : pc_data) {
-                if (pc.positions.size() > 0) valid_pc++;
-                else invalid_pc++;
-            }
-            if (invalid_pc > 0) {
-                MIDDLEWARE_LOG_ERROR("LoadUSDFull_C: %zu point clouds have 0 positions for '%s' (valid=%zu, invalid=%zu)",
-                    invalid_pc, std_filename.c_str(), valid_pc, invalid_pc);
-            }
-            /*
-             * If all extracted PCs have 0 positions, treat as failure (no usable data)
-             */
-            if (valid_pc == 0 && invalid_pc > 0) {
-                MIDDLEWARE_LOG_ERROR("LoadUSDFull_C: no usable point clouds extracted — discarding for '%s'",
-                    std_filename.c_str());
-                pc_data.clear();
-            }
-        }
-
-        if (mesh_data.empty() && pc_data.empty()) {
-            MIDDLEWARE_LOG_WARNING("LoadUSDFull_C: LoadUSDBuffer succeeded but returned 0 meshes + 0 PCs for '%s'",
-                std_filename.c_str());
-        }
-
-        if (!mesh_data.empty()) {
-            *out_mesh_count = mesh_data.size();
-            *out_meshes = new CMeshData[*out_mesh_count];
-            for (size_t i = 0; i < mesh_data.size(); ++i) {
-                ConvertMeshDataToCFormat(mesh_data[i], (*out_meshes)[i]);
-                (*out_meshes)[i].collision_type = COLLISION_NONE;
-                (*out_meshes)[i].collision_vertices = nullptr;
-                (*out_meshes)[i].collision_indices = nullptr;
-                (*out_meshes)[i].collision_vertices_count = 0;
-                (*out_meshes)[i].collision_indices_count = 0;
-                for (int j = 0; j < 3; j++) {
-                    (*out_meshes)[i].bounding_box_min[j] = 0.0f;
-                    (*out_meshes)[i].bounding_box_max[j] = 0.0f;
-                    (*out_meshes)[i].sphere_center[j] = 0.0f;
-                }
-                (*out_meshes)[i].sphere_radius = 0.0f;
-            }
-        } else {
-            *out_mesh_count = 0;
-            *out_meshes = nullptr;
-        }
-
-        if (!pc_data.empty()) {
-            *out_cloud_count = pc_data.size();
-            *out_clouds = new CPointCloudData[*out_cloud_count];
-            for (size_t i = 0; i < pc_data.size(); ++i) {
-                ConvertPointCloudDataToCFormat(pc_data[i], (*out_clouds)[i]);
-            }
-        } else {
-            *out_cloud_count = 0;
-            *out_clouds = nullptr;
-        }
-
-        MIDDLEWARE_LOG_INFO("LoadUSDFull_C: extracted %zu meshes + %zu point clouds from '%s' in single pass",
-                            *out_mesh_count, *out_cloud_count, std_filename.c_str());
-        return 1;
-    } catch (...) {
-        *out_mesh_count = 0;
-        *out_meshes = nullptr;
-        *out_cloud_count = 0;
-        *out_clouds = nullptr;
-        return 0;
-    }
+    // The legacy body copied the caller buffer into a std::vector and ran a
+    // separate parse path. LoadUSDFullFromPointer_C parses the caller buffer
+    // in place with identical semantics — delegate to it (no copy).
+    return LoadUSDFullFromPointer_C(buffer, buffer_size, filename,
+                                    out_meshes, out_mesh_count,
+                                    out_clouds, out_cloud_count);
 }
 
 /**
@@ -2417,7 +2625,7 @@ int LoadUSDFullFromPointer_C(const unsigned char* buffer,
     try {
         std::string std_filename(filename);
 
-        anari_usd_middleware::UsdProcessor processor;
+        anari_usd_middleware::UsdProcessor& processor = GetThreadLocalUsdProcessor();
         std::vector<anari_usd_middleware::UsdProcessor::MeshData> mesh_data;
         std::vector<anari_usd_middleware::UsdProcessor::PointCloudData> pc_data;
 

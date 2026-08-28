@@ -122,6 +122,12 @@ typedef struct {
     const char** uv_set_names;   // Array of UV set name pointers
     size_t uv_sets_count;        // Number of UV sets
 
+    // In-situ fill target (FillUSDFull_C only): per-vertex RGBA bytes (0-255).
+    // When non-NULL, FillUSDFull_C writes vertex colors here instead of the
+    // float vertex_colors array. Ignored by the legacy ConvertMeshDataToCFormat
+    // allocation path (which always leaves it NULL).
+    unsigned char* vertex_colors8;
+
 } CMeshData;
 
 /**
@@ -164,6 +170,11 @@ typedef struct {
     // Bounding box
     float bounding_box_min[3];
     float bounding_box_max[3];
+
+    // In-situ fill target (FillUSDFull_C only): per-point RGBA bytes (0-255).
+    // When non-NULL, FillUSDFull_C writes colors here instead of the float
+    // colors array. Ignored by the legacy allocation path (leaves it NULL).
+    unsigned char* colors8;
 
 } CPointCloudData;
 
@@ -330,6 +341,133 @@ ANARI_USD_MIDDLEWARE_C_API int LoadUSDFullFromPointer_C(
     size_t* out_mesh_count,
     CPointCloudData** out_clouds,
     size_t* out_cloud_count);
+
+// ============================================================================
+// IN-SITU (TWO-PHASE) PARSE API
+//
+// QueryUSDFullLayout_C parses the USD once and reports per-mesh/per-cloud
+// element counts without allocating any geometry buffers. The caller then
+// allocates its own final arrays (e.g. Unreal TArrays) and passes fill
+// structs pointing at them; FillUSDFull_C writes the geometry straight into
+// those buffers — no intermediate C-side allocation, no C->UE conversion
+// copy.
+//
+// The fill structs match the caller's final container layouts (Unreal 5):
+//  - points/normals/positions : double[3] per element (FVector = TVector<double>)
+//  - uvs                      : double[2] per element (FVector2D)
+//  - indices                  : int32
+//  - colors8                  : uint8[4] per element (FColor)
+//  - widths                   : float
+// Float->double promotion is exact, so results are bit-identical to the
+// legacy per-element conversion.
+//
+// Fill conventions (identical to the legacy CMeshData + UE conversion path):
+//  - mesh positions/normals: written in UE space (x, -y, z); UE must still
+//    re-normalize normals exactly as before
+//  - mesh indices: uint32 source values cast to int32 (legacy behavior)
+//  - mesh UVs: float source pairs promoted to double[2]
+//  - mesh colors: per-vertex RGBA bytes with clamp(c*255) rounding
+//  - point cloud positions: written in UE space (x, z, -y)
+//  - point cloud colors: per-point RGBA bytes with unclamped (uint8)(c*255)
+//    (matching the legacy UE conversion)
+//  - point cloud widths: raw floats (scalarAttributes.x fallback included)
+//  - point cloud bounding boxes: written to the fill struct in USD space,
+//    origin-inclusive (legacy quirk); the caller transforms to UE space
+//
+// The caller must NOT call FreeMeshData_C/FreePointCloudData_C on the
+// fill buffers (it owns them); FreeParsedUSD_C releases the parse handle.
+// ============================================================================
+
+/** Per-mesh element counts reported by QueryUSDFullLayout_C. */
+typedef struct {
+    char element_name[256];
+    char type_name[128];
+    size_t points_count;        // number of vertices
+    size_t indices_count;       // number of triangle indices (triangulated)
+    size_t normals_count;       // number of normals (0 if absent)
+    size_t uvs_count;           // number of UV pairs (0 if absent)
+    size_t vertex_colors_count; // number of per-vertex colors (0 if absent)
+} CMeshLayout;
+
+/** Per-point-cloud element counts reported by QueryUSDFullLayout_C. */
+typedef struct {
+    char element_name[256];
+    size_t point_count;
+    int has_colors;
+    int has_normals;
+    int has_widths;
+} CPointCloudLayout;
+
+/** In-situ mesh fill target (FillUSDFull_C only). */
+typedef struct {
+    double* points;            // 3 doubles per vertex
+    int32_t* indices;          // 1 int32 per index
+    double* normals;           // 3 doubles per normal (nullable)
+    double* uvs;               // 2 doubles per UV pair (nullable)
+    unsigned char* vertex_colors8; // 4 bytes per vertex (nullable)
+} CMeshDataFill;
+
+/** In-situ point-cloud fill target (FillUSDFull_C only). */
+typedef struct {
+    double* positions;         // 3 doubles per point
+    unsigned char* colors8;    // 4 bytes per point (nullable)
+    float* widths;             // 1 float per point (nullable)
+    // Filled by FillUSDFull_C (USD-space, origin-inclusive):
+    float bounding_box_min[3];
+    float bounding_box_max[3];
+} CPointCloudDataFill;
+
+/**
+ * Parse a USD buffer and report the geometry layout (no buffer allocation).
+ *
+ * @param buffer Raw USD buffer (zstd frames accepted, as elsewhere)
+ * @param buffer_size Size in bytes
+ * @param filename Original filename for format detection
+ * @param out_handle Opaque handle to the parsed data (FreeParsedUSD_C)
+ * @param out_mesh_layouts Output: array of CMeshLayout (FreeUSDFullLayouts_C)
+ * @param out_mesh_count Output: number of meshes
+ * @param out_cloud_layouts Output: array of CPointCloudLayout
+ * @param out_cloud_count Output: number of point clouds
+ * @return 1 on success, 0 on failure
+ */
+ANARI_USD_MIDDLEWARE_C_API int QueryUSDFullLayout_C(
+    const unsigned char* buffer,
+    size_t buffer_size,
+    const char* filename,
+    void** out_handle,
+    CMeshLayout** out_mesh_layouts,
+    size_t* out_mesh_count,
+    CPointCloudLayout** out_cloud_layouts,
+    size_t* out_cloud_count);
+
+/**
+ * Write parsed geometry into caller-provided buffers.
+ *
+ * @param handle Handle from QueryUSDFullLayout_C
+ * @param meshes Caller array; each element's pointers must point at
+ *               caller-allocated arrays of the QueryUSDFullLayout_C sizes
+ * @param mesh_count Number of meshes (<= queried count)
+ * @param clouds Caller array; each element's pointers must point at
+ *               caller-allocated arrays of the QueryUSDFullLayout_C sizes
+ * @param cloud_count Number of point clouds (<= queried count)
+ * @return 1 on success, 0 on failure
+ */
+ANARI_USD_MIDDLEWARE_C_API int FillUSDFull_C(
+    void* handle,
+    CMeshDataFill* meshes,
+    size_t mesh_count,
+    CPointCloudDataFill* clouds,
+    size_t cloud_count);
+
+/** Release a handle from QueryUSDFullLayout_C. */
+ANARI_USD_MIDDLEWARE_C_API void FreeParsedUSD_C(void* handle);
+
+/** Free the layout arrays from QueryUSDFullLayout_C. */
+ANARI_USD_MIDDLEWARE_C_API void FreeUSDFullLayouts_C(
+    CMeshLayout* mesh_layouts,
+    size_t mesh_count,
+    CPointCloudLayout* cloud_layouts,
+    size_t cloud_count);
 
 // ============================================================================
 // USD PROCESSING FUNCTIONS WITH COLLISION SUPPORT
@@ -790,6 +928,27 @@ ANARI_USD_MIDDLEWARE_C_API int RequestFile_C(
     unsigned char** out_data,
     size_t* out_size,
     int timeout_ms);
+
+/**
+ * Request a specific file and write it directly into a caller-provided
+ * buffer (in-situ: no intermediate allocation or copy in the middleware).
+ *
+ * @param filename Name of file to request
+ * @param target_rank Target worker rank
+ * @param timeout_ms Timeout in milliseconds
+ * @param out_buffer Caller buffer to receive the raw file bytes
+ * @param out_capacity Size of out_buffer in bytes
+ * @param out_size On success, receives the file size in bytes
+ * @return number of bytes written on success (>0), -1 on failure/timeout,
+ *         -2 if the file is larger than out_capacity
+ */
+ANARI_USD_MIDDLEWARE_C_API int64_t RequestFileIntoBuffer_C(
+    const char* filename,
+    int32_t target_rank,
+    int timeout_ms,
+    unsigned char* out_buffer,
+    size_t out_capacity,
+    size_t* out_size);
 
 // ============================================================================
 // ASYNC FILE DOWNLOAD (Non-Blocking)

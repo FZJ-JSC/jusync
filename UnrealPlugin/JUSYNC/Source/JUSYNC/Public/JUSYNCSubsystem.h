@@ -266,6 +266,11 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker", DisplayName = "Request File (Sync)")
     bool RequestFile(const FString& Filename, int32 TargetRank, int32 TimeoutMs, TArray<uint8>& OutData);
+    // In-situ variant: when ExpectedFileSize > 0 (the wire size from the file
+    // list) the file is downloaded directly into OutData with no middleware
+    // intermediate allocation/copy; otherwise falls back to the legacy path.
+    bool RequestFileSized(const FString& Filename, int32 TargetRank, int32 TimeoutMs,
+                          TArray<uint8>& OutData, uint64 ExpectedFileSize);
 
     // Parallel download functions
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker", DisplayName = "Request Files Parallel (Sync)")

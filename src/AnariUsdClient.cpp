@@ -280,19 +280,19 @@ bool AnariUsdClient::requestFileList(int32_t targetRank, FileListCallback callba
         size_t headerSize = sizeof(ZmqFileChunk);
 
         // Receive chunk header + JSON
-        std::vector<uint8_t> dummyDelim1, dataFrame1;
+        FrameMsg dummyDelim1, dataFrame1;
         if (!waitForMatchingFrames(myRequestId, timeoutMs, dummyDelim1, dataFrame1)) {
             MIDDLEWARE_LOG_ERROR("Timeout waiting for file list response");
             return false;
         }
 
-        if (dataFrame1.size() < headerSize) {
+        if (dataFrame1->size() < headerSize) {
             MIDDLEWARE_LOG_ERROR("File list response too small: %zu bytes (expected at least %zu)",
-                                dataFrame1.size(), headerSize);
+                                 dataFrame1->size(), headerSize);
             return false;
         }
 
-        const uint8_t* chunkData = dataFrame1.data();
+        const uint8_t* chunkData = static_cast<const uint8_t*>(dataFrame1->data());
         const ZmqFileChunk* chunk = reinterpret_cast<const ZmqFileChunk*>(chunkData);
 
         if (!MessageUtils::isValidMagic(chunk->magic)) {
@@ -317,9 +317,9 @@ bool AnariUsdClient::requestFileList(int32_t targetRank, FileListCallback callba
         std::vector<uint8_t> jsonData;
         if (chunk->chunk_size > 0) {
             size_t expectedTotalSize = headerSize + chunk->chunk_size;
-            if (dataFrame1.size() < expectedTotalSize) {
+            if (dataFrame1->size() < expectedTotalSize) {
                 MIDDLEWARE_LOG_ERROR("Incomplete file list response: got %zu bytes, expected %zu",
-                                    dataFrame1.size(), expectedTotalSize);
+                                     dataFrame1->size(), expectedTotalSize);
                 return false;
             }
             jsonData.assign(chunkData + headerSize, chunkData + headerSize + chunk->chunk_size);
@@ -351,11 +351,11 @@ bool AnariUsdClient::requestFileList(int32_t targetRank, FileListCallback callba
         }
 
         // Receive completion message — also filtered by request_id
-        std::vector<uint8_t> dummyDelim2, dataFrame2;
+        FrameMsg dummyDelim2, dataFrame2;
         if (!waitForMatchingFrames(myRequestId, timeoutMs, dummyDelim2, dataFrame2)) {
             MIDDLEWARE_LOG_ERROR("Timeout waiting for file list completion");
-        } else if (dataFrame2.size() >= sizeof(ZmqFileComplete)) {
-            const ZmqFileComplete* complete = reinterpret_cast<const ZmqFileComplete*>(dataFrame2.data());
+        } else if (dataFrame2->size() >= sizeof(ZmqFileComplete)) {
+            const ZmqFileComplete* complete = reinterpret_cast<const ZmqFileComplete*>(dataFrame2->data());
             if (complete->message_type != static_cast<uint32_t>(ZmqMessageType::RESP_FILE_COMPLETE)) {
                 MIDDLEWARE_LOG_WARNING("Expected RESP_FILE_COMPLETE after file list, got: %u",
                                       complete->message_type);
@@ -466,12 +466,12 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
             }
 
             // Receive chunk header (filtered by request_id)
-            std::vector<uint8_t> dummyDelim1, dataFrame1;
+            FrameMsg dummyDelim1, dataFrame1;
             if (!waitForMatchingFrames(broadcastRequestId, remainingTimeout, dummyDelim1, dataFrame1)) {
                 break; // timeout or shutdown
             }
 
-            size_t totalSize = dataFrame1.size();
+            size_t totalSize = dataFrame1->size();
             size_t headerSize = sizeof(ZmqFileChunk);
 
             if (totalSize < headerSize) {
@@ -480,7 +480,7 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
                 continue;
             }
 
-            const uint8_t* chunkData = dataFrame1.data();
+            const uint8_t* chunkData = static_cast<const uint8_t*>(dataFrame1->data());
             const ZmqFileChunk* chunk = reinterpret_cast<const ZmqFileChunk*>(chunkData);
 
             if (!MessageUtils::isValidMagic(chunk->magic)) {
@@ -560,11 +560,11 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
             }
 
             // Receive completion message (filtered by request_id)
-            std::vector<uint8_t> dummyDelim2, dataFrame2;
+            FrameMsg dummyDelim2, dataFrame2;
             if (!waitForMatchingFrames(broadcastRequestId, remainingTimeout, dummyDelim2, dataFrame2)) {
                 MIDDLEWARE_LOG_WARNING("Timeout waiting for completion from rank %d", chunk->source_rank);
-            } else if (dataFrame2.size() >= sizeof(ZmqFileComplete)) {
-                const ZmqFileComplete* complete = reinterpret_cast<const ZmqFileComplete*>(dataFrame2.data());
+            } else if (dataFrame2->size() >= sizeof(ZmqFileComplete)) {
+                const ZmqFileComplete* complete = reinterpret_cast<const ZmqFileComplete*>(dataFrame2->data());
                 if (complete->message_type != static_cast<uint32_t>(ZmqMessageType::RESP_FILE_COMPLETE)) {
                     MIDDLEWARE_LOG_WARNING("Expected RESP_FILE_COMPLETE after file list, got: %u",
                                           complete->message_type);
@@ -664,20 +664,20 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
                             uint32_t retryRequestId = request.request_id;
 
                             // Receive chunk header (filtered by request_id)
-                            std::vector<uint8_t> dummyDelim1, dataFrame1;
+                            FrameMsg dummyDelim1, dataFrame1;
                             if (!waitForMatchingFrames(retryRequestId, retryTimeout, dummyDelim1, dataFrame1)) {
                                 MIDDLEWARE_LOG_WARNING("Retry timeout for rank %d after %d ms", rank, retryTimeout);
                                 continue;
                             }
 
-                            size_t totalSize = dataFrame1.size();
+                            size_t totalSize = dataFrame1->size();
                             size_t headerSize = sizeof(ZmqFileChunk);
                             if (totalSize < headerSize) {
                                 MIDDLEWARE_LOG_ERROR("Retry response too small from rank %d: %zu bytes", rank, totalSize);
                                 continue;
                             }
 
-                            const uint8_t* msgData = dataFrame1.data();
+                            const uint8_t* msgData = static_cast<const uint8_t*>(dataFrame1->data());
                             const ZmqFileChunk* chunk = reinterpret_cast<const ZmqFileChunk*>(msgData);
 
                             if (!MessageUtils::isValidMagic(chunk->magic)) {
@@ -717,7 +717,7 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
                             }
 
                             // Clean up remaining completion message
-                            std::vector<uint8_t> dummyDelim2, dataFrame2;
+                            FrameMsg dummyDelim2, dataFrame2;
                             waitForMatchingFrames(retryRequestId, std::min(retryTimeout / 3, 2000), dummyDelim2, dataFrame2);
 
                             MIDDLEWARE_LOG_INFO("Retry successful for rank %d: got %zu files", rank, rankFiles.size());
@@ -812,7 +812,7 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
 
         while (!fileComplete && !shutdownRequested.load()) {
             // Receive delimiter + data frames, filtered by request_id
-            std::vector<uint8_t> dummyDelim, dataFrame;
+            FrameMsg dummyDelim, dataFrame;
             if (!waitForMatchingFrames(myRequestId, timeoutMs, dummyDelim, dataFrame)) {
                 MIDDLEWARE_LOG_ERROR("Timeout waiting for file chunk (request_id %u)", myRequestId);
                 if (errorCallback) {
@@ -821,15 +821,15 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
                 return false;
             }
 
-            if (dataFrame.size() < 8) {
-                MIDDLEWARE_LOG_ERROR("Data frame too small: %zu bytes", dataFrame.size());
+            if (dataFrame->size() < 8) {
+                MIDDLEWARE_LOG_ERROR("Data frame too small: %zu bytes", dataFrame->size());
                 continue; // skip malformed, try next
             }
 
-            const uint8_t* combinedData = dataFrame.data();
+            const uint8_t* combinedData = static_cast<const uint8_t*>(dataFrame->data());
             uint32_t magic = *reinterpret_cast<const uint32_t*>(combinedData);
             uint32_t messageType = *reinterpret_cast<const uint32_t*>(combinedData + 4);
-            size_t combinedSize = dataFrame.size();
+            size_t combinedSize = dataFrame->size();
 
             if (!MessageUtils::isValidMagic(magic)) {
                 MIDDLEWARE_LOG_ERROR("Invalid magic number in response: 0x%08X", magic);
@@ -850,14 +850,12 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
                                               chunk->chunk_size, dataSize);
                     }
 
-                    std::vector<uint8_t> chunkData;
-                    if (dataSize > 0) {
-                        chunkData.assign(combinedData + sizeof(ZmqFileChunk),
-                                         combinedData + sizeof(ZmqFileChunk) + dataSize);
-                    }
-
+                    // Zero-copy: hand the chunk payload straight from the
+                    // ZMQ buffer to the callback (no intermediate vector).
                     if (chunkCallback) {
-                        chunkCallback(chunk->getFilename(), chunkData, chunk->chunk_offset, chunk->file_size);
+                        chunkCallback(chunk->getFilename(),
+                                      combinedData + sizeof(ZmqFileChunk),
+                                      dataSize, chunk->chunk_offset, chunk->file_size);
                     }
 
                     connectionStats.totalBytesReceived.fetch_add(dataSize);
@@ -981,7 +979,7 @@ bool AnariUsdClient::requestFrame(int32_t frameNumber, int32_t targetRank,
         };
 
         while (!shutdownRequested.load()) {
-            std::vector<uint8_t> dummyDelim, dataFrame;
+            FrameMsg dummyDelim, dataFrame;
             if (!waitForMatchingFrames(myRequestId, timeoutMs, dummyDelim, dataFrame)) {
                 drain();
                 MIDDLEWARE_LOG_ERROR("Timeout waiting for frame data");
@@ -991,14 +989,14 @@ bool AnariUsdClient::requestFrame(int32_t frameNumber, int32_t targetRank,
                 return false;
             }
 
-            if (dataFrame.size() < 8) {
+            if (dataFrame->size() < 8) {
                 continue; // skip malformed frame
             }
 
-            const uint8_t* combinedData = dataFrame.data();
+            const uint8_t* combinedData = static_cast<const uint8_t*>(dataFrame->data());
             uint32_t magic = *reinterpret_cast<const uint32_t*>(combinedData);
             uint32_t messageType = *reinterpret_cast<const uint32_t*>(combinedData + 4);
-            size_t combinedSize = dataFrame.size();
+            size_t combinedSize = dataFrame->size();
 
             if (!MessageUtils::isValidMagic(magic)) {
                 MIDDLEWARE_LOG_ERROR("Invalid magic number in frame response: 0x%08X", magic);
@@ -1017,13 +1015,12 @@ bool AnariUsdClient::requestFrame(int32_t frameNumber, int32_t targetRank,
                         MIDDLEWARE_LOG_WARNING("Chunk size mismatch: header %u, data %zu",
                                                chunk->chunk_size, dataSize);
                     }
-                    std::vector<uint8_t> chunkData;
-                    if (dataSize > 0) {
-                        chunkData.assign(combinedData + sizeof(ZmqFileChunk),
-                                         combinedData + sizeof(ZmqFileChunk) + dataSize);
-                    }
+                    // Zero-copy: hand the chunk payload straight from the
+                    // ZMQ buffer to the callback (no intermediate vector).
                     if (chunkCallback) {
-                        chunkCallback(chunk->getFilename(), chunkData, chunk->chunk_offset, chunk->file_size);
+                        chunkCallback(chunk->getFilename(),
+                                      combinedData + sizeof(ZmqFileChunk),
+                                      dataSize, chunk->chunk_offset, chunk->file_size);
                     }
                     connectionStats.totalBytesReceived.fetch_add(dataSize);
                     break;
@@ -1104,13 +1101,13 @@ bool AnariUsdClient::getFileSync(const std::string& filename, int32_t targetRank
 
     FileData file;
     
-    auto chunkCallback = [&file](const std::string& fname, const std::vector<uint8_t>& chunk,
-                                  uint64_t offset, uint64_t totalSize) {
+    auto chunkCallback = [&file](const std::string& fname, const uint8_t* chunk,
+                                  size_t chunkSize, uint64_t offset, uint64_t totalSize) {
         file.totalSize = totalSize;
-        if (file.data.size() < offset + chunk.size()) {
-            file.data.resize(offset + chunk.size());
+        if (file.data.size() < offset + chunkSize) {
+            file.data.resize(offset + chunkSize);
         }
-        std::copy(chunk.begin(), chunk.end(), file.data.begin() + offset);
+        std::memcpy(file.data.data() + offset, chunk, chunkSize);
     };
 
     auto completeCallback = [&file](const std::string& fname, uint64_t totalSize) {
@@ -1245,7 +1242,7 @@ void AnariUsdClient::setNotificationCallback(NotificationCallback callback) {
     MIDDLEWARE_LOG_INFO("Notification callback %s", notificationCallback ? "registered" : "cleared");
 }
 
-void AnariUsdClient::handleNotification(const std::vector<uint8_t>& data) {
+void AnariUsdClient::handleNotification(const zmq::message_t& data) {
     if (data.size() < sizeof(ZmqFileNotification)) {
         MIDDLEWARE_LOG_WARNING("Notification message too small: %zu bytes", data.size());
         return;
@@ -1341,14 +1338,14 @@ bool AnariUsdClient::requestWorkerListString(std::vector<std::tuple<int32_t, std
         // The GET_WORKERS reply carries no ANARI magic/request_id, so it is routed
         // to the id==0 FIFO by enqueueResponseFrame (the dispatcher is still the
         // sole owner of the socket recv).
-        std::vector<uint8_t> dummyDelim, responseData;
+        FrameMsg dummyDelim, responseData;
         if (!waitForMatchingFrames(0, timeoutMs, dummyDelim, responseData)) {
             MIDDLEWARE_LOG_ERROR("Timeout waiting for worker list response");
             return false;
         }
 
         // Parse response: "WORKER_LIST|rank1:hostname1:ip1;rank2:hostname2:ip2;..."
-        std::string responseStr(reinterpret_cast<const char*>(responseData.data()), responseData.size());
+        std::string responseStr(reinterpret_cast<const char*>(responseData->data()), responseData->size());
         MIDDLEWARE_LOG_INFO("Received worker list response: %s", responseStr.c_str());
 
         // Check if response starts with "WORKER_LIST|"
@@ -1416,8 +1413,6 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
     }
 
     try {
-        MIDDLEWARE_LOG_INFO("=== REQUESTING WORKER COUNT USING ANARI-USD BINARY PROTOCOL ===");
-        
         // Create binary property request using ZmqFileRequest struct
         ZmqFileRequest request;
         request.magic = ANARI_USD_MAGIC;           // 0x55534446 ("USDF")
@@ -1426,27 +1421,10 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
         request.target_rank = -1;                  // Request from all ranks
         request.setFilename("totalWorkerCount");   // Use totalWorkerCount (includes rank 0) not workerCount (excludes rank 0)
         request.chunk_size = 0;                    // Not applicable for property requests
-        
-        MIDDLEWARE_LOG_INFO("DEBUG: Creating binary property request:");
-        MIDDLEWARE_LOG_INFO("  magic=0x%08x (ANARI_USD_MAGIC)", request.magic);
-        MIDDLEWARE_LOG_INFO("  message_type=%u (REQ_GET_PROPERTY)", request.message_type);
-        MIDDLEWARE_LOG_INFO("  request_id=%u", request.request_id);
-        MIDDLEWARE_LOG_INFO("  target_rank=%d (broadcast to all ranks)", request.target_rank);
-        
-        // CRITICAL DEBUG: Log the actual filename buffer content
-        std::string actualFilename = request.getFilename();
-        MIDDLEWARE_LOG_INFO("  property='%s' (length=%zu)", actualFilename.c_str(), actualFilename.length());
-        
-        // Also log raw buffer to check for null termination issues
-        MIDDLEWARE_LOG_INFO("  raw filename buffer (first 32 chars):");
-        for (int i = 0; i < 32 && i < 256; i++) {
-            char c = request.filename[i];
-            if (c == 0) break;
-            MIDDLEWARE_LOG_INFO("    [%d] = '%c' (0x%02x)", i, c, (unsigned char)c);
-        }
-        
-        MIDDLEWARE_LOG_INFO("  chunk_size=%u", request.chunk_size);
-        
+
+        MIDDLEWARE_LOG_DEBUG("Requesting worker count via binary property 'totalWorkerCount' (request_id: %u)",
+                             request.request_id);
+
         // ✅ FIX: Removed outer requestMutex lock - sendRequest() handles its own locking
 
         // Send binary struct (276 bytes) using existing sendRequest method
@@ -1458,7 +1436,7 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
         connectionStats.totalRequestsSent.fetch_add(1);
 
         // Receive binary property response (filtered by request_id)
-        std::vector<uint8_t> dummyDelim, dataFrame;
+        FrameMsg dummyDelim, dataFrame;
         uint32_t workerCountRequestId = request.request_id;
         if (!waitForMatchingFrames(workerCountRequestId, timeoutMs, dummyDelim, dataFrame)) {
             MIDDLEWARE_LOG_ERROR("Timeout waiting for property response");
@@ -1466,23 +1444,18 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
         }
 
         // Validate response size
-        size_t responseSize = dataFrame.size();
+        size_t responseSize = dataFrame->size();
         if (responseSize < sizeof(ZmqPropertyResponse)) {
             MIDDLEWARE_LOG_ERROR("Property response too small: %zu bytes (expected at least %zu)",
-                                responseSize, sizeof(ZmqPropertyResponse));
+                                 responseSize, sizeof(ZmqPropertyResponse));
             return false;
         }
 
         // Parse binary property response
-        const ZmqPropertyResponse* response = reinterpret_cast<const ZmqPropertyResponse*>(dataFrame.data());
-        
-        MIDDLEWARE_LOG_INFO("DEBUG: Received binary property response:");
-        MIDDLEWARE_LOG_INFO("  responseSize=%zu bytes", responseSize);
-        MIDDLEWARE_LOG_INFO("  response->magic=0x%08x", response->magic);
-        MIDDLEWARE_LOG_INFO("  response->message_type=%u", response->message_type);
-        MIDDLEWARE_LOG_INFO("  response->request_id=%u", response->request_id);
-        MIDDLEWARE_LOG_INFO("  response->property_type=%d", response->property_type);
-        MIDDLEWARE_LOG_INFO("  response->int_value=%lld", response->int_value);
+        const ZmqPropertyResponse* response = reinterpret_cast<const ZmqPropertyResponse*>(dataFrame->data());
+        MIDDLEWARE_LOG_DEBUG("DEBUG: Received binary property response: magic=0x%08x type=%u id=%u prop=%d int=%lld",
+                             response->magic, response->message_type, response->request_id,
+                             response->property_type, response->int_value);
         
         // Validate response
         if (!MessageUtils::isValidMagic(response->magic)) {
@@ -1514,10 +1487,7 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
 
         // Get worker count from int_value field
         uint32_t totalWorkers = static_cast<uint32_t>(response->int_value);
-        
-        MIDDLEWARE_LOG_INFO("DEBUG: Parsed worker count: totalWorkers=%u", totalWorkers);
-        MIDDLEWARE_LOG_INFO("Received property response: worker_count=%u, property_type=%d",
-                           totalWorkers, response->property_type);
+        MIDDLEWARE_LOG_DEBUG("Parsed worker count: totalWorkers=%u", totalWorkers);
 
         // Trigger callback
         if (callback) {
@@ -1575,7 +1545,7 @@ bool AnariUsdClient::requestWorkerStatus(int32_t targetRank, WorkerStatusCallbac
         connectionStats.totalRequestsSent.fetch_add(1);
 
         // Receive property response (filtered by request_id)
-        std::vector<uint8_t> dummyDelim, dataFrame;
+        FrameMsg dummyDelim, dataFrame;
         uint32_t workerStatusRequestId = request.request_id;
         if (!waitForMatchingFrames(workerStatusRequestId, timeoutMs, dummyDelim, dataFrame)) {
             MIDDLEWARE_LOG_ERROR("Timeout waiting for worker status property response");
@@ -1583,15 +1553,15 @@ bool AnariUsdClient::requestWorkerStatus(int32_t targetRank, WorkerStatusCallbac
         }
 
         // Validate response size
-        size_t responseSize = dataFrame.size();
+        size_t responseSize = dataFrame->size();
         if (responseSize < sizeof(ZmqPropertyResponse)) {
             MIDDLEWARE_LOG_ERROR("Property response too small: %zu bytes (expected at least %zu)",
-                                responseSize, sizeof(ZmqPropertyResponse));
+                                 responseSize, sizeof(ZmqPropertyResponse));
             return false;
         }
 
         // Parse property response
-        const ZmqPropertyResponse* response = reinterpret_cast<const ZmqPropertyResponse*>(dataFrame.data());
+        const ZmqPropertyResponse* response = reinterpret_cast<const ZmqPropertyResponse*>(dataFrame->data());
         
         // Validate response
         if (!MessageUtils::isValidMagic(response->magic)) {
@@ -1734,14 +1704,14 @@ bool AnariUsdClient::getWorkerStatusSync(int32_t targetRank,
 }
 
 bool AnariUsdClient::getTotalWorkerCountSync(uint32_t& totalCount, int timeoutMs) {
-    MIDDLEWARE_LOG_INFO("=== getTotalWorkerCountSync ENTERED (timeout=%d ms) ===", timeoutMs);
+    MIDDLEWARE_LOG_DEBUG("=== getTotalWorkerCountSync ENTERED (timeout=%d ms) ===", timeoutMs);
     
     // Use binary protocol instead of legacy string protocol
     std::promise<uint32_t> promise;
     std::future<uint32_t> future = promise.get_future();
     
     bool success = requestWorkerCount([&promise](uint32_t count) {
-        MIDDLEWARE_LOG_INFO("DEBUG: Worker count callback received: count=%u", count);
+        MIDDLEWARE_LOG_DEBUG("Worker count callback received: count=%u", count);
         promise.set_value(count);
     }, timeoutMs);
     
@@ -1758,7 +1728,7 @@ bool AnariUsdClient::getTotalWorkerCountSync(uint32_t& totalCount, int timeoutMs
     }
     
     totalCount = future.get();
-    MIDDLEWARE_LOG_INFO("=== getTotalWorkerCountSync COMPLETE: totalCount=%u ===", totalCount);
+    MIDDLEWARE_LOG_DEBUG("=== getTotalWorkerCountSync COMPLETE: totalCount=%u ===", totalCount);
     return true;
 }
 
@@ -1852,14 +1822,14 @@ bool AnariUsdClient::requestFilesParallel(
         
         // Define callbacks (same pattern as getFileSync)
         // Use explicit std::function to ensure proper type conversion
-        std::function<void(const std::string&, const std::vector<uint8_t>&, uint64_t, uint64_t)> chunk_callback = 
-            [file_state](const std::string& fname, const std::vector<uint8_t>& chunk,
+        std::function<void(const std::string&, const uint8_t*, size_t, uint64_t, uint64_t)> chunk_callback = 
+            [file_state](const std::string& fname, const uint8_t* chunk, size_t chunkSize,
                         uint64_t offset, uint64_t total_size) {
                 file_state->total_size = total_size;
-                if (file_state->data.size() < offset + chunk.size()) {
-                    file_state->data.resize(offset + chunk.size());
+                if (file_state->data.size() < offset + chunkSize) {
+                    file_state->data.resize(offset + chunkSize);
                 }
-                std::copy(chunk.begin(), chunk.end(), file_state->data.begin() + offset);
+                std::memcpy(file_state->data.data() + offset, chunk, chunkSize);
             };
         
         std::function<void(const std::string&, uint64_t)> complete_callback = 
@@ -1990,17 +1960,9 @@ void AnariUsdClient::dispatcherThread() {
                 if (!dataRes) continue;
             }
 
-            // Copy out of ZMQ messages
-            std::vector<uint8_t> delimiterFrame(delimMsg.size());
-            if (delimMsg.size()) {
-                std::memcpy(delimiterFrame.data(), delimMsg.data(), delimMsg.size());
-            }
-            std::vector<uint8_t> dataFrame(dataMsg.size());
-            if (dataMsg.size()) {
-                std::memcpy(dataFrame.data(), dataMsg.data(), dataMsg.size());
-            }
-
-            enqueueResponseFrame(delimiterFrame, dataFrame);
+            // Zero-copy: move the received ZMQ buffers straight into the
+            // response index (previously two full memcpys per message here).
+            enqueueResponseFrame(std::move(delimMsg), std::move(dataMsg));
 
         } catch (const zmq::error_t& e) {
             if (e.num() != EINVAL) { // EINVAL = context terminated on purpose
@@ -2019,8 +1981,8 @@ void AnariUsdClient::dispatcherThread() {
 // enqueueResponseFrame — called ONLY by dispatcher thread
 // ---------------------------------------------------------------------------
 
-void AnariUsdClient::enqueueResponseFrame(const std::vector<uint8_t>& delimiter,
-                                            const std::vector<uint8_t>& data) {
+void AnariUsdClient::enqueueResponseFrame(zmq::message_t delimiter,
+                                            zmq::message_t data) {
     // Check if this is a notification message (NOTIFY_FILE_UPDATE=300 or NOTIFY_COMMIT_COMPLETE=301)
     // Notifications have no request_id and would never be matched by waiting threads
     if (data.size() >= 8) {
@@ -2033,11 +1995,11 @@ void AnariUsdClient::enqueueResponseFrame(const std::vector<uint8_t>& delimiter,
     }
 
     // Extract the request_id BEFORE moving `data` (move leaves it empty).
-    const uint32_t requestId = extractRequestId(data.data(), data.size());
+    const uint32_t requestId = extractRequestId(static_cast<const uint8_t*>(data.data()), data.size());
 
     auto entry = std::make_shared<FramePair>(
-        std::move(const_cast<std::vector<uint8_t>&>(delimiter)),
-        std::move(const_cast<std::vector<uint8_t>&>(data)));
+        std::make_shared<zmq::message_t>(std::move(delimiter)),
+        std::make_shared<zmq::message_t>(std::move(data)));
 
     {
         std::lock_guard<std::mutex> lock(responseQueueMutex);
@@ -2070,15 +2032,15 @@ void AnariUsdClient::enqueueResponseFrame(const std::vector<uint8_t>& delimiter,
 // ---------------------------------------------------------------------------
 
 bool AnariUsdClient::tryDequeueMatching(uint32_t requestId,
-                                        std::vector<uint8_t>& outDelimiter,
-                                        std::vector<uint8_t>& outData) {
+                                        FrameMsg& outDelimiter,
+                                        FrameMsg& outData) {
     std::lock_guard<std::mutex> lock(responseQueueMutex);
     return tryDequeueMatchingLocked(requestId, outDelimiter, outData);
 }
 
 bool AnariUsdClient::tryDequeueMatchingLocked(uint32_t requestId,
-                                              std::vector<uint8_t>& outDelimiter,
-                                              std::vector<uint8_t>& outData) {
+                                              FrameMsg& outDelimiter,
+                                              FrameMsg& outData) {
     FramePairPtr entry;
     if (requestId == 0) {
         if (!noIdResponseQueue.empty()) {
@@ -2110,8 +2072,8 @@ bool AnariUsdClient::tryDequeueMatchingLocked(uint32_t requestId,
 // ---------------------------------------------------------------------------
 
 bool AnariUsdClient::waitForMatchingFrames(uint32_t requestId, int timeoutMs,
-                                            std::vector<uint8_t>& outDelimiter,
-                                            std::vector<uint8_t>& outData) {
+                                            FrameMsg& outDelimiter,
+                                            FrameMsg& outData) {
     // Fast path: frame already in the index
     if (tryDequeueMatching(requestId, outDelimiter, outData)) return true;
 

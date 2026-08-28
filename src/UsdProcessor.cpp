@@ -576,6 +576,14 @@ private:
 public:
     std::atomic<size_t> memoryLimitBytes{std::numeric_limits<int64_t>::max()}; // unlimited, synced by setMemoryLimit
     std::vector<std::string> extractClipsFromString(std::string_view content);
+
+    // Per-file cache of the (name, type) that yielded vertex colors for a
+    // previous mesh in the same file: meshes inside one USD file are usually
+    // homogeneous, so later meshes skip the multi-name x multi-type probe.
+    // Cleared at the start of every LoadUSDBufferFromRaw.
+    // type: 0 = color4f[], 1 = color3f[]
+    std::string colorCacheName;
+    int colorCacheType = -1;
 };
 
 // Enhanced MeshData validation methods
@@ -910,6 +918,11 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
         outPointCloudData->clear();
     }
 
+    // The UsdProcessor instance is thread_local and reused across files:
+    // invalidate the per-file vertex-color probe cache.
+    pImpl->colorCacheName.clear();
+    pImpl->colorCacheType = -1;
+
     // Validate inputs
     if (buffer_size == 0) {
         MIDDLEWARE_LOG_ERROR("Cannot load USD from empty buffer");
@@ -943,7 +956,10 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
         // (the single C API choke point every parse path funnels through).
         const uint8_t* wirePtr = buffer;
         size_t wireSize = buffer_size;
-        std::vector<uint8_t> decompressed;  // allocated only for zstd payloads
+        // Reused across parses on this thread: keeps the (large) decompressed
+        // allocation and its capacity alive instead of paying for a fresh heap
+        // round-trip on every file.
+        static thread_local std::vector<uint8_t> decompressed;
 #if defined(JUSYNC_HAS_ZSTD)
         // Explicit byte compare (not an endianness-dependent uint32_t compare):
         // zstd frames begin with 28 B5 2F FD on the wire.
@@ -1058,8 +1074,11 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
         // Kept at function scope so it stays alive for the whole parse + reference
         // resolution pass; when not needed it is empty and parsePtr points at the
         // caller's original buffer (the true zero-copy path).
-        std::string content;
-        std::string fixedContent; // holds fixed content for clip extraction
+        // thread_local: the transformed text buffer is large and only needed for
+        // files that actually contain a rewrite-forcing token, so reusing the
+        // allocation across parses on the same thread avoids a per-file realloc.
+        static thread_local std::string content;
+        static thread_local std::string fixedContent; // holds fixed content for clip extraction
 
         const uint8_t* parsePtr = wirePtr;
         size_t parseSize = wireSize;
@@ -1621,8 +1640,17 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         }
 
 
-        // Extract points with validation
-        auto points = geomMesh->get_points();
+        // Extract points with validation.
+        // Zero-copy fast path: a static (non-timesampled) `points` attribute is
+        // read straight from tinyusdz's internal storage; only timesampled or
+        // connected attributes fall back to the by-value copy.
+        const std::vector<tinyusdz::value::point3f>* pointsPtr = geomMesh->get_points_ptr();
+        std::vector<tinyusdz::value::point3f> pointsCopy;
+        if (!pointsPtr) {
+            pointsCopy = geomMesh->get_points();
+            pointsPtr = &pointsCopy;
+        }
+        const auto& points = *pointsPtr;
         if (points.empty()) {
             MIDDLEWARE_LOG_WARNING("Mesh has no points: %s", outMeshData.elementName.c_str());
             return false;
@@ -1642,75 +1670,114 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         // Start timing for performance measurement
         auto vertexStartTime = std::chrono::high_resolution_clock::now();
 
-        // Transform and validate points with GPU acceleration and CPU fallback
-#ifdef ENABLE_CUDA_ACCELERATION
-        pImpl->transformVerticesWithGpu(points, worldTransform, outMeshData.points);
-#else
-        outMeshData.points.clear();
-        outMeshData.points.resize(points.size());  // Pre-allocate exact size
-        
-        // Extract matrix components for faster access
-        const float* m = &worldTransform[0][0];
-        
-        // Helper lambda for vertex transformation
-        auto transformVertex = [m](const tinyusdz::value::point3f& pt) -> glm::vec3 {
-            const float x = static_cast<float>(pt.x);
-            const float y = static_cast<float>(pt.y);
-            const float z = static_cast<float>(pt.z);
-            
-            // Fast NaN/Inf check using integer representation
-            const int32_t* ix = reinterpret_cast<const int32_t*>(&x);
-            const int32_t* iy = reinterpret_cast<const int32_t*>(&y);
-            const int32_t* iz = reinterpret_cast<const int32_t*>(&z);
-            
-            // Check if any component is NaN or Inf (exponent bits all 1s)
-            if ((*ix & 0x7F800000) == 0x7F800000 ||
-                (*iy & 0x7F800000) == 0x7F800000 ||
-                (*iz & 0x7F800000) == 0x7F800000) {
-                return glm::vec3(0.0f, 0.0f, 0.0f);
-            }
-
-            // Manual matrix multiplication - optimized
-            const float tx = m[0] * x + m[4] * y + m[8] * z + m[12];
-            const float ty = m[1] * x + m[5] * y + m[9] * z + m[13];
-            const float tz = m[2] * x + m[6] * y + m[10] * z + m[14];
-            
-            // Fast validation of transformed vertex
-            const int32_t* itx = reinterpret_cast<const int32_t*>(&tx);
-            const int32_t* ity = reinterpret_cast<const int32_t*>(&ty);
-            const int32_t* itz = reinterpret_cast<const int32_t*>(&tz);
-            
-            if ((*itx & 0x7F800000) == 0x7F800000 ||
-                (*ity & 0x7F800000) == 0x7F800000 ||
-                (*itz & 0x7F800000) == 0x7F800000) {
-                return glm::vec3(x, y, z);
-            }
-            
-            return glm::vec3(tx, ty, tz);
+        // Fast NaN/Inf test via raw bits (exponent all set)
+        auto isFiniteFloat = [](float v) -> bool {
+            const int32_t* i = reinterpret_cast<const int32_t*>(&v);
+            return (*i & 0x7F800000) != 0x7F800000;
         };
-        
-        // PARALLEL vertex processing using std::transform
-        std::transform(PAR_POLICY
-                      points.begin(), points.end(),
-                      outMeshData.points.begin(),
-                      transformVertex);
+        auto point3fFinite = [isFiniteFloat](const tinyusdz::value::point3f& p) -> bool {
+            return isFiniteFloat(p.x) && isFiniteFloat(p.y) && isFiniteFloat(p.z);
+        };
+
+        // Transform and validate points. In the common case the world transform
+        // is identity, and value::point3f and glm::vec3 are layout-compatible
+        // float[3]s — the whole array is then a single memcpy plus a parallel
+        // non-finite scan (zeroing the rare bad vertices) instead of per-vertex
+        // matrix math.
+        const bool identityTransform =
+            worldTransform[0][0] == 1.0f && worldTransform[0][1] == 0.0f &&
+            worldTransform[0][2] == 0.0f && worldTransform[0][3] == 0.0f &&
+            worldTransform[1][0] == 0.0f && worldTransform[1][1] == 1.0f &&
+            worldTransform[1][2] == 0.0f && worldTransform[1][3] == 0.0f &&
+            worldTransform[2][0] == 0.0f && worldTransform[2][1] == 0.0f &&
+            worldTransform[2][2] == 1.0f && worldTransform[2][3] == 0.0f &&
+            worldTransform[3][0] == 0.0f && worldTransform[3][1] == 0.0f &&
+            worldTransform[3][2] == 0.0f && worldTransform[3][3] == 1.0f;
+
+        std::atomic<size_t> nonFiniteCount{0};
+
+        if (identityTransform) {
+            outMeshData.points.resize(points.size());
+            std::memcpy(outMeshData.points.data(), points.data(),
+                        points.size() * sizeof(tinyusdz::value::point3f));
+            const size_t n = points.size();
+            const auto* src = points.data();
+            nonFiniteCount = std::count_if(PAR_POLICY
+                src, src + n,
+                [point3fFinite](const tinyusdz::value::point3f& p) { return !point3fFinite(p); });
+            if (nonFiniteCount > 0) {
+                auto* dst = outMeshData.points.data();
+                for (size_t i = 0; i < n; ++i) {
+                    if (!point3fFinite(src[i])) {
+                        dst[i] = glm::vec3(0.0f, 0.0f, 0.0f);
+                    }
+                }
+            }
+        } else {
+#ifdef ENABLE_CUDA_ACCELERATION
+            pImpl->transformVerticesWithGpu(points, worldTransform, outMeshData.points);
+            nonFiniteCount = std::count_if(PAR_POLICY
+                outMeshData.points.begin(), outMeshData.points.end(),
+                [isFiniteFloat](const glm::vec3& v) {
+                    return !isFiniteFloat(v.x) || !isFiniteFloat(v.y) || !isFiniteFloat(v.z);
+                });
+#else
+            outMeshData.points.clear();
+            outMeshData.points.resize(points.size());  // Pre-allocate exact size
+
+            // Extract matrix components for faster access
+            const float* m = &worldTransform[0][0];
+
+            // Helper lambda for vertex transformation
+            auto transformVertex = [m, &nonFiniteCount](const tinyusdz::value::point3f& pt) -> glm::vec3 {
+                const float x = static_cast<float>(pt.x);
+                const float y = static_cast<float>(pt.y);
+                const float z = static_cast<float>(pt.z);
+
+                // Fast NaN/Inf check using integer representation
+                const int32_t* ix = reinterpret_cast<const int32_t*>(&x);
+                const int32_t* iy = reinterpret_cast<const int32_t*>(&y);
+                const int32_t* iz = reinterpret_cast<const int32_t*>(&z);
+
+                // Check if any component is NaN or Inf (exponent bits all 1s)
+                if ((*ix & 0x7F800000) == 0x7F800000 ||
+                    (*iy & 0x7F800000) == 0x7F800000 ||
+                    (*iz & 0x7F800000) == 0x7F800000) {
+                    nonFiniteCount.fetch_add(1, std::memory_order_relaxed);
+                    return glm::vec3(0.0f, 0.0f, 0.0f);
+                }
+
+                // Manual matrix multiplication - optimized
+                const float tx = m[0] * x + m[4] * y + m[8] * z + m[12];
+                const float ty = m[1] * x + m[5] * y + m[9] * z + m[13];
+                const float tz = m[2] * x + m[6] * y + m[10] * z + m[14];
+
+                // Fast validation of transformed vertex
+                const int32_t* itx = reinterpret_cast<const int32_t*>(&tx);
+                const int32_t* ity = reinterpret_cast<const int32_t*>(&ty);
+                const int32_t* itz = reinterpret_cast<const int32_t*>(&tz);
+
+                if ((*itx & 0x7F800000) == 0x7F800000 ||
+                    (*ity & 0x7F800000) == 0x7F800000 ||
+                    (*itz & 0x7F800000) == 0x7F800000) {
+                    nonFiniteCount.fetch_add(1, std::memory_order_relaxed);
+                    return glm::vec3(x, y, z);
+                }
+
+                return glm::vec3(tx, ty, tz);
+            };
+
+            // PARALLEL vertex processing using std::transform
+            std::transform(PAR_POLICY
+                          points.begin(), points.end(),
+                          outMeshData.points.begin(),
+                          transformVertex);
 #endif
-        
-        // Count non-finite vertices for logging
-        size_t nonFiniteCount = std::count_if(PAR_POLICY
-                                            outMeshData.points.begin(),
-                                            outMeshData.points.end(),
-                                            [](const glm::vec3& v) {
-                                                const int32_t* ix = reinterpret_cast<const int32_t*>(&v.x);
-                                                const int32_t* iy = reinterpret_cast<const int32_t*>(&v.y);
-                                                const int32_t* iz = reinterpret_cast<const int32_t*>(&v.z);
-                                                return (*ix & 0x7F800000) == 0x7F800000 ||
-                                                       (*iy & 0x7F800000) == 0x7F800000 ||
-                                                       (*iz & 0x7F800000) == 0x7F800000;
-                                            });
-        
-        if (nonFiniteCount > 0) {
-            MIDDLEWARE_LOG_WARNING("%zu non-finite vertices detected and zeroed", nonFiniteCount);
+        }
+
+        const size_t nonFiniteDetected = nonFiniteCount.load(std::memory_order_relaxed);
+        if (nonFiniteDetected > 0) {
+            MIDDLEWARE_LOG_WARNING("%zu non-finite vertices detected and zeroed", nonFiniteDetected);
         }
         
         // Log performance metrics
@@ -1729,14 +1796,28 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             return false;
         }
 
-        // Extract and triangulate faces
-        auto faceVertexCounts = geomMesh->get_faceVertexCounts();
-        auto faceVertexIndices = geomMesh->get_faceVertexIndices();
+        // Extract and triangulate faces (zero-copy fast path, copy fallback)
+        const std::vector<int32_t>* fvcPtr = geomMesh->get_faceVertexCounts_ptr();
+        std::vector<int32_t> fvcCopy;
+        if (!fvcPtr) {
+            fvcCopy = geomMesh->get_faceVertexCounts();
+            fvcPtr = &fvcCopy;
+        }
+        const auto& faceVertexCounts = *fvcPtr;
 
-        outMeshData.faceVertexCounts.clear();
-        outMeshData.faceVertexCounts.reserve(faceVertexCounts.size());
-        for (const auto& count : faceVertexCounts) {
-            outMeshData.faceVertexCounts.push_back(static_cast<uint32_t>(count));
+        const std::vector<int32_t>* fviPtr = geomMesh->get_faceVertexIndices_ptr();
+        std::vector<int32_t> fviCopy;
+        if (!fviPtr) {
+            fviCopy = geomMesh->get_faceVertexIndices();
+            fviPtr = &fviCopy;
+        }
+        const auto& faceVertexIndices = *fviPtr;
+
+        // int32 -> uint32 is bit-identical (two's complement): a memcpy
+        outMeshData.faceVertexCounts.resize(faceVertexCounts.size());
+        if (!faceVertexCounts.empty()) {
+            std::memcpy(outMeshData.faceVertexCounts.data(), faceVertexCounts.data(),
+                        faceVertexCounts.size() * sizeof(uint32_t));
         }
 
         bool bHasFaces = !faceVertexCounts.empty() && !faceVertexIndices.empty();
@@ -1786,8 +1867,14 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             outMeshData.indices = std::move(finalIndices);
         }
 
-        // Extract normals
-        auto normals = geomMesh->get_normals();
+        // Extract normals (zero-copy fast path, copy fallback)
+        const std::vector<tinyusdz::value::normal3f>* normalsPtr = geomMesh->get_normals_ptr();
+        std::vector<tinyusdz::value::normal3f> normalsCopy;
+        if (!normalsPtr) {
+            normalsCopy = geomMesh->get_normals();
+            normalsPtr = &normalsCopy;
+        }
+        const auto& normals = *normalsPtr;
         if (!normals.empty()) {
             if (normals.size() != points.size()) {
                 MIDDLEWARE_LOG_WARNING("Normal count (%zu) doesn't match vertex count (%zu)",
@@ -1891,123 +1978,203 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
     try {
         // Clear any existing vertex colors
         meshData.vertex_colors.clear();
-
-        // Try to get vertex colors from primvars:color
-        tinyusdz::GeomPrimvar colorPrimvar;
-        std::string primvarErr;
-
-        // Try different color attribute names
+        // Try to get vertex colors from primvars:color.
+        //
+        // Zero-copy fast path: locate the primvar's Attribute directly in the
+        // prim's property storage and read the typed array in place. The
+        // non-strict as_ptr() also matches raw float3[]/float4[] payloads (the
+        // old code probed those types separately). Bare names only: both
+        // find_attr_ptr() and the legacy get_primvar() prepend "primvars:"
+        // themselves.
         const std::vector<std::string> colorNames = {
-            "primvars:color", "color", "primvars:displayColor", "displayColor",
-            "primvars:Cd", "Cd"  // Common in Houdini/Maya
+            "color", "displayColor", "Cd"  // Common in Houdini/Maya
+        };
+
+        auto isIndexedPrimvar = [mesh](const std::string& bareName) -> bool {
+            return mesh->props.count("primvars:" + bareName + ":indices") > 0;
         };
 
         bool foundColors = false;
-        for (const auto& name : colorNames) {
-            if (mesh->get_primvar(name, &colorPrimvar, &primvarErr)) {
-                // Try to get color values as different types
-                std::vector<tinyusdz::value::color3f> color3fValues;
-                std::vector<tinyusdz::value::color4f> color4fValues;
-                std::vector<tinyusdz::value::float3> float3Values;
-                std::vector<tinyusdz::value::float4> float4Values;
+        const tinyusdz::Attribute* colorAttr = nullptr;
+        int colorType = -1;  // 0 = color4f[], 1 = color3f[]
 
-                // Try color4f first (RGBA)
-                if (colorPrimvar.get_value(&color4fValues)) {
-                    MIDDLEWARE_LOG_DEBUG("Found %zu RGBA vertex colors in primvar: %s",
-                                       color4fValues.size(), name.c_str());
-
-                    meshData.vertex_colors.reserve(color4fValues.size());
-                    for (const auto& color : color4fValues) {
-                        // Validate color values
-                        if (std::isfinite(color.r) && std::isfinite(color.g) &&
-                            std::isfinite(color.b) && std::isfinite(color.a)) {
-                            meshData.vertex_colors.push_back(glm::vec4(
-                                static_cast<float>(color.r),
-                                static_cast<float>(color.g),
-                                static_cast<float>(color.b),
-                                static_cast<float>(color.a)
-                            ));
-                        } else {
-                            // Default white color for invalid values
-                            meshData.vertex_colors.push_back(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+        // 1) Try the (name, type) cached from a previous mesh in this file
+        if (!pImpl->colorCacheName.empty()) {
+            if (const tinyusdz::Attribute* a = mesh->find_attr_ptr(pImpl->colorCacheName)) {
+                if (!a->is_blocked() && !a->is_connection() &&
+                    !isIndexedPrimvar(pImpl->colorCacheName)) {
+                    if (pImpl->colorCacheType == 0) {
+                        if (a->get_var().as_ptr<std::vector<tinyusdz::value::color4f>>()) {
+                            colorAttr = a; colorType = 0;
+                        }
+                    } else if (pImpl->colorCacheType == 1) {
+                        if (a->get_var().as_ptr<std::vector<tinyusdz::value::color3f>>()) {
+                            colorAttr = a; colorType = 1;
                         }
                     }
-                    foundColors = true;
+                }
+            }
+        }
+
+        // 2) Otherwise probe the known names
+        if (!colorAttr) {
+            for (const auto& name : colorNames) {
+                const tinyusdz::Attribute* a = mesh->find_attr_ptr(name);
+                if (!a || a->is_blocked() || a->is_connection() || isIndexedPrimvar(name)) {
+                    continue;
+                }
+                if (a->get_var().as_ptr<std::vector<tinyusdz::value::color4f>>()) {
+                    colorAttr = a; colorType = 0;
+                    pImpl->colorCacheName = name; pImpl->colorCacheType = 0;
                     break;
                 }
-                // Try color3f (RGB, add alpha)
-                else if (colorPrimvar.get_value(&color3fValues)) {
-                    MIDDLEWARE_LOG_DEBUG("Found %zu RGB vertex colors in primvar: %s",
-                                       color3fValues.size(), name.c_str());
-
-                    meshData.vertex_colors.reserve(color3fValues.size());
-                    for (const auto& color : color3fValues) {
-                        // Validate color values
-                        if (std::isfinite(color.r) && std::isfinite(color.g) && std::isfinite(color.b)) {
-                            meshData.vertex_colors.push_back(glm::vec4(
-                                static_cast<float>(color.r),
-                                static_cast<float>(color.g),
-                                static_cast<float>(color.b),
-                                1.0f  // Default alpha
-                            ));
-                        } else {
-                            // Default white color for invalid values
-                            meshData.vertex_colors.push_back(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
-                        }
-                    }
-                    foundColors = true;
-                    break;
-                }
-                // Try float4 (generic RGBA)
-                else if (colorPrimvar.get_value(&float4Values)) {
-                    MIDDLEWARE_LOG_DEBUG("Found %zu float4 vertex colors in primvar: %s",
-                                       float4Values.size(), name.c_str());
-
-                    meshData.vertex_colors.reserve(float4Values.size());
-                    for (const auto& color : float4Values) {
-                        // Validate color values
-                        if (std::isfinite(color[0]) && std::isfinite(color[1]) &&
-                            std::isfinite(color[2]) && std::isfinite(color[3])) {
-                            meshData.vertex_colors.push_back(glm::vec4(
-                                static_cast<float>(color[0]),
-                                static_cast<float>(color[1]),
-                                static_cast<float>(color[2]),
-                                static_cast<float>(color[3])
-                            ));
-                        } else {
-                            // Default white color for invalid values
-                            meshData.vertex_colors.push_back(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
-                        }
-                    }
-                    foundColors = true;
-                    break;
-                }
-                // Try float3 (generic RGB)
-                else if (colorPrimvar.get_value(&float3Values)) {
-                    MIDDLEWARE_LOG_DEBUG("Found %zu float3 vertex colors in primvar: %s",
-                                       float3Values.size(), name.c_str());
-
-                    meshData.vertex_colors.reserve(float3Values.size());
-                    for (const auto& color : float3Values) {
-                        // Validate color values
-                        if (std::isfinite(color[0]) && std::isfinite(color[1]) && std::isfinite(color[2])) {
-                            meshData.vertex_colors.push_back(glm::vec4(
-                                static_cast<float>(color[0]),
-                                static_cast<float>(color[1]),
-                                static_cast<float>(color[2]),
-                                1.0f  // Default alpha
-                            ));
-                        } else {
-                            // Default white color for invalid values
-                            meshData.vertex_colors.push_back(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
-                        }
-                    }
-                    foundColors = true;
+                if (a->get_var().as_ptr<std::vector<tinyusdz::value::color3f>>()) {
+                    colorAttr = a; colorType = 1;
+                    pImpl->colorCacheName = name; pImpl->colorCacheType = 1;
                     break;
                 }
             }
         }
 
+        if (colorAttr) {
+            if (colorType == 0) {
+                const auto* src = colorAttr->get_var().as_ptr<std::vector<tinyusdz::value::color4f>>();
+                MIDDLEWARE_LOG_DEBUG("Found %zu RGBA vertex colors (zero-copy)", src->size());
+                meshData.vertex_colors.resize(src->size());
+                for (size_t i = 0; i < src->size(); ++i) {
+                    const auto& c = (*src)[i];
+                    if (std::isfinite(c.r) && std::isfinite(c.g) &&
+                        std::isfinite(c.b) && std::isfinite(c.a)) {
+                        meshData.vertex_colors[i] = glm::vec4(
+                            static_cast<float>(c.r),
+                            static_cast<float>(c.g),
+                            static_cast<float>(c.b),
+                            static_cast<float>(c.a)
+                        );
+                    } else {
+                        // Default white color for invalid values
+                        meshData.vertex_colors[i] = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+                    }
+                }
+            } else {
+                const auto* src = colorAttr->get_var().as_ptr<std::vector<tinyusdz::value::color3f>>();
+                MIDDLEWARE_LOG_DEBUG("Found %zu RGB vertex colors (zero-copy)", src->size());
+                meshData.vertex_colors.resize(src->size());
+                for (size_t i = 0; i < src->size(); ++i) {
+                    const auto& c = (*src)[i];
+                    if (std::isfinite(c.r) && std::isfinite(c.g) && std::isfinite(c.b)) {
+                        meshData.vertex_colors[i] = glm::vec4(
+                            static_cast<float>(c.r),
+                            static_cast<float>(c.g),
+                            static_cast<float>(c.b),
+                            1.0f  // Default alpha
+                        );
+                    } else {
+                        // Default white color for invalid values
+                        meshData.vertex_colors[i] = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+                    }
+                }
+            }
+            foundColors = true;
+        } else {
+            // 3) Legacy fallback (indexed/timesampled/unusual types): the
+            //    old GeomPrimvar copy path, kept for exact behavior parity.
+            tinyusdz::GeomPrimvar colorPrimvar;
+            std::string primvarErr;
+            const std::vector<std::string> legacyNames = {
+                "primvars:color", "color", "primvars:displayColor", "displayColor",
+                "primvars:Cd", "Cd"
+            };
+            for (const auto& name : legacyNames) {
+                if (mesh->get_primvar(name, &colorPrimvar, &primvarErr)) {
+                    std::vector<tinyusdz::value::color3f> color3fValues;
+                    std::vector<tinyusdz::value::color4f> color4fValues;
+                    std::vector<tinyusdz::value::float3> float3Values;
+                    std::vector<tinyusdz::value::float4> float4Values;
+
+                    if (colorPrimvar.get_value(&color4fValues)) {
+                        MIDDLEWARE_LOG_DEBUG("Found %zu RGBA vertex colors in primvar: %s",
+                                           color4fValues.size(), name.c_str());
+                        meshData.vertex_colors.reserve(color4fValues.size());
+                        for (const auto& color : color4fValues) {
+                            if (std::isfinite(color.r) && std::isfinite(color.g) &&
+                                std::isfinite(color.b) && std::isfinite(color.a)) {
+                                meshData.vertex_colors.push_back(glm::vec4(
+                                    static_cast<float>(color.r),
+                                    static_cast<float>(color.g),
+                                    static_cast<float>(color.b),
+                                    static_cast<float>(color.a)
+                                ));
+                            } else {
+                                meshData.vertex_colors.push_back(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+                            }
+                        }
+                        foundColors = true;
+                        break;
+                    }
+                    else if (colorPrimvar.get_value(&color3fValues)) {
+                        MIDDLEWARE_LOG_DEBUG("Found %zu RGB vertex colors in primvar: %s",
+                                           color3fValues.size(), name.c_str());
+                        meshData.vertex_colors.reserve(color3fValues.size());
+                        for (const auto& color : color3fValues) {
+                            if (std::isfinite(color.r) && std::isfinite(color.g) &&
+                                std::isfinite(color.b)) {
+                                meshData.vertex_colors.push_back(glm::vec4(
+                                    static_cast<float>(color.r),
+                                    static_cast<float>(color.g),
+                                    static_cast<float>(color.b),
+                                    1.0f
+                                ));
+                            } else {
+                                meshData.vertex_colors.push_back(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+                            }
+                        }
+                        foundColors = true;
+                        break;
+                    }
+                    else if (colorPrimvar.get_value(&float4Values)) {
+                        MIDDLEWARE_LOG_DEBUG("Found %zu float4 vertex colors in primvar: %s",
+                                           float4Values.size(), name.c_str());
+                        meshData.vertex_colors.reserve(float4Values.size());
+                        for (const auto& color : float4Values) {
+                            if (std::isfinite(color[0]) && std::isfinite(color[1]) &&
+                                std::isfinite(color[2]) && std::isfinite(color[3])) {
+                                meshData.vertex_colors.push_back(glm::vec4(
+                                    static_cast<float>(color[0]),
+                                    static_cast<float>(color[1]),
+                                    static_cast<float>(color[2]),
+                                    static_cast<float>(color[3])
+                                ));
+                            } else {
+                                meshData.vertex_colors.push_back(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+                            }
+                        }
+                        foundColors = true;
+                        break;
+                    }
+                    else if (colorPrimvar.get_value(&float3Values)) {
+                        MIDDLEWARE_LOG_DEBUG("Found %zu float3 vertex colors in primvar: %s",
+                                           float3Values.size(), name.c_str());
+                        meshData.vertex_colors.reserve(float3Values.size());
+                        for (const auto& color : float3Values) {
+                            if (std::isfinite(color[0]) && std::isfinite(color[1]) &&
+                                std::isfinite(color[2])) {
+                                meshData.vertex_colors.push_back(glm::vec4(
+                                    static_cast<float>(color[0]),
+                                    static_cast<float>(color[1]),
+                                    static_cast<float>(color[2]),
+                                    1.0f
+                                ));
+                            } else {
+                                meshData.vertex_colors.push_back(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+                            }
+                        }
+                        foundColors = true;
+                        break;
+                    }
+                }
+            }
+        }
         if (foundColors) {
             // Validate that color count matches vertex count
             if (meshData.vertex_colors.size() != meshData.points.size()) {
@@ -2426,48 +2593,60 @@ void UsdProcessor::extractUVCoordinates(tinyusdz::GeomMesh* mesh, MeshData& mesh
     try {
         auto uvStartTime = std::chrono::high_resolution_clock::now();
         
-        // ✅ MODIFIED: Support multiple UV sets
+        // ✅ MODIFIED: Support multiple UV sets.
+        // Bare names only: get_primvar()/find_attr_ptr() prepend "primvars:"
+        // themselves (the old "primvars:st" list entries never matched).
+        // Zero-copy fast path with a legacy GeomPrimvar fallback for indexed
+        // or unusual types.
         const std::vector<std::string> uvNames = {
-            "primvars:st", "st",
-            "primvars:st1", "st1",
-            "primvars:st2", "st2",
-            "primvars:uv", "uv",
-            "primvars:uv0", "uv0",
-            "primvars:uv1", "uv1",
-            "primvars:map1", "map1",
-            "primvars:attribute0", "attribute0"
+            "st", "st1", "st2", "uv", "uv0", "uv1", "map1", "attribute0"
         };
 
         meshData.uvSets.clear();
         meshData.uvSetNames.clear();
 
         for (const auto& name : uvNames) {
-            tinyusdz::GeomPrimvar primvar;
-            std::string primvarErr;
+            const tinyusdz::Attribute* attr = mesh->find_attr_ptr(name);
+            const bool indexed =
+                attr && mesh->props.count("primvars:" + name + ":indices") > 0;
 
-            if (mesh->get_primvar(name, &primvar, &primvarErr)) {
-                std::vector<tinyusdz::value::texcoord2f> uvs;
+            const std::vector<tinyusdz::value::texcoord2f>* uvs = nullptr;
+            if (attr && !attr->is_blocked() && !attr->is_connection() && !indexed) {
+                uvs = attr->get_var().as_ptr<std::vector<tinyusdz::value::texcoord2f>>();
+            }
 
-                if (primvar.get_value(&uvs)) {
-                    std::vector<glm::vec2> uvChannel;
-                    uvChannel.resize(uvs.size());  // Pre-allocate exact size
-
-                    // PARALLEL UV extraction
-                    std::transform(PAR_POLICY
-                                 uvs.begin(), uvs.end(),
-                                 uvChannel.begin(),
-                                 [](const tinyusdz::value::texcoord2f& uv) {
-                                     return glm::vec2(uv.s, uv.t);
-                                 });
-
-                    // Normalize and validate UVs (parallel)
-                    normalizeUVCoordinatesParallel(uvChannel);
-
-                    meshData.uvSets.push_back(std::move(uvChannel));  // Move to avoid copy
-                    meshData.uvSetNames.push_back(name);
-
-                    MIDDLEWARE_LOG_DEBUG("Found UV set '%s' with %zu coordinates", name.c_str(), uvs.size());
+            std::vector<tinyusdz::value::texcoord2f> legacyUvs;
+            if (!uvs) {
+                tinyusdz::GeomPrimvar primvar;
+                std::string primvarErr;
+                if (mesh->get_primvar(name, &primvar, &primvarErr) &&
+                    primvar.get_value(&legacyUvs)) {
+                    uvs = &legacyUvs;
                 }
+            }
+            if (!uvs) {
+                continue;
+            }
+
+            {
+                std::vector<glm::vec2> uvChannel;
+                uvChannel.resize(uvs->size());  // Pre-allocate exact size
+
+                // PARALLEL UV extraction
+                std::transform(PAR_POLICY
+                             uvs->begin(), uvs->end(),
+                             uvChannel.begin(),
+                             [](const tinyusdz::value::texcoord2f& uv) {
+                                 return glm::vec2(uv.s, uv.t);
+                             });
+
+                // Normalize and validate UVs (parallel)
+                normalizeUVCoordinatesParallel(uvChannel);
+
+                meshData.uvSets.push_back(std::move(uvChannel));  // Move to avoid copy
+                meshData.uvSetNames.push_back(name);
+
+                MIDDLEWARE_LOG_DEBUG("Found UV set '%s' with %zu coordinates", name.c_str(), uvs->size());
             }
         }
 
@@ -2642,33 +2821,38 @@ bool UsdProcessor::ExtractPointCloudData(tinyusdz::GeomPoints* geomPoints,
     try {
         auto startTime = std::chrono::high_resolution_clock::now();
 
-        // ── Extract point positions via TypedAttribute<Animatable<std::vector<value::point3f>>> ──
-        auto pointsAnim = geomPoints->points.get_value();
+        // ── Extract point positions (zero-copy fast path, copy fallback) ──
+        // TypedAttribute<Animatable<...>>: get_ptr() chains skip the optional
+        // copy and the get()/get_default() materialization for static values.
+        const auto* pointsAnim = geomPoints->points.get_ptr();
+        std::vector<tinyusdz::value::point3f> pointsCopy;
+        const std::vector<tinyusdz::value::point3f>* rawPoints = nullptr;
+        bool havePoints = false;
+
         if (pointsAnim && pointsAnim->is_timesamples()) {
-            std::vector<tinyusdz::value::point3f> rawPoints;
-            if (pointsAnim->get(0.0, &rawPoints) && !rawPoints.empty()) {
-                outData.positions.resize(rawPoints.size());
-                size_t i = 0;
-                for (const auto& pt : rawPoints) {
-                    glm::vec4 homogeneous = glm::vec4(static_cast<float>(pt.x),
-                                                      static_cast<float>(pt.y),
-                                                      static_cast<float>(pt.z), 1.0f);
-                    glm::vec4 transformed = worldTransform * homogeneous;
-                    outData.positions[i] = glm::vec3(transformed.x / transformed.w,
-                                                     transformed.y / transformed.w,
-                                                     transformed.z / transformed.w);
-                    i++;
-                }
-            } else {
-                MIDDLEWARE_LOG_WARNING("Empty point positions for %s", outData.elementName.c_str());
-                return false;
+            if (pointsAnim->get(0.0, &pointsCopy) && !pointsCopy.empty()) {
+                rawPoints = &pointsCopy;
+                havePoints = true;
             }
         } else if (pointsAnim && pointsAnim->has_value()) {
-            std::vector<tinyusdz::value::point3f> rawPoints;
-            pointsAnim->get_default(&rawPoints);
-            outData.positions.resize(rawPoints.size());
-            size_t i = 0;
-            for (const auto& pt : rawPoints) {
+            if (const auto* staticPts = pointsAnim->get_ptr()) {
+                rawPoints = staticPts;
+                havePoints = true;
+            } else if (pointsAnim->get_default(&pointsCopy)) {
+                rawPoints = &pointsCopy;
+                havePoints = true;
+            }
+        }
+
+        if (!havePoints) {
+            MIDDLEWARE_LOG_WARNING("Empty point positions for %s", outData.elementName.c_str());
+            return false;
+        }
+
+        {
+            outData.positions.resize(rawPoints->size());
+            for (size_t i = 0; i < rawPoints->size(); i++) {
+                const auto& pt = (*rawPoints)[i];
                 glm::vec4 homogeneous = glm::vec4(static_cast<float>(pt.x),
                                                   static_cast<float>(pt.y),
                                                   static_cast<float>(pt.z), 1.0f);
@@ -2676,93 +2860,118 @@ bool UsdProcessor::ExtractPointCloudData(tinyusdz::GeomPoints* geomPoints,
                 outData.positions[i] = glm::vec3(transformed.x / transformed.w,
                                                  transformed.y / transformed.w,
                                                  transformed.z / transformed.w);
-                i++;
             }
-        } else {
-            MIDDLEWARE_LOG_WARNING("No point positions found for %s", outData.elementName.c_str());
-            return false;
         }
         MIDDLEWARE_LOG_INFO("Extracted %zu point positions from %s",
             outData.positions.size(), outData.elementName.c_str());
 
-        // ── Extract normals ──
-        auto normalsAnim = geomPoints->normals.get_value();
-        if (normalsAnim) {
-            std::vector<tinyusdz::value::normal3f> normalData;
-            if (normalsAnim->is_timesamples()) {
-                normalsAnim->get(0.0, &normalData);
-            } else if (normalsAnim->has_value()) {
-                normalsAnim->get_default(&normalData);
+        // ── Extract normals (zero-copy fast path, copy fallback) ──
+        if (const auto* normalsAnim = geomPoints->normals.get_ptr()) {
+            const std::vector<tinyusdz::value::normal3f>* normalData = normalsAnim->get_ptr();
+            std::vector<tinyusdz::value::normal3f> normalDataCopy;
+            if (!normalData) {
+                if (normalsAnim->is_timesamples()) {
+                    normalsAnim->get(0.0, &normalDataCopy);
+                } else if (normalsAnim->has_value()) {
+                    normalsAnim->get_default(&normalDataCopy);
+                }
+                if (!normalDataCopy.empty()) normalData = &normalDataCopy;
             }
-            if (!normalData.empty()) {
-                outData.normals.resize(normalData.size());
-                for (size_t i = 0; i < normalData.size(); i++) {
+            if (normalData && !normalData->empty()) {
+                outData.normals.resize(normalData->size());
+                for (size_t i = 0; i < normalData->size(); i++) {
                     outData.normals[i] = glm::normalize(glm::vec3(
-                        static_cast<float>(normalData[i].x),
-                        static_cast<float>(normalData[i].y),
-                        static_cast<float>(normalData[i].z)));
+                        static_cast<float>((*normalData)[i].x),
+                        static_cast<float>((*normalData)[i].y),
+                        static_cast<float>((*normalData)[i].z)));
                 }
                 MIDDLEWARE_LOG_INFO("Extracted %zu normals from %s", outData.normals.size(), outData.elementName.c_str());
             }
         }
 
-        // ── Extract widths ──
-        auto widthsAnim = geomPoints->widths.get_value();
-        if (widthsAnim) {
-            std::vector<float> widthData;
-            if (widthsAnim->is_timesamples()) {
-                widthsAnim->get(0.0, &widthData);
-            } else if (widthsAnim->has_value()) {
-                widthsAnim->get_default(&widthData);
+        // ── Extract widths (zero-copy fast path, copy fallback) ──
+        if (const auto* widthsAnim = geomPoints->widths.get_ptr()) {
+            const std::vector<float>* widthData = widthsAnim->get_ptr();
+            std::vector<float> widthDataCopy;
+            if (!widthData) {
+                if (widthsAnim->is_timesamples()) {
+                    widthsAnim->get(0.0, &widthDataCopy);
+                } else if (widthsAnim->has_value()) {
+                    widthsAnim->get_default(&widthDataCopy);
+                }
+                if (!widthDataCopy.empty()) widthData = &widthDataCopy;
             }
-            if (!widthData.empty()) {
-                outData.widths = std::move(widthData);
+            if (widthData && !widthData->empty()) {
+                outData.widths = *widthData;
                 MIDDLEWARE_LOG_INFO("Extracted %zu point widths from %s", outData.widths.size(), outData.elementName.c_str());
             }
         }
 
-        // ── Extract attribute0 via primvar (GeomPrimvar interface) ──
+        // ── Extract attribute0 (zero-copy fast path, legacy fallback) ──
+        // Bare names only: get_primvar()/find_attr_ptr() prepend "primvars:"
+        // themselves (the old "primvars:attribute0" entries never matched).
         outData.scalarAttributes.clear();
         const std::vector<std::string> attrNames = {
-            "primvars:attribute0", "attribute0",
-            "primvars:st", "st",
-            "primvars:map1", "map1"
+            "attribute0", "st", "map1"
         };
         for (const auto& name : attrNames) {
-            tinyusdz::GeomPrimvar primvar;
-            std::string err;
-            if (geomPoints->get_primvar(name, &primvar, &err)) {
-                std::vector<tinyusdz::value::texcoord2f> uvData;
-                if (primvar.get_value(&uvData)) {
-                    outData.scalarAttributes.resize(uvData.size());
-                    for (size_t i = 0; i < uvData.size(); i++) {
-                        outData.scalarAttributes[i] = glm::vec2(uvData[i].s, uvData[i].t);
-                    }
-                    outData.uvSetNames.push_back(name);
-                    MIDDLEWARE_LOG_INFO("Extracted %zu %s attribute values from %s",
-                        outData.scalarAttributes.size(), name.c_str(), outData.elementName.c_str());
-                    break;
+            const tinyusdz::Attribute* attr = geomPoints->find_attr_ptr(name);
+            const std::vector<tinyusdz::value::texcoord2f>* uvData = nullptr;
+            if (attr && !attr->is_blocked() && !attr->is_connection() &&
+                geomPoints->props.count("primvars:" + name + ":indices") == 0) {
+                uvData = attr->get_var().as_ptr<std::vector<tinyusdz::value::texcoord2f>>();
+            }
+            std::vector<tinyusdz::value::texcoord2f> legacyUv;
+            if (!uvData) {
+                tinyusdz::GeomPrimvar primvar;
+                std::string err;
+                if (geomPoints->get_primvar(name, &primvar, &err) &&
+                    primvar.get_value(&legacyUv)) {
+                    uvData = &legacyUv;
                 }
+            }
+            if (uvData) {
+                outData.scalarAttributes.resize(uvData->size());
+                for (size_t i = 0; i < uvData->size(); i++) {
+                    outData.scalarAttributes[i] = glm::vec2((*uvData)[i].s, (*uvData)[i].t);
+                }
+                outData.uvSetNames.push_back(name);
+                MIDDLEWARE_LOG_INFO("Extracted %zu %s attribute values from %s",
+                    outData.scalarAttributes.size(), name.c_str(), outData.elementName.c_str());
+                break;
             }
         }
 
-        // ── Extract direct colors via primvar (GeomPrimvar interface) ──
-        tinyusdz::GeomPrimvar colorPrimvar;
-        std::string colorErr;
-        if (geomPoints->get_primvar("primvars:color", &colorPrimvar, &colorErr)) {
-            std::vector<tinyusdz::value::color4f> rawColors;
-            if (colorPrimvar.get_value(&rawColors) && !rawColors.empty() &&
-                rawColors.size() == outData.positions.size()) {
-                outData.vertex_colors.resize(rawColors.size());
-                for (size_t i = 0; i < rawColors.size(); i++) {
+        // ── Extract direct colors (zero-copy fast path, legacy fallback) ──
+        // NOTE: the legacy lookup name is intentionally kept exactly as it was
+        // ("primvars:color" passed to get_primvar() double-prefixes and never
+        // matched, so this path has always been inert). Preserved 1:1.
+        {
+            const tinyusdz::Attribute* attr = geomPoints->find_attr_ptr("primvars:color");
+            const std::vector<tinyusdz::value::color4f>* rawColors = nullptr;
+            if (attr && !attr->is_blocked() && !attr->is_connection()) {
+                rawColors = attr->get_var().as_ptr<std::vector<tinyusdz::value::color4f>>();
+            }
+            std::vector<tinyusdz::value::color4f> legacyColors;
+            if (!rawColors) {
+                tinyusdz::GeomPrimvar colorPrimvar;
+                std::string colorErr;
+                if (geomPoints->get_primvar("primvars:color", &colorPrimvar, &colorErr) &&
+                    colorPrimvar.get_value(&legacyColors)) {
+                    rawColors = &legacyColors;
+                }
+            }
+            if (rawColors && !rawColors->empty() && rawColors->size() == outData.positions.size()) {
+                outData.vertex_colors.resize(rawColors->size());
+                for (size_t i = 0; i < rawColors->size(); i++) {
                     outData.vertex_colors[i] = glm::vec4(
-                        static_cast<float>(rawColors[i].r),
-                        static_cast<float>(rawColors[i].g),
-                        static_cast<float>(rawColors[i].b),
-                        static_cast<float>(rawColors[i].a));
+                        static_cast<float>((*rawColors)[i].r),
+                        static_cast<float>((*rawColors)[i].g),
+                        static_cast<float>((*rawColors)[i].b),
+                        static_cast<float>((*rawColors)[i].a));
                 }
                 MIDDLEWARE_LOG_INFO("Extracted %zu direct colors from %s",
-                    rawColors.size(), outData.elementName.c_str());
+                    rawColors->size(), outData.elementName.c_str());
             }
         }
 

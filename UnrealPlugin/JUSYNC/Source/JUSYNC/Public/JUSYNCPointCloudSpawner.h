@@ -36,6 +36,8 @@ public:
     virtual ~FJUSYNCPointCloudSpawner() {}
 
     void EnqueuePointCloud(const FJUSYNCPointCloudData& PCData, int32 InRank = 0);
+    // Rvalue overload: moves the point cloud into the async task (no copy).
+    void EnqueuePointCloud(FJUSYNCPointCloudData&& PCData, int32 InRank = 0);
     virtual void Tick(float DeltaTime) override;
     virtual ETickableTickType GetTickableTickType() const override { return ETickableTickType::Conditional; }
     virtual bool IsTickable() const override { return Owner.IsValid(); }

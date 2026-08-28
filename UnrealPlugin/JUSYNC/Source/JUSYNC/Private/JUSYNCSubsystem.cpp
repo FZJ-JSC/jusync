@@ -996,100 +996,144 @@ bool UJUSYNCSubsystem::LoadUSDFullFromBufferNoCopy(const TArray<uint8>& Buffer, 
     FTCHARToUTF8 FilenameConverter(*Filename);
     const char* FilenameCStr = FilenameConverter.Get();
 
-    CMeshData* CMeshes = nullptr;
+    void* ParseHandle = nullptr;
+    CMeshLayout* MeshLayouts = nullptr;
     size_t MeshCount = 0;
-    CPointCloudData* CClouds = nullptr;
+    CPointCloudLayout* CloudLayouts = nullptr;
     size_t CloudCount = 0;
 
-    // Serialize ONLY the tinyusdz C-call (not thread-safe for concurrent loads). The
-    // single-threaded C->UE conversion below deliberately runs OUTSIDE the lock so the
-    // next queued file's parse can overlap this file's conversion and keep all cores busy.
+    // In-situ two-phase parse:
+    //   1) QueryUSDFullLayout_C — the only non-thread-safe part (the tinyusdz
+    //      C-call), serialized on ParseMutex like before.
+    //   2) UE allocates its final TArrays; FillUSDFull_C writes the geometry
+    //      straight into them — no CMeshData new[] intermediate, no C->UE
+    //      conversion copy. Filling runs OUTSIDE the parse lock so the next
+    //      queued file's parse can overlap this file's fill.
     int Result = 0;
     {
         FScopeLock Lock(&ParseMutex);
-        // Zero-copy variant — bypasses the std::vector copy at the C API boundary.
-        Result = LoadUSDFullFromPointer_C(
+        Result = QueryUSDFullLayout_C(
             Buffer.GetData(), Buffer.Num(), FilenameCStr,
-            &CMeshes, &MeshCount,
-            &CClouds, &CloudCount
+            &ParseHandle, &MeshLayouts, &MeshCount,
+            &CloudLayouts, &CloudCount
         );
     }
 
-    bool bSuccess = Result == 1;
-
-    if (!bSuccess)
+    if (Result != 1 || !ParseHandle)
     {
         UE_LOG(LogTemp, Warning, TEXT("JUSYNC: LoadUSDFullFromBufferNoCopy failed for '%s' (buffer=%d bytes, C_result=%d MeshCount=%llu CloudCount=%llu)"),
             *Filename, Buffer.Num(), Result, (uint64)MeshCount, (uint64)CloudCount);
-        if (CMeshes) FreeMeshData_C(CMeshes, MeshCount);
-        if (CClouds) FreePointCloudData_C(CClouds, CloudCount);
+        if (ParseHandle) FreeParsedUSD_C(ParseHandle);
+        FreeUSDFullLayouts_C(MeshLayouts, MeshCount, CloudLayouts, CloudCount);
         return false;
     }
 
-    // Convert meshes
-    if (CMeshes && MeshCount > 0)
+    // ── Meshes: allocate final TArrays, fill in place ──
+    if (MeshCount > 0)
     {
-        OutMeshData.Reserve(MeshCount);
+        OutMeshData.SetNum(static_cast<int32>(MeshCount));
+        CMeshDataFill* FillMeshes = reinterpret_cast<CMeshDataFill*>(FMemory::Malloc(MeshCount * sizeof(CMeshDataFill)));
+        FMemory::Memzero(FillMeshes, MeshCount * sizeof(CMeshDataFill)); // POD struct
+
         for (size_t i = 0; i < MeshCount; ++i)
         {
-            FJUSYNCMeshData UEMeshData = ConvertCMeshDataToUE_Helper(CMeshes[i]);
-            OutMeshData.Add(UEMeshData);
+            const CMeshLayout& lay = MeshLayouts[i];
+            FJUSYNCMeshData& UEMesh = OutMeshData[i];
+            CMeshDataFill& dst = FillMeshes[i];
+
+            UEMesh.ElementName = UTF8_TO_TCHAR(lay.element_name);
+            UEMesh.TypeName = UTF8_TO_TCHAR(lay.type_name);
+
+            if (lay.points_count > 0) UEMesh.Vertices.SetNumUninitialized(static_cast<int32>(lay.points_count));
+            if (lay.indices_count > 0) UEMesh.Triangles.SetNumUninitialized(static_cast<int32>(lay.indices_count));
+            if (lay.normals_count > 0) UEMesh.Normals.SetNumUninitialized(static_cast<int32>(lay.normals_count));
+            if (lay.uvs_count > 0) UEMesh.UVs.SetNumUninitialized(static_cast<int32>(lay.uvs_count));
+            if (lay.vertex_colors_count > 0) UEMesh.VertexColors.SetNumUninitialized(static_cast<int32>(lay.vertex_colors_count));
+
+            // Point the C fill struct at the final UE arrays. UE5 layout:
+            // FVector == double[3], FVector2D == double[2], FColor == uint8[4].
+            dst.points = UEMesh.Vertices.Num() > 0 ? reinterpret_cast<double*>(UEMesh.Vertices.GetData()) : nullptr;
+            dst.indices = UEMesh.Triangles.Num() > 0 ? UEMesh.Triangles.GetData() : nullptr;
+            dst.normals = UEMesh.Normals.Num() > 0 ? reinterpret_cast<double*>(UEMesh.Normals.GetData()) : nullptr;
+            dst.uvs = UEMesh.UVs.Num() > 0 ? reinterpret_cast<double*>(UEMesh.UVs.GetData()) : nullptr;
+            dst.vertex_colors8 = UEMesh.VertexColors.Num() > 0 ? reinterpret_cast<unsigned char*>(UEMesh.VertexColors.GetData()) : nullptr;
         }
-        FreeMeshData_C(CMeshes, MeshCount);
+
+        const int FillResult = FillUSDFull_C(ParseHandle, FillMeshes, MeshCount, nullptr, 0);
+        FMemory::Free(FillMeshes);
+        if (FillResult != 1)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("JUSYNC: FillUSDFull_C (meshes) failed for '%s'"), *Filename);
+            FreeParsedUSD_C(ParseHandle);
+            FreeUSDFullLayouts_C(MeshLayouts, MeshCount, CloudLayouts, CloudCount);
+            return false;
+        }
+
+        // The legacy UE conversion re-normalized normals after conversion —
+        // replicate that in place (bit-identical result).
+        for (int32 i = 0; i < OutMeshData.Num(); ++i)
+        {
+            TArray<FVector>& Normals = OutMeshData[i].Normals;
+            for (int32 j = 0; j < Normals.Num(); ++j)
+            {
+                Normals[j].Normalize();
+            }
+        }
     }
 
-    // Convert point clouds
-    if (CClouds && CloudCount > 0)
+    // ── Point clouds: allocate final TArrays, fill in place ──
+    if (CloudCount > 0)
     {
         OutPointCloudData.SetNum(static_cast<int32>(CloudCount));
+        CPointCloudDataFill* FillClouds = reinterpret_cast<CPointCloudDataFill*>(FMemory::Malloc(CloudCount * sizeof(CPointCloudDataFill)));
+        FMemory::Memzero(FillClouds, CloudCount * sizeof(CPointCloudDataFill)); // POD struct
+
         for (size_t i = 0; i < CloudCount; ++i)
         {
+            const CPointCloudLayout& lay = CloudLayouts[i];
             FJUSYNCPointCloudData& pc = OutPointCloudData[i];
-            const CPointCloudData& cpc = CClouds[i];
+            CPointCloudDataFill& dst = FillClouds[i];
 
-            pc.ElementName = ANSI_TO_TCHAR(cpc.element_name);
-            pc.TypeName = ANSI_TO_TCHAR(cpc.type_name);
-            pc.PointCount = static_cast<int32>(cpc.points_count);
-            pc.bHasColors = cpc.has_colors != 0;
-            pc.bHasNormals = cpc.has_normals != 0;
-            pc.BoundingBoxMin = FVector(cpc.bounding_box_min[0], cpc.bounding_box_min[2], -cpc.bounding_box_min[1]);
-            pc.BoundingBoxMax = FVector(cpc.bounding_box_max[0], cpc.bounding_box_max[2], -cpc.bounding_box_max[1]);
+            pc.ElementName = UTF8_TO_TCHAR(lay.element_name);
+            pc.TypeName = TEXT("GeomPoints");
+            pc.PointCount = static_cast<int32>(lay.point_count);
+            pc.bHasColors = lay.has_colors != 0;
+            pc.bHasNormals = lay.has_normals != 0;
 
-            if (cpc.points_count > 0 && cpc.positions)
-            {
-                pc.Positions.SetNum(pc.PointCount);
-                for (size_t j = 0; j < cpc.points_count; ++j)
-                {
-                    float usdX = cpc.positions[j * 3 + 0];
-                    float usdY = cpc.positions[j * 3 + 1];
-                    float usdZ = cpc.positions[j * 3 + 2];
-                    pc.Positions[j] = FVector(usdX, usdZ, -usdY);
-                }
-            }
+            if (lay.point_count > 0) pc.Positions.SetNumUninitialized(pc.PointCount);
+            if (lay.has_colors && lay.point_count > 0) pc.Colors.SetNumUninitialized(pc.PointCount);
+            if (lay.has_widths && lay.point_count > 0) pc.Widths.SetNumUninitialized(pc.PointCount);
 
-            if (cpc.has_colors && cpc.colors && pc.PointCount > 0)
-            {
-                pc.Colors.SetNum(pc.PointCount);
-                for (int32 j = 0; j < pc.PointCount; ++j)
-                {
-                    float r = cpc.colors[j * 4 + 0] * 255.0f;
-                    float g = cpc.colors[j * 4 + 1] * 255.0f;
-                    float b = cpc.colors[j * 4 + 2] * 255.0f;
-                    float a = cpc.colors[j * 4 + 3] * 255.0f;
-                    pc.Colors[j] = FColor(static_cast<uint8>(r), static_cast<uint8>(g), static_cast<uint8>(b), static_cast<uint8>(a));
-                }
-            }
-
-            if (cpc.has_widths && cpc.widths)
-            {
-                pc.Widths.SetNum(pc.PointCount);
-                std::memcpy(pc.Widths.GetData(), cpc.widths, pc.PointCount * sizeof(float));
-            }
+            dst.positions = pc.Positions.Num() > 0 ? reinterpret_cast<double*>(pc.Positions.GetData()) : nullptr;
+            dst.colors8 = pc.Colors.Num() > 0 ? reinterpret_cast<unsigned char*>(pc.Colors.GetData()) : nullptr;
+            dst.widths = pc.Widths.Num() > 0 ? pc.Widths.GetData() : nullptr;
         }
-        FreePointCloudData_C(CClouds, CloudCount);
+
+        const int FillResult = FillUSDFull_C(ParseHandle, nullptr, 0, FillClouds, CloudCount);
+        if (FillResult != 1)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("JUSYNC: FillUSDFull_C (point clouds) failed for '%s'"), *Filename);
+            FMemory::Free(FillClouds);
+            FreeParsedUSD_C(ParseHandle);
+            FreeUSDFullLayouts_C(MeshLayouts, MeshCount, CloudLayouts, CloudCount);
+            return false;
+        }
+
+        // Bounding boxes arrive in USD space (origin-inclusive, legacy quirk);
+        // transform to UE space exactly like the legacy conversion: (x, z, -y).
+        for (int32 i = 0; i < OutPointCloudData.Num(); ++i)
+        {
+            const CPointCloudDataFill& dst = FillClouds[i];
+            OutPointCloudData[i].BoundingBoxMin = FVector(dst.bounding_box_min[0], dst.bounding_box_min[2], -dst.bounding_box_min[1]);
+            OutPointCloudData[i].BoundingBoxMax = FVector(dst.bounding_box_max[0], dst.bounding_box_max[2], -dst.bounding_box_max[1]);
+        }
+        FMemory::Free(FillClouds);
     }
 
-    UE_LOG(LogTemp, Log, TEXT("JUSYNC: LoadUSDFullFromBufferNoCopy: %d meshes + %d point clouds from '%s' (zero-copy)"),
+    FreeParsedUSD_C(ParseHandle);
+    FreeUSDFullLayouts_C(MeshLayouts, MeshCount, CloudLayouts, CloudCount);
+
+    UE_LOG(LogTemp, Log, TEXT("JUSYNC: LoadUSDFullFromBufferNoCopy: %d meshes + %d point clouds from '%s' (in-situ fill)"),
            OutMeshData.Num(), OutPointCloudData.Num(), *Filename);
     return true;
 #else
@@ -3576,7 +3620,7 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
     }
     else
     {
-        UE_LOG(LogJUSYNC, Error, TEXT("âŒ Failed to request file (Result: %d)"), Result);
+        UE_LOG(LogJUSYNC, Error, TEXT("â Failed to request file (Result: %d)"), Result);
         if (FileData)
         {
             FreeBuffer_C(FileData);
@@ -3585,6 +3629,63 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
     }
 #endif
     return false;
+}
+
+bool UJUSYNCSubsystem::RequestFileSized(const FString& Filename, int32 TargetRank, int32 TimeoutMs,
+                                        TArray<uint8>& OutData, uint64 ExpectedFileSize)
+{
+    if (Filename.IsEmpty())
+    {
+        return false;
+    }
+
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (bIsInitialized.load() && IsBrokerConnected() && ExpectedFileSize > 0)
+    {
+        // In-situ fast path: the file list carries the exact wire size, so we
+        // can pre-size the destination and let the middleware write the
+        // downloaded bytes straight into it (no new[] in the middleware, no
+        // FMemory::Memcpy on the UE side).
+        const uint64 MAX_REASONABLE_FILE_SIZE = 100ULL * 1024 * 1024 * 1024; // 100GB
+        if (ExpectedFileSize <= MAX_REASONABLE_FILE_SIZE)
+        {
+            FTCHARToUTF8 FilenameConverter(*Filename);
+            const char* FilenameCStr = FilenameConverter.Get();
+
+            OutData.SetNumUninitialized(static_cast<int32>(ExpectedFileSize));
+            if (OutData.Num() == static_cast<int32>(ExpectedFileSize))
+            {
+                size_t Written = 0;
+                const int64_t rc = RequestFileIntoBuffer_C(
+                    FilenameCStr, TargetRank, TimeoutMs,
+                    OutData.GetData(), static_cast<size_t>(OutData.Num()), &Written);
+
+                if (rc > 0)
+                {
+                    OutData.SetNum(static_cast<int32>(Written));
+                    UE_LOG(LogJUSYNC, Log, TEXT("Retrieved file '%s' (%d bytes) from broker (in-situ)"), *Filename, OutData.Num());
+                    return true;
+                }
+                if (rc == -2)
+                {
+                    // File grew beyond the advertised size — fall through to
+                    // the legacy allocating path below.
+                    UE_LOG(LogJUSYNC, Warning, TEXT("In-situ download overflow for '%s'; using legacy path"), *Filename);
+                }
+                else
+                {
+                    UE_LOG(LogJUSYNC, Error, TEXT("In-situ download failed for '%s'"), *Filename);
+                    return false;
+                }
+            }
+            else
+            {
+                UE_LOG(LogJUSYNC, Warning, TEXT("In-situ allocation failed for '%s'; using legacy path"), *Filename);
+            }
+        }
+    }
+#endif
+    return RequestFile(Filename, TargetRank, TimeoutMs, OutData);
 }
 
 bool UJUSYNCSubsystem::RequestFilesParallel(const TArray<FString>& Filenames, const TArray<int32>& TargetRanks, int32 TimeoutMs, TArray<FJUSYNCFileData>& OutFiles)

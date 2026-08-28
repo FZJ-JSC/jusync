@@ -46,10 +46,14 @@ public:
         Error
     };
 
-    // File transfer callback types
-    using FileChunkCallback = std::function<void(const std::string& filename, 
-                                                  const std::vector<uint8_t>& chunk,
-                                                  uint64_t offset, 
+    // File transfer callback types.
+    // chunk/chunkSize point into a buffer owned by the request thread for the
+    // duration of the callback — copy or consume it inside the callback
+    // (no hidden copy is made for you).
+    using FileChunkCallback = std::function<void(const std::string& filename,
+                                                  const uint8_t* chunk,
+                                                  size_t chunkSize,
+                                                  uint64_t offset,
                                                   uint64_t totalSize)>;
     using FileCompleteCallback = std::function<void(const std::string& filename,
                                                     uint64_t totalSize)>;
@@ -257,8 +261,12 @@ private:
     std::atomic<uint32_t> nextRequestId{1};
     std::map<uint32_t, bool> pendingRequests;
 
+    // Zero-copy frame handle: owns the ZMQ message buffer pulled by the
+    // dispatcher; consumers read via data()/size() without any memcpy.
+    using FrameMsg = std::shared_ptr<zmq::message_t>;
+
     // Incoming frame pair pulled by the dispatcher: <delimiterFrame, dataFrame>.
-    using FramePair = std::pair<std::vector<uint8_t>, std::vector<uint8_t>>;
+    using FramePair = std::pair<FrameMsg, FrameMsg>;
     using FramePairPtr = std::shared_ptr<FramePair>;
 
     // Out-of-order response buffering for multi-threaded safety.
@@ -319,30 +327,30 @@ private:
     uint32_t extractRequestId(const uint8_t* data, size_t dataSize) const;
 
     // Enqueue a frame pair into the response queue and wake waiters.
-    // Only called by the dispatcher thread.
-    void enqueueResponseFrame(const std::vector<uint8_t>& delimiter,
-                              const std::vector<uint8_t>& data);
+    // Only called by the dispatcher thread. Frames are moved in (zero-copy).
+    void enqueueResponseFrame(zmq::message_t delimiter,
+                              zmq::message_t data);
 
     // Wait for a matching message pair for the given request_id.
     // Blocks until a matching frame arrives or timeout expires.
     bool waitForMatchingFrames(uint32_t requestId, int timeoutMs,
-                               std::vector<uint8_t>& outDelimiter,
-                               std::vector<uint8_t>& outData);
+                               FrameMsg& outDelimiter,
+                               FrameMsg& outData);
 
     // Attempt to dequeue a matching message (non-blocking).
     bool tryDequeueMatching(uint32_t requestId,
-                             std::vector<uint8_t>& outDelimiter,
-                             std::vector<uint8_t>& outData);
+                             FrameMsg& outDelimiter,
+                             FrameMsg& outData);
 
     // Same as tryDequeueMatching, but assumes responseQueueMutex is ALREADY held
     // by the caller.  Calling tryDequeueMatching while holding responseQueueMutex
     // self-deadlocks (re-locking the same non-recursive mutex).
     bool tryDequeueMatchingLocked(uint32_t requestId,
-                                  std::vector<uint8_t>& outDelimiter,
-                                  std::vector<uint8_t>& outData);
+                                  FrameMsg& outDelimiter,
+                                  FrameMsg& outData);
 
     // Handle notification message (called from dispatcher thread)
-    void handleNotification(const std::vector<uint8_t>& data);
+    void handleNotification(const zmq::message_t& data);
 
     // Async file download frame handler — called from dispatcher thread.
     // Returns true if frame was consumed by an async download, false to forward to blocking queue.

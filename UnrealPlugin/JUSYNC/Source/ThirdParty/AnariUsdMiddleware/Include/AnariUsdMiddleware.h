@@ -129,6 +129,11 @@ public:
     bool requestFileListWithSizes(int32_t targetRank, std::vector<FileInfo>& outFiles, int timeoutMs = 10000);
     bool requestFile(const std::string& filename, int32_t targetRank,
                      std::vector<uint8_t>& outFileData, int timeoutMs = 30000);
+    // In-situ variant: download straight into a caller buffer (no middleware
+    // intermediate). outStatus: 1 = ok, 0 = failure, -1 = overflow.
+    bool requestFileIntoBuffer(const std::string& filename, int32_t targetRank,
+                               uint8_t* outBuffer, size_t outCapacity,
+                               size_t& outSize, int& outStatus, int timeoutMs = 30000);
     bool requestFrame(int32_t frameNumber, int32_t targetRank,
                       std::vector<std::pair<std::string, std::vector<uint8_t>>>& outFrameFiles,
                       int timeoutMs = 60000);

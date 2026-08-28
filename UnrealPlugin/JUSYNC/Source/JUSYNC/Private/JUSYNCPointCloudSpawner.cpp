@@ -18,16 +18,23 @@ FJUSYNCPointCloudSpawner::FJUSYNCPointCloudSpawner(TWeakObjectPtr<UObject> InOwn
 
 void FJUSYNCPointCloudSpawner::EnqueuePointCloud(const FJUSYNCPointCloudData& PCData, int32 InRank)
 {
+    // Copy once, then move into the async task via the rvalue overload.
+    EnqueuePointCloud(FJUSYNCPointCloudData(PCData), InRank);
+}
+
+void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData, int32 InRank)
+{
     if (!PCData.IsValid() || !Owner.IsValid()) return;
 
     UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: queued PC '%s' for async conversion (%d points)"),
            *PCData.ElementName, PCData.PointCount);
 
-    // Spawn async task — doesn't block the game thread (copy once, cannot MoveTemp on const&)
+    // Spawn async task — doesn't block the game thread. The rvalue overload
+    // moves the arrays into the task instead of copying the whole cloud.
     AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
-        [this, PointCount = PCData.PointCount, Positions = PCData.Positions,
-          Colors = PCData.Colors, bHasColors = PCData.HasColors(),
-          Widths = PCData.Widths, ElementName = PCData.ElementName,
+        [this, PointCount = PCData.PointCount, Positions = MoveTemp(PCData.Positions),
+          Colors = MoveTemp(PCData.Colors), bHasColors = PCData.HasColors(),
+          Widths = MoveTemp(PCData.Widths), ElementName = MoveTemp(PCData.ElementName),
           InRank]()
     {
 #ifdef WITH_ANARI_USD_MIDDLEWARE
