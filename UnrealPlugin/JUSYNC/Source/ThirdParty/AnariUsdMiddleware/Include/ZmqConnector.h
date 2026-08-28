@@ -2,13 +2,9 @@
 
 #include <zmq.hpp>
 #include <string>
-#include <vector>
 #include <memory>
 #include <atomic>
 #include <mutex>
-#include <chrono>
-#include <functional>
-#include <map>
 #include <limits>
 
 // Platform detection
@@ -33,12 +29,14 @@ namespace safety {
 namespace anari_usd_middleware {
 
 /**
- * Enhanced cross-platform ZeroMQ connector with comprehensive safety features
- * Supports both Windows and Linux platforms with optimized configurations
+ * ZeroMQ endpoint validator / lifecycle tracker (DEALER-only mode).
+ *
+ * In DEALER-only mode no ZMQ socket is created here — all communication is
+ * handled by AnariUsdClient (DEALER socket). This class validates the
+ * endpoint string and tracks connection lifecycle for the middleware.
  */
 class ZmqConnector {
 public:
-    // Connection status enumeration
     enum class ConnectionStatus {
         Disconnected,
         Connecting,
@@ -47,115 +45,30 @@ public:
         Error
     };
 
-    // Message statistics structure with thread-safe snapshot capability
-    struct MessageStats {
-        std::atomic<uint64_t> totalMessagesReceived{0};
-        std::atomic<uint64_t> totalFilesReceived{0};
-        std::atomic<uint64_t> totalBytesReceived{0};
-        std::atomic<uint64_t> failedReceives{0};
-        std::chrono::steady_clock::time_point lastMessageTime;
-
-        // Thread-safe copyable snapshot
-        struct Snapshot {
-            uint64_t totalMessagesReceived;
-            uint64_t totalFilesReceived;
-            uint64_t totalBytesReceived;
-            uint64_t failedReceives;
-            std::chrono::steady_clock::time_point lastMessageTime;
-        };
-
-        Snapshot getSnapshot() const {
-            return {
-                totalMessagesReceived.load(),
-                totalFilesReceived.load(),
-                totalBytesReceived.load(),
-                failedReceives.load(),
-                lastMessageTime
-            };
-        }
-
-        void reset() {
-            totalMessagesReceived.store(0);
-            totalFilesReceived.store(0);
-            totalBytesReceived.store(0);
-            failedReceives.store(0);
-            lastMessageTime = std::chrono::steady_clock::now();
-        }
-    };
-
-public:
-    // Constructor and destructor
     ZmqConnector();
     virtual ~ZmqConnector();
 
-    // Disable copy constructor and assignment operator for safety
     ZmqConnector(const ZmqConnector&) = delete;
     ZmqConnector& operator=(const ZmqConnector&) = delete;
 
-    // Enable move constructor and assignment operator
     ZmqConnector(ZmqConnector&&) = default;
     ZmqConnector& operator=(ZmqConnector&&) = default;
 
     // Core connection management
     bool initialize(const char* endpoint, int timeoutMs = 5000);
     void disconnect(int gracefulTimeoutMs = 1000);
-    bool isConnected() const;
-    ConnectionStatus getConnectionStatus() const;
 
-    // Message handling
-    bool receiveFile(std::string& filename, std::vector<uint8_t>& data,
-                     std::string& hash, int timeoutMs = 5000);
-    bool receiveAnyMessage(int timeoutMs = 1000);
-
-    // Getters with thread safety
-    void* getSocket() const;
-    std::string getLastReceivedMessage() const;
-    std::string getCurrentEndpoint() const;
-
-    // Statistics and monitoring
-    MessageStats::Snapshot getMessageStats() const;
-    void resetMessageStats();
+    // Configuration
     void setMaxMessageSize(size_t maxSizeBytes);
-    size_t getMaxMessageSize() const;
-
-    // Connection testing and health monitoring
-    bool testConnection();
-    void updateHealthStatus();
 
 private:
-    // Cross-platform initialization methods
-    bool configurePlatformSpecificSocket(int timeoutMs);
+    // Endpoint helpers
     std::string getDefaultEndpoint() const;
-
-#if PLATFORM_WINDOWS
-    bool configureWindowsSpecific();
-    bool validateWindowsReservedNames(const std::string& filename) const;
-#endif
-
-#if PLATFORM_LINUX
-    bool configureLinuxSpecific();
-#endif
-
-    // Enhanced validation methods
     bool validateEndpoint(const std::string& endpoint) const;
     bool validateTcpEndpoint(const std::string& endpoint) const;
     bool validateIpcEndpoint(const std::string& endpoint) const;
     bool validateInprocEndpoint(const std::string& endpoint) const;
-    bool validateFilename(const std::string& filename) const;
-    bool validateHashFormatPermissive(const std::string& hash) const;
-
-    // Message handling helpers
-    bool receiveMessagePart(zmq::message_t& message, int timeoutMs, bool expectMore);
-    int drainRemainingParts();
-    bool sendReply(zmq::message_t& identity, const std::string& response, int timeoutMs = 1000);
-
-    // Connection management helpers
-    bool tryAlternativeEndpoints(const std::string& primaryEndpoint);
     void cleanup();
-
-    // Member variables
-    std::unique_ptr<zmq::context_t> zmqContext;
-    std::unique_ptr<zmq::socket_t> zmqSocket;
 
     // Connection state
     std::atomic<ConnectionStatus> connectionStatus{ConnectionStatus::Disconnected};
@@ -164,18 +77,13 @@ private:
 
     // Thread safety
     mutable std::mutex connectionMutex;
-    mutable std::mutex messageMutex;
 
-    // Message storage
-    std::string lastReceivedMessage;
+    // ZMQ objects (never created in DEALER-only mode; kept for cleanup symmetry)
+    std::unique_ptr<zmq::context_t> zmqContext;
+    std::unique_ptr<zmq::socket_t> zmqSocket;
 
-    // Statistics and monitoring
-    MessageStats messageStats;
-    std::atomic<size_t> maxMessageSize{static_cast<size_t>(std::numeric_limits<int64_t>::max() / 2)}; // Essentially unlimited (4.6EB)
-    std::chrono::steady_clock::time_point lastHealthCheck;
-
-    // Cross-platform library handles (if needed for future extensions)
-    std::map<std::string, void*> loadedLibraryHandles;
+    // Configuration
+    std::atomic<size_t> maxMessageSize{static_cast<size_t>(std::numeric_limits<int64_t>::max() / 2)}; // Essentially unlimited
 };
 
 } // namespace anari_usd_middleware

@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 cmake_policy(SET CMP0122 NEW)
+# Use CMAKE_CUDA_ARCHITECTURES (not the legacy CUDA_ARCHITECTURES) for the CUDA compiler
+cmake_policy(SET CMP0104 NEW)
 
 # Check for CUDA support before declaring project
 option(ENABLE_CUDA "Enable CUDA GPU acceleration" OFF)
@@ -15,8 +17,12 @@ if(ENABLE_CUDA)
     
     if(CUDA_NVCC_EXECUTABLE)
         message(STATUS "Found nvcc at: ${CUDA_NVCC_EXECUTABLE}")
-        project(anari_usd_middleware VERSION 1.0.0 LANGUAGES CXX CUDA)
+        # C is required: the target compiles external/xxhash/xxhash.c
+        project(anari_usd_middleware VERSION 1.0.0 LANGUAGES C CXX CUDA)
         set(CUDA_ARCHITECTURES "60;61;70;75;80;86" CACHE STRING "CUDA architectures to build for")
+        # Must be set before add_library() — targets capture it at creation time.
+        # (CUDA 13 dropped sm_60/61/70; pass -DCUDA_ARCHITECTURES=<your arch>, e.g. 89.)
+        set(CMAKE_CUDA_ARCHITECTURES "${CUDA_ARCHITECTURES}")
         set(CUDA_FOUND TRUE)
     else()
         message(WARNING "CUDA requested but nvcc not found - GPU acceleration disabled")
@@ -163,7 +169,13 @@ if(ENABLE_CUDA AND CUDA_FOUND)
     target_compile_definitions(${PROJECT_NAME} PRIVATE
         ENABLE_CUDA_ACCELERATION
     )
-    
+
+    # C++ sources (GpuContext.cpp) include <cuda_runtime.h>; the toolkit
+    # include dir is only added automatically for CUDA (.cu) sources.
+    target_include_directories(${PROJECT_NAME} PRIVATE
+        ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+    )
+
     message(STATUS "CUDA GPU acceleration: ENABLED")
     message(STATUS "CUDA architectures: ${CUDA_ARCHITECTURES}")
 else()
