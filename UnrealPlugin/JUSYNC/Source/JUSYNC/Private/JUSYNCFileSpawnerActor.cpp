@@ -8,6 +8,10 @@
 #include "IImageWrapperModule.h"
 #include "Kismet/GameplayStatics.h"
 #include "Templates/UniquePtr.h"
+#include "RealtimeMeshComponent.h"
+#include "Engine/Texture2D.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialInstanceDynamic.h"
 
 AJUSYNCFileSpawnerActor::AJUSYNCFileSpawnerActor()
 {
@@ -24,6 +28,8 @@ AJUSYNCFileSpawnerActor::AJUSYNCFileSpawnerActor()
     SpawnGridColumns = 10;
     SpawnMaterial = nullptr;
     TextureSampleParameterName = TEXT("");
+    bMeshTextureLoading = false;
+    bMeshTextureReady = false;
     SpawnScale = FVector::OneVector;
     bUseUniformScaling = true;
     bAutoStart = true;
@@ -39,6 +45,7 @@ AJUSYNCFileSpawnerActor::AJUSYNCFileSpawnerActor()
     GradientPngFilename = TEXT("");
     PointCloudSize = 1.0f;
     bGradientReady = false;
+    bGradientDownloadStarted = false;
     bGradientAttempted = false;
     PipelineDepth = 10;
     MaxRetries = 2;
@@ -106,7 +113,9 @@ void AJUSYNCFileSpawnerActor::StartSpawning()
     GradientPngRankMap.Empty();
     PendingPointClouds.Empty();
     ParseFailedIndices.Empty();
+    GradientPendingMeshes.Empty();
     bGradientReady = false;
+    bGradientDownloadStarted = false;
     FilesDownloaded = 0; FilesTotal = 0; ActorsSpawned = 0;
     FailedFileIndices.Empty();
     NextSpawnIndex = 0; PendingDownloads = 0; PendingAsyncSpawns = 0; bIsCancelled = false;
@@ -163,6 +172,7 @@ void AJUSYNCFileSpawnerActor::ClearSpawnedActors()
     FileToActorMap.Empty();
     FilenameToActors.Empty();
     FileLastSize.Empty();
+    GradientPendingMeshes.Empty();
 }
 
 FVector AJUSYNCFileSpawnerActor::GetNextSpawnLocation() const
@@ -362,15 +372,14 @@ void AJUSYNCFileSpawnerActor::OnFileListReceived_Internal(const TArray<FString>&
         return;
     }
 
-    // Gradient LUT will be built from middleware cache right after first PC parse
-    // Also try to download PNG gradient from broker first
-    if (GradientPngRankMap.Num() > 0)
+    // Gradient LUT: ingest any PNGs present now and kick off the LUT download once. The same
+    // helper re-runs on every live poll (DiffAndRefreshFileList), so a PNG that the VTK actor
+    // exports AFTER this first list query still gets picked up and the LUT built.
+    UJUSYNCSubsystem* GrdSubsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
+    if (GrdSubsystem)
     {
-        UJUSYNCSubsystem* GrdSubsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
-        if (GrdSubsystem)
-        {
-            DownloadGradientPng(GrdSubsystem);
-        }
+        MaybeTriggerGradientLoad(FileList, FileRanks, GrdSubsystem);
+        LoadMeshTextureAsync(GrdSubsystem);
     }
 
     CurrentState = EJUSYNCSpawnerState::Downloading;
@@ -621,12 +630,21 @@ void AJUSYNCFileSpawnerActor::DownloadGradientPng(UJUSYNCSubsystem* Subsystem)
                 if (Img->GetRaw(RawData))
                 {
                     int64 W = Img->GetWidth();
-                    LUT.Reserve(FMath::Min(W, 256));
-                    for (int64 x = 0; x < W && x < 256; ++x)
+                    int64 H = Img->GetHeight();
+                    if (H > 2)
                     {
-                        const uint8* Pixel = RawData.GetData() + x * 4;
-                        // BGRA → RGB
-                        LUT.Add(FColor(Pixel[2], Pixel[1], Pixel[0], 255));
+                        // A full image, not a gradient strip. The mesh-texture path handles it.
+                        UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: '%s' is a full texture (height %lld), not a gradient — skipping LUT"), *PngCopy, (long long)H);
+                    }
+                    else
+                    {
+                        LUT.Reserve(FMath::Min(W, 256));
+                        for (int64 x = 0; x < W && x < 256; ++x)
+                        {
+                            const uint8* Pixel = RawData.GetData() + x * 4;
+                            // BGRA → RGB
+                            LUT.Add(FColor(Pixel[2], Pixel[1], Pixel[0], 255));
+                        }
                     }
                 }
             }
@@ -673,6 +691,7 @@ void AJUSYNCFileSpawnerActor::DownloadGradientPng(UJUSYNCSubsystem* Subsystem)
 
                         // Recolor any white actors spawned before gradient arrived
                         Sp->RecolorGradientPendingActors();
+                        WeakThis->RecolorGradientPendingMeshes();
                     }
                 },
                 TStatId(), nullptr, ENamedThreads::GameThread);
@@ -682,6 +701,312 @@ void AJUSYNCFileSpawnerActor::DownloadGradientPng(UJUSYNCSubsystem* Subsystem)
             UE_LOG(LogTemp, Warning, TEXT("JUSYNC Spawner: could not decode gradient PNG '%s'"), *PngCopy);
         }
     });
+}
+
+void AJUSYNCFileSpawnerActor::MaybeTriggerGradientLoad(const TArray<FString>& Files, const TArray<int32>& Ranks, UJUSYNCSubsystem* Subsystem)
+{
+    if (!Subsystem) return;
+    if (bGradientReady.load() || bMeshTextureReady) return;
+    if (bGradientDownloadStarted.load()) return;
+
+    int32 Added = 0;
+    for (int32 i = 0; i < Files.Num(); ++i)
+    {
+        const FString& F = Files[i];
+        if (!(F.EndsWith(TEXT(".png")) || F.EndsWith(TEXT(".PNG")))) continue;
+        if (GradientPngRankMap.Contains(F)) continue;
+        GradientPngRankMap.Add(F, Ranks.IsValidIndex(i) ? Ranks[i] : 0);
+        ++Added;
+    }
+
+    if (GradientPngRankMap.Num() > 0)
+    {
+        bGradientDownloadStarted.store(true);
+        UE_LOG(LogTemp, Display, TEXT("[Spawner] Gradient PNG present (%d total, %d new) - loading LUT"), GradientPngRankMap.Num(), Added);
+        DownloadGradientPng(Subsystem);
+    }
+}
+
+void AJUSYNCFileSpawnerActor::LoadMeshTextureAsync(UJUSYNCSubsystem* Subsystem)
+{
+    if (!Subsystem) return;
+    if (bMeshTextureLoading.load() || bMeshTextureReady) return;
+    if (GradientPngRankMap.Num() == 0) return;
+
+    bMeshTextureLoading.store(true);
+
+    // Copy candidates on the game thread so the background task never races a live-update rewrite.
+    TArray<TPair<FString, int32>> Candidates;
+    Candidates.Reserve(GradientPngRankMap.Num());
+    for (const TPair<FString, int32>& Png : GradientPngRankMap)
+    {
+        Candidates.Add(Png);
+    }
+
+    TWeakObjectPtr<UJUSYNCSubsystem> WeakSub = Subsystem;
+    TWeakObjectPtr<AJUSYNCFileSpawnerActor> WeakThis = this;
+
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSub, WeakThis, Candidates]()
+    {
+        if (!WeakSub.IsValid() || !WeakThis.IsValid()) return;
+        UJUSYNCSubsystem* S = WeakSub.Get();
+
+        FString ChosenPng;
+        FJUSYNCTextureData TexData;
+
+        // Fetch each candidate PNG; the first full image (height > 2) is the mesh texture.
+        // Narrow strips (height <= 2) are point-cloud gradients, handled by DownloadGradientPng.
+        TArray<uint8> PngData;
+        for (const TPair<FString, int32>& Png : Candidates)
+        {
+            PngData.Reset();
+            if (!S->RequestFile(Png.Key, Png.Value, 60000, PngData) || PngData.Num() == 0)
+            {
+                continue;
+            }
+
+            int32 W = 0, H = 0, C = 0;
+            if (!S->GetPNGDimensions(PngData, W, H, C))
+            {
+                continue;
+            }
+            if (H <= 2)
+            {
+                continue; // gradient strip, not a mesh texture
+            }
+
+            TexData = S->CreateTextureFromBuffer(PngData);
+            if (TexData.Data.Num() == 0)
+            {
+                continue;
+            }
+            ChosenPng = Png.Key;
+            break;
+        }
+
+        FFunctionGraphTask::CreateAndDispatchWhenReady(
+            [WeakSub, WeakThis, TexData = MoveTemp(TexData), ChosenPng]()
+            {
+                if (!WeakSub.IsValid() || !WeakThis.IsValid()) return;
+                UJUSYNCSubsystem* S = WeakSub.Get();
+                AJUSYNCFileSpawnerActor* T = WeakThis.Get();
+                if (!S || !T) return;
+
+                if (ChosenPng.IsEmpty() || TexData.Data.Num() == 0)
+                {
+                    T->bMeshTextureLoading.store(false);
+                    UE_LOG(LogTemp, Log, TEXT("[Spawner] No full-texture PNG found (only gradients / none) — meshes keep spawn material"));
+                    return;
+                }
+
+                UTexture2D* Tex = S->CreateUETextureFromJUSYNC(TexData);
+                if (!Tex)
+                {
+                    T->bMeshTextureLoading.store(false);
+                    return;
+                }
+
+                T->MeshTextureCache.Add(ChosenPng, Tex);
+                T->ActiveMeshTexture = Tex;
+                T->bMeshTextureReady = true;
+                T->bMeshTextureLoading.store(false);
+
+                GEngine->AddOnScreenDebugMessage(-1, 8.0f, FColor::Green,
+                    FString::Printf(TEXT("[Spawner] Mesh texture ready: %s (%dx%d)"), *ChosenPng, TexData.Width, TexData.Height));
+                UE_LOG(LogTemp, Display, TEXT("[Spawner] Mesh texture ready: %s (%dx%d), applying to %d actors"), *ChosenPng, TexData.Width, TexData.Height, T->SpawnedActors.Num());
+
+                for (AActor* A : T->SpawnedActors)
+                {
+                    T->ApplySenderTextureToActor(A);
+                }
+            },
+            TStatId(), nullptr, ENamedThreads::GameThread);
+    });
+}
+
+void AJUSYNCFileSpawnerActor::ApplySenderTextureToActor(AActor* Actor)
+{
+    if (!Actor) return;
+    URealtimeMeshComponent* Comp = Actor->GetComponentByClass<URealtimeMeshComponent>();
+    if (!Comp) return;
+    UTexture2D* Tex = ActiveMeshTexture.Get();
+    if (!Tex) return;
+    ApplySenderTextureToComponent(Comp, Tex);
+}
+
+void AJUSYNCFileSpawnerActor::ApplySenderTextureToComponent(URealtimeMeshComponent* Comp, UTexture2D* SenderTex)
+{
+    if (!Comp || !SenderTex) return;
+
+    // Base material: prefer the user's PBR spawn material (has a BaseColor param in this project),
+    // else the component's current material's base, else the engine default.
+    UMaterial* BaseMat = SpawnMaterial ? SpawnMaterial->GetMaterial() : nullptr;
+    if (!BaseMat)
+    {
+        if (UMaterialInterface* Cur = Comp->GetMaterial(0))
+        {
+            BaseMat = Cur->GetMaterial();
+        }
+    }
+    if (!BaseMat)
+    {
+        BaseMat = LoadObject<UMaterial>(nullptr, TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
+    }
+    if (!BaseMat) return;
+
+    // Texture parameter name: explicit override, else "BaseColor" (both user PBR materials expose it).
+    FName ParamName = !TextureSampleParameterName.IsEmpty() ? *TextureSampleParameterName : TEXT("BaseColor");
+
+    UMaterialInstanceDynamic* MID = UMaterialInstanceDynamic::Create(BaseMat, Comp);
+    if (!MID) return;
+
+    MID->SetTextureParameterValue(ParamName, SenderTex);
+    Comp->SetMaterial(0, MID);
+    Comp->MarkRenderStateDirty();
+    UE_LOG(LogTemp, Log, TEXT("[Spawner] Applied sender texture to mesh component (base '%s', param '%s')"), *BaseMat->GetName(), *ParamName.ToString());
+}
+
+bool AJUSYNCFileSpawnerActor::BakeLUTVertexColor(FJUSYNCMeshData& Mesh, UMaterialInterface*& OutVertexMaterial)
+{
+    OutVertexMaterial = nullptr;
+
+    // Only use the LUT path when no real sender texture is present (that gets the texture
+    // material instead) and the shared point-cloud color-map LUT is ready.
+    if (bMeshTextureReady || !bGradientReady.load())
+    {
+        return false;
+    }
+    // The per-vertex scalar lives in UV.x (USD primvars:attribute0) — the same source the
+    // point cloud indexes into the LUT with (see JUSYNCPointCloudSpawner).
+    if (Mesh.Vertices.Num() == 0 || Mesh.UVs.Num() != Mesh.Vertices.Num())
+    {
+        return false;
+    }
+
+    UJUSYNCSubsystem* Subsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
+    if (!Subsystem || !Subsystem->GetPointCloudSpawner())
+    {
+        return false;
+    }
+    const TArray<FColor> LUT = Subsystem->GetPointCloudSpawner()->GetGradientLUT();
+    if (LUT.Num() <= 1)
+    {
+        return false;
+    }
+
+    Mesh.VertexColors.SetNum(Mesh.Vertices.Num());
+    for (int32 v = 0; v < Mesh.Vertices.Num(); ++v)
+    {
+        const float Scalar = Mesh.UVs.IsValidIndex(v) ? Mesh.UVs[v].X : 0.f;
+        const int32 Idx = FMath::Clamp(FMath::RoundToInt(Scalar * (LUT.Num() - 1)), 0, LUT.Num() - 1);
+        Mesh.VertexColors[v] = LUT[Idx];
+    }
+
+    OutVertexMaterial = Subsystem->GetCachedMaterial(TEXT("/Game/Materials/M_VertexColor"));
+    if (OutVertexMaterial)
+    {
+        UE_LOG(LogTemp, Display, TEXT("[Spawner] Mesh LUT color: %d verts <- LUT[%d] (attribute0 -> UV.x) + M_VertexColor"),
+            Mesh.Vertices.Num(), LUT.Num());
+    }
+    return OutVertexMaterial != nullptr;
+}
+
+void AJUSYNCFileSpawnerActor::RegisterMeshForLUTRecolor(AActor* Spawned, const FJUSYNCMeshData& Mesh, const FString& Filename, const FVector& Loc)
+{
+    // Only queue for LUT recolor when we fell back because the color-map LUT was not ready.
+    // A real sender texture (present or loading) takes priority and never uses the LUT path.
+    if (!Spawned || !Spawned->IsValidLowLevel())
+    {
+        return;
+    }
+    if (bMeshTextureReady || bMeshTextureLoading.load() || bGradientReady.load())
+    {
+        return;
+    }
+    if (Mesh.Vertices.Num() == 0 || Mesh.UVs.Num() != Mesh.Vertices.Num())
+    {
+        return;
+    }
+
+    FRecolorMeshEntry Entry;
+    Entry.Mesh = Mesh;
+    Entry.Filename = Filename;
+    Entry.Loc = Loc;
+    if (SpawnScale != FVector::ZeroVector)
+    {
+        Entry.Scale = bUseUniformScaling ? FVector(SpawnScale.X) : FVector(SpawnScale);
+    }
+    GradientPendingMeshes.Add(Spawned, MoveTemp(Entry));
+}
+
+void AJUSYNCFileSpawnerActor::RecolorGradientPendingMeshes()
+{
+    if (GradientPendingMeshes.Num() == 0) return;
+    if (!bGradientReady.load()) return;
+
+    UJUSYNCSubsystem* Subsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
+    if (!Subsystem || !Subsystem->GetPointCloudSpawner()) return;
+    const TArray<FColor> LUT = Subsystem->GetPointCloudSpawner()->GetGradientLUT();
+    if (LUT.Num() <= 1) return;
+
+    int32 Recolored = 0;
+    TArray<AActor*> Done;
+    for (auto It = GradientPendingMeshes.CreateIterator(); It; ++It)
+    {
+        AActor* OldActor = It.Key();
+        FRecolorMeshEntry& Entry = It.Value();
+
+        if (!OldActor || !OldActor->IsValidLowLevel() || !Entry.Mesh.IsValid())
+        {
+            Done.Add(OldActor);
+            continue;
+        }
+
+        // Re-bake now that the LUT is ready; returns the vertex-color material on success.
+        UMaterialInterface* SpawnMat = nullptr;
+        if (!BakeLUTVertexColor(Entry.Mesh, SpawnMat) || !SpawnMat)
+        {
+            Done.Add(OldActor);
+            continue;
+        }
+
+        // Spawn the recolored replacement at the same transform, then swap all tracking.
+        AActor* NewActor = UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(Entry.Mesh, Entry.Loc, Entry.Rot, SpawnMat);
+        if (!NewActor)
+        {
+            Done.Add(OldActor);
+            continue;
+        }
+        NewActor->SetActorEnableCollision(false);
+        NewActor->SetActorScale3D(Entry.Scale);
+
+        SpawnedActors.Remove(OldActor);
+        SpawnedActors.Add(NewActor);
+        const FString Key = Entry.Mesh.ElementName + TEXT("|") + Entry.Filename;
+        if (FileToActorMap.Contains(Key))
+        {
+            FileToActorMap.Add(Key, NewActor);
+        }
+        if (TArray<AActor*>* Arr = FilenameToActors.Find(Entry.Filename))
+        {
+            Arr->Remove(OldActor);
+            Arr->Add(NewActor);
+        }
+
+        OldActor->Destroy();
+        Recolored++;
+        Done.Add(OldActor);
+    }
+
+    for (AActor* A : Done)
+    {
+        GradientPendingMeshes.Remove(A);
+    }
+
+    if (Recolored > 0)
+    {
+        UE_LOG(LogTemp, Display, TEXT("[Spawner] Recolored %d mesh actor(s) with LUT gradient"), Recolored);
+    }
 }
 
 void AJUSYNCFileSpawnerActor::SpawnMeshFromData(const FString& Filename, bool bParsed, TArray<FJUSYNCMeshData>&& MeshData, TArray<FJUSYNCPointCloudData>&& PointCloudData, int32 FileIndex, int32 TargetRank)
@@ -702,8 +1027,9 @@ void AJUSYNCFileSpawnerActor::SpawnMeshFromData(const FString& Filename, bool bP
             if (bGradientReady)
             {
                 UE_LOG(LogTemp, Display, TEXT("[Spawner] Gradient LUT ready after first PC parse"));
-                // Recolor any white actors spawned before gradient arrived
+                // Recolor any white actors (point clouds + meshes) spawned before gradient arrived
                 S->GetPointCloudSpawner()->RecolorGradientPendingActors();
+                RecolorGradientPendingMeshes();
             }
         }
     }
@@ -748,7 +1074,16 @@ void AJUSYNCFileSpawnerActor::SpawnMeshFromData(const FString& Filename, bool bP
                 }
 
                 FVector SpawnLoc = GetNextSpawnLocation();
-                AActor* Spawned = UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(MeshData[i], SpawnLoc);
+                // Pick the material: bake the shared color-map LUT into per-vertex color
+                // (M_VertexColor) when ready and no real texture is present; otherwise the
+                // texture-capable spawn material. Pass it at spawn so it is bound before
+                // RealtimeMesh section creation (post-hoc SetMaterial is not picked up).
+                UMaterialInterface* SpawnMat = nullptr;
+                if (!BakeLUTVertexColor(MeshData[i], SpawnMat))
+                {
+                    SpawnMat = SpawnMaterial ? UMaterialInstanceDynamic::Create(SpawnMaterial, this) : nullptr;
+                }
+                AActor* Spawned = UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(MeshData[i], SpawnLoc, FRotator::ZeroRotator, SpawnMat);
 
                 if (Spawned)
                 {
@@ -763,14 +1098,23 @@ void AJUSYNCFileSpawnerActor::SpawnMeshFromData(const FString& Filename, bool bP
 
                     if (SpawnScale != FVector::ZeroVector)
                     {
-                        FVector FinalScale = bUseUniformScaling ? FVector(SpawnScale.X) : SpawnScale;
+                        FVector FinalScale = bUseUniformScaling ? FVector(SpawnScale.X) : FVector(SpawnScale);
                         Spawned->SetActorScale3D(FinalScale);
                     }
 
-                    ApplyDynamicMaterial(Cast<UPrimitiveComponent>(Spawned->GetRootComponent()), Filename);
                     OnFileComplete.Broadcast(Filename, Spawned);
                     NextSpawnIndex++;
                     SpawnCount++;
+
+                    // If the sender texture is already loaded, apply it now. SetMaterial ->
+                    // MarkRenderStateDirty -> CreateSceneProxy rebuilds the RM proxy with the new material.
+                    if (bMeshTextureReady)
+                    {
+                        ApplySenderTextureToActor(Spawned);
+                    }
+
+                    // If we fell back because the color-map LUT wasn't ready, queue for recolor.
+                    RegisterMeshForLUTRecolor(Spawned, MeshData[i], Filename, SpawnLoc);
                 }
             }
 
@@ -1030,7 +1374,15 @@ void AJUSYNCFileSpawnerActor::ProcessDeferredSpawns()
             if (SpawnCount >= CanSpawn) { Leftovers.Add(M); continue; }
 
             FVector Loc = GetNextSpawnLocation();
-            AActor* Spawned = UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(M, Loc);
+            // M is a const reference from the deferred batch; copy so BakeLUTVertexColor can
+            // fill the per-vertex color stream before spawn.
+            FJUSYNCMeshData DeferredMesh = M;
+            UMaterialInterface* SpawnMat = nullptr;
+            if (!BakeLUTVertexColor(DeferredMesh, SpawnMat))
+            {
+                SpawnMat = SpawnMaterial ? UMaterialInstanceDynamic::Create(SpawnMaterial, this) : nullptr;
+            }
+            AActor* Spawned = UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(DeferredMesh, Loc, FRotator::ZeroRotator, SpawnMat);
             if (Spawned)
             {
                 SpawnedActors.Add(Spawned);
@@ -1039,11 +1391,11 @@ void AJUSYNCFileSpawnerActor::ProcessDeferredSpawns()
                 FilenameToActors.FindOrAdd(Entry.Value).Add(Spawned);
                 Spawned->SetActorEnableCollision(false);
                 if (SpawnScale != FVector::ZeroVector)
-                    Spawned->SetActorScale3D(bUseUniformScaling ? FVector(SpawnScale.X) : SpawnScale);
-                ApplyDynamicMaterial(Cast<UPrimitiveComponent>(Spawned->GetRootComponent()), Entry.Value);
+                    Spawned->SetActorScale3D(bUseUniformScaling ? FVector(SpawnScale.X) : FVector(SpawnScale));
                 OnFileComplete.Broadcast(Entry.Value, Spawned);
                 NextSpawnIndex++;
                 SpawnCount++;
+                RegisterMeshForLUTRecolor(Spawned, M, Entry.Value, Loc);
             }
         }
         Processed += SpawnCount;
@@ -1585,6 +1937,14 @@ void AJUSYNCFileSpawnerActor::HandleFileUpdateNotification(const FString& Filena
 
 void AJUSYNCFileSpawnerActor::DiffAndRefreshFileList(const TArray<FString>& NewFiles, const TArray<int64>& NewSizes, const TArray<int32>& NewRanks, bool bIsManual)
 {
+    // Catch a color-map LUT PNG that the VTK actor exported after the initial list query.
+    // The .usda-only loop below ignores non-USD files, so the late gradient PNG would otherwise
+    // never be added to GradientPngRankMap and never trigger the LUT download.
+    if (UJUSYNCSubsystem* GrdSubsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem())
+    {
+        MaybeTriggerGradientLoad(NewFiles, NewRanks, GrdSubsystem);
+    }
+
     TMap<FString, int64> OldSizes;
     TMap<FString, uint64> OldHashLo;
     TMap<FString, uint64> OldHashHi;
@@ -1985,7 +2345,14 @@ bool AJUSYNCFileSpawnerActor::RefreshSingleFile(const FString& Filename, int32 T
                     if (!MeshData[i].IsValid()) continue;
 
                     FVector SpawnLoc = WeakCopy->GetNextSpawnLocation();
-                    AActor* Spawned = UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(MeshData[i], SpawnLoc);
+                    // Copy so the LUT per-vertex color can be baked before spawn (see immediate path).
+                    FJUSYNCMeshData RefreshMesh = MeshData[i];
+                    UMaterialInterface* SpawnMat = nullptr;
+                    if (!WeakCopy->BakeLUTVertexColor(RefreshMesh, SpawnMat))
+                    {
+                        SpawnMat = WeakCopy->SpawnMaterial ? UMaterialInstanceDynamic::Create(WeakCopy->SpawnMaterial, WeakCopy.Get()) : nullptr;
+                    }
+                    AActor* Spawned = UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(RefreshMesh, SpawnLoc, FRotator::ZeroRotator, SpawnMat);
 
                     if (Spawned)
                     {
@@ -2004,6 +2371,7 @@ bool AJUSYNCFileSpawnerActor::RefreshSingleFile(const FString& Filename, int32 T
                         WeakCopy->OnFileComplete.Broadcast(FilenameCopy, Spawned);
                         WeakCopy->NextSpawnIndex++;
                         SpawnCount++;
+                        WeakCopy->RegisterMeshForLUTRecolor(Spawned, MeshData[i], FilenameCopy, SpawnLoc);
                     }
                 }
 

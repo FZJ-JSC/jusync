@@ -1473,8 +1473,12 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
 
     RealtimeMesh->SetupMaterialSlot(0, TEXT("PrimaryMaterial"));
 
+    // Capture any material set before mesh creation (e.g. spawner SpawnMaterial).
+    // Section creation below can drop the binding, so it is re-applied afterwards.
+    UMaterialInterface* ExistingMaterial = RealtimeMeshComponent->GetMaterial(0);
+
     // Only apply vertex color material if no material is already set
-    if (!RealtimeMeshComponent->GetMaterial(0))
+    if (!ExistingMaterial)
     {
         // Use cached material instead of loading synchronously each time
         UMaterialInterface* VertexColorMaterial = GetCachedMaterial(TEXT("/Game/Materials/M_VertexColor"));
@@ -1576,8 +1580,17 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
     SectionConfig.bIsVisible = true;
     SectionConfig.bCastsShadow = true;
     RealtimeMesh->UpdateSectionConfig(SectionKey, SectionConfig, true);
-
+    
     RealtimeMeshComponent->MarkRenderStateDirty();
+
+    // CRITICAL FIX (mirrors async path): section creation can drop the material
+    // binding, so force reapplication of the pre-set material afterwards.
+    if (ExistingMaterial)
+    {
+        RealtimeMeshComponent->SetMaterial(0, ExistingMaterial);
+        UE_LOG(LogJUSYNC, Log, TEXT("Reapplied existing material after sync mesh creation: %s"),
+               *ExistingMaterial->GetName());
+    }
     
     UE_LOG(LogJUSYNC, Log, TEXT("ðŸŽ¨ === SMOOTH VERTEX INTERPOLATION MESH CREATION COMPLETE ==="));
     UE_LOG(LogJUSYNC, Log, TEXT("âœ… CreateRealtimeMeshFromJUSYNC: Smooth mesh created '%s' (%d verts, %d tris)"),

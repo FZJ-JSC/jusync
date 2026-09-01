@@ -8,6 +8,10 @@
 #include "JUSYNCPointCloudSpawner.h"
 #include "JUSYNCFileSpawnerActor.generated.h"
 
+class UTexture2D;
+class URealtimeMeshComponent;
+class UMaterialInterface;
+
 UENUM(BlueprintType)
 enum class EJUSYNCSpawnerState : uint8
 {
@@ -185,10 +189,25 @@ private:
     void OnSingleFileDownloaded(const FString& Filename, TUniquePtr<TArray<uint8>> FileData, bool bSuccess, int32 FileIndex, int32 TargetRank);
     void OnFileDownloadError(const FString& ErrorMessage);
     void DownloadGradientPng(UJUSYNCSubsystem* Subsystem);
+    void LoadMeshTextureAsync(UJUSYNCSubsystem* Subsystem);
+    // Ingest any gradient PNGs found in Files and kick off the LUT download once (idempotent).
+    void MaybeTriggerGradientLoad(const TArray<FString>& Files, const TArray<int32>& Ranks, UJUSYNCSubsystem* Subsystem);
+    void ApplySenderTextureToActor(AActor* Actor);
+    void ApplySenderTextureToComponent(URealtimeMeshComponent* Comp, UTexture2D* SenderTex);
     void PipelineDownloadNext(UJUSYNCSubsystem* Subsystem);
 
     int32 CalculateDynamicTimeout(int64 FileSizeBytes) const;
     void SpawnMeshFromData(const FString& Filename, bool bParsed, TArray<FJUSYNCMeshData>&& MeshData, TArray<FJUSYNCPointCloudData>&& PointCloudData, int32 FileIndex, int32 TargetRank);
+    /** Bake the point-cloud color-map LUT into per-vertex color (USD primvars:attribute0 -> UV.x,
+        the same scalar the point cloud indexes the LUT with) and return the vertex-color material
+        to use. Returns false if a real sender texture is present, the LUT is not ready, the mesh
+        has no per-vertex scalar, or the vertex-color material is missing — in which case the caller
+        should fall back to the spawn material. */
+    bool BakeLUTVertexColor(FJUSYNCMeshData& Mesh, UMaterialInterface*& OutVertexMaterial);
+    /** Queue a spawned mesh for LUT recolor if it fell back because the color-map LUT was not ready yet. */
+    void RegisterMeshForLUTRecolor(AActor* Spawned, const FJUSYNCMeshData& Mesh, const FString& Filename, const FVector& Loc);
+    /** Re-spawn any mesh queued via RegisterMeshForLUTRecolor now that the LUT is ready. */
+    void RecolorGradientPendingMeshes();
     void ApplyDynamicMaterial(UPrimitiveComponent* Comp, const FString& Filename);
     void CheckAllDownloadsComplete();
     void RetryFailedDownloads();
@@ -220,7 +239,26 @@ private:
     TMap<FString, int32> GradientPngRankMap;
     TMap<int32, TArray<FColor>> RankGradients;
     std::atomic<bool> bGradientReady;
+    std::atomic<bool> bGradientDownloadStarted;  // Set once the gradient PNG download has been kicked off
     bool bGradientAttempted;  // Guard: only attempt middleware gradient once
+    // Meshes spawned before the color-map LUT was ready (fell back to the spawn/texture material).
+    // Recolored (re-spawned with per-vertex color) by RecolorGradientPendingMeshes() once the LUT
+    // arrives — mirrors the point-cloud GradientPendingActors / RecolorGradientPendingActors path.
+    struct FRecolorMeshEntry
+    {
+        FJUSYNCMeshData Mesh;
+        FString Filename;
+        FVector Loc = FVector::ZeroVector;
+        FRotator Rot = FRotator::ZeroRotator;
+        FVector Scale = FVector::OneVector;
+    };
+    TMap<AActor*, FRecolorMeshEntry> GradientPendingMeshes;
+
+    // Sender full-texture for meshes (distinct from the point-cloud gradient LUT).
+    TMap<FString, TWeakObjectPtr<UTexture2D>> MeshTextureCache;
+    TWeakObjectPtr<UTexture2D> ActiveMeshTexture;
+    std::atomic<bool> bMeshTextureLoading;
+    bool bMeshTextureReady;
     TArray<FJUSYNCPointCloudData> PendingPointClouds;
 
     int32 NextSpawnIndex;

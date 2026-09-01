@@ -470,17 +470,19 @@ static void dedup_usd_filenames_info(std::vector<anari_usd_middleware::FileInfo>
         }
     }
 
-    // Rebuild: deduped USD first, then all non-USD (PNG, etc.)
-    size_t cur = 0;
+    // Rebuild into a fresh vector: deduped USD (stem-sorted) first, then ALL non-USD
+    // (PNGs, etc.) in original order. Must NOT be done with in-place swaps — the USD
+    // selection would displace non-USD files from their original indices before the
+    // non-USD pass reads them, silently dropping PNGs from the list.
+    std::vector<anari_usd_middleware::FileInfo> result;
+    result.reserve(bestIdx.size() + nonUsdIndices.size());
     for (const auto& kv : bestIdx) {
-        if (kv.second > cur) std::swap(files[cur], files[kv.second]);
-        cur++;
+        result.push_back(files[kv.second]);
     }
     for (size_t idx : nonUsdIndices) {
-        if (idx != cur) std::swap(files[cur], files[idx]);
-        cur++;
+        result.push_back(files[idx]);
     }
-    files.erase(files.begin() + cur, files.end());
+    files = std::move(result);
 }
 
 int RequestFileList_C(int32_t target_rank, char*** out_files, size_t* out_count, int timeout_ms) {
