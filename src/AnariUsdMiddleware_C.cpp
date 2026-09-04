@@ -42,6 +42,7 @@ static std::unique_ptr<anari_usd_middleware::CollisionProcessor> g_collision_pro
 // Global callback storage - maintains C callback function pointers
 // Use atomic for thread-safe access from ZMQ callback threads
 static std::atomic<FileReceivedCallback_C> g_file_callback = nullptr;
+static std::atomic<FileReceivedSpanCallback_C> g_file_span_callback = nullptr;
 static std::atomic<MessageReceivedCallback_C> g_message_callback = nullptr;
 
 // Default collision complexity setting
@@ -123,46 +124,57 @@ int InitializeMiddleware_C(const char* endpoint) {
         // CRITICAL FIX: Only register callbacks after successful initialization
         if (result) {
             // Register file callback if available
-            if (g_file_callback) {
+            if (g_file_callback || g_file_span_callback) {
                 g_middleware->registerUpdateCallback([](const anari_usd_middleware::FileData& file_data) {
-                    if (g_file_callback) {
-                        CFileData c_data = {};
+                    FileReceivedSpanCallback_C span_callback = g_file_span_callback.load(std::memory_order_acquire);
+                    if (span_callback) {
+                        span_callback(
+                            file_data.filename.c_str(),
+                            file_data.data.empty() ? nullptr : file_data.data.data(),
+                            file_data.data.size(),
+                            file_data.hash.c_str(),
+                            file_data.fileType.c_str());
+                        return;
+                    }
 
-                        // Safe string copying with bounds checking
-                        // Use snprintf for cross-platform safety with guaranteed null termination
+                    FileReceivedCallback_C file_callback = g_file_callback.load(std::memory_order_acquire);
+                    if (!file_callback) {
+                        return;
+                    }
+
+                    CFileData c_data = {};
+
+                    // Safe string copying with bounds checking
+                    // Use snprintf for cross-platform safety with guaranteed null termination
 #ifdef _WIN32
-                        strncpy_s(c_data.filename, sizeof(c_data.filename), file_data.filename.c_str(), _TRUNCATE);
-                        strncpy_s(c_data.hash, sizeof(c_data.hash), file_data.hash.c_str(), _TRUNCATE);
-                        strncpy_s(c_data.file_type, sizeof(c_data.file_type), file_data.fileType.c_str(), _TRUNCATE);
+                    strncpy_s(c_data.filename, sizeof(c_data.filename), file_data.filename.c_str(), _TRUNCATE);
+                    strncpy_s(c_data.hash, sizeof(c_data.hash), file_data.hash.c_str(), _TRUNCATE);
+                    strncpy_s(c_data.file_type, sizeof(c_data.file_type), file_data.fileType.c_str(), _TRUNCATE);
 #else
-                        // Use snprintf for guaranteed null termination and bounds checking
-                        snprintf(c_data.filename, sizeof(c_data.filename), "%s", file_data.filename.c_str());
-                        snprintf(c_data.hash, sizeof(c_data.hash), "%s", file_data.hash.c_str());
-                        snprintf(c_data.file_type, sizeof(c_data.file_type), "%s", file_data.fileType.c_str());
+                    // Use snprintf for guaranteed null termination and bounds checking
+                    snprintf(c_data.filename, sizeof(c_data.filename), "%s", file_data.filename.c_str());
+                    snprintf(c_data.hash, sizeof(c_data.hash), "%s", file_data.hash.c_str());
+                    snprintf(c_data.file_type, sizeof(c_data.file_type), "%s", file_data.fileType.c_str());
 #endif
 
-                        // Copy binary data safely
-                        c_data.data_size = file_data.data.size();
-                        if (c_data.data_size > 0) {
-                            c_data.data = new unsigned char[c_data.data_size];
-                            std::memcpy(c_data.data, file_data.data.data(), c_data.data_size);
-                        } else {
-                            c_data.data = nullptr;
-                        }
+                    // Copy binary data safely
+                    c_data.data_size = file_data.data.size();
+                    if (c_data.data_size > 0) {
+                        c_data.data = new unsigned char[c_data.data_size];
+                        std::memcpy(c_data.data, file_data.data.data(), c_data.data_size);
+                    } else {
+                        c_data.data = nullptr;
+                    }
 
-                        // Call the callback
-                        FileReceivedCallback_C file_callback = g_file_callback.load(std::memory_order_acquire);
-                        if (file_callback) {
-                            file_callback(&c_data);
-                        }
-                        
-                        // ✅ CRITICAL FIX: Clean up allocated memory after callback
-                        // The callback should have copied any data it needs to keep
-                        if (c_data.data) {
-                            delete[] c_data.data;
-                            c_data.data = nullptr;
-                            c_data.data_size = 0;
-                        }
+                    // Call the callback
+                    file_callback(&c_data);
+
+                    // ✅ CRITICAL FIX: Clean up allocated memory after callback
+                    // The callback should have copied any data it needs to keep
+                    if (c_data.data) {
+                        delete[] c_data.data;
+                        c_data.data = nullptr;
+                        c_data.data_size = 0;
                     }
                 });
             }
@@ -202,6 +214,7 @@ void ShutdownMiddleware_C() {
 
     // Clear callback pointers
     g_file_callback = nullptr;
+    g_file_span_callback = nullptr;
     g_message_callback = nullptr;
 }
 
@@ -797,6 +810,43 @@ static bool FillCloudIntoBuffer(const anari_usd_middleware::UsdProcessor::PointC
                                 CPointCloudDataFill& dst) {
     const size_t n = src.positions.size();
 
+    const bool bDirectLidarFill =
+        dst.lidar_points != nullptr &&
+        dst.lidar_point_version == 1u &&
+        dst.lidar_point_stride == static_cast<int32_t>(sizeof(CPointCloudLidarPoint_v1));
+
+    if (bDirectLidarFill && n > 0) {
+        auto* outPoints = static_cast<CPointCloudLidarPoint_v1*>(dst.lidar_points);
+        const bool bHasVertexColors = !src.vertex_colors.empty();
+
+        for (size_t i = 0; i < n; ++i) {
+            CPointCloudLidarPoint_v1& out = outPoints[i];
+
+            // USD (x,y,z) -> UE (x,z,-y)
+            out.location[0] = src.positions[i].x;
+            out.location[1] = src.positions[i].z;
+            out.location[2] = -src.positions[i].y;
+
+            if (bHasVertexColors && i < src.vertex_colors.size()) {
+                const auto& col = src.vertex_colors[i];
+                out.color[0] = ScaleColorRaw(col.r);
+                out.color[1] = ScaleColorRaw(col.g);
+                out.color[2] = ScaleColorRaw(col.b);
+                out.color[3] = ScaleColorRaw(col.a);
+            } else {
+                out.color[0] = 255;
+                out.color[1] = 255;
+                out.color[2] = 255;
+                out.color[3] = 255;
+            }
+
+            out.normal[0] = 127;
+            out.normal[1] = 127;
+            out.normal[2] = 127;
+            out.flags = 1u;
+        }
+    }
+
     // Positions: USD (x,y,z) -> UE (x,z,-y)
     if (dst.positions && n > 0) {
         for (size_t i = 0; i < n; ++i) {
@@ -952,6 +1002,80 @@ int FillUSDFull_C(void* handle,
         return 1;
     } catch (...) {
         MIDDLEWARE_LOG_ERROR("FillUSDFull_C: exception");
+        return 0;
+    }
+}
+
+static bool FillMeshIntoBufferCompact(const anari_usd_middleware::UsdProcessor::MeshData& src,
+                                      CMeshDataFillCompact& dst) {
+    const size_t nVerts = src.points.size();
+
+    if (dst.points && nVerts > 0) {
+        for (size_t i = 0; i < nVerts; ++i) {
+            dst.points[i * 3 + 0] = src.points[i].x;
+            dst.points[i * 3 + 1] = -src.points[i].y;
+            dst.points[i * 3 + 2] = src.points[i].z;
+        }
+    }
+
+    if (dst.indices && !src.indices.empty()) {
+        for (size_t i = 0; i < src.indices.size(); ++i) {
+            dst.indices[i] = static_cast<int32_t>(src.indices[i]);
+        }
+    }
+
+    const size_t nNormals = src.normals.size();
+    if (dst.normals && nNormals > 0) {
+        for (size_t i = 0; i < nNormals; ++i) {
+            dst.normals[i * 3 + 0] = src.normals[i].x;
+            dst.normals[i * 3 + 1] = -src.normals[i].y;
+            dst.normals[i * 3 + 2] = src.normals[i].z;
+        }
+    }
+
+    const size_t nUv = src.uvs.size();
+    if (dst.uvs && nUv > 0) {
+        for (size_t i = 0; i < nUv; ++i) {
+            dst.uvs[i * 2 + 0] = src.uvs[i].x;
+            dst.uvs[i * 2 + 1] = src.uvs[i].y;
+        }
+    }
+
+    if (src.vertex_colors.size() == nVerts && nVerts > 0 && dst.vertex_colors8) {
+        for (size_t i = 0; i < nVerts; ++i) {
+            const auto& c = src.vertex_colors[i];
+            dst.vertex_colors8[i * 4 + 0] = ScaleColorToFColor(c.r);
+            dst.vertex_colors8[i * 4 + 1] = ScaleColorToFColor(c.g);
+            dst.vertex_colors8[i * 4 + 2] = ScaleColorToFColor(c.b);
+            dst.vertex_colors8[i * 4 + 3] = ScaleColorToFColor(c.a);
+        }
+    }
+
+    return true;
+}
+
+int FillUSDFullCompact_C(void* handle,
+                         CMeshDataFillCompact* meshes,
+                         size_t mesh_count,
+                         CPointCloudDataFill* clouds,
+                         size_t cloud_count) {
+    auto* h = static_cast<ParsedUSDHandle*>(handle);
+    if (!h) return 0;
+    if (mesh_count > h->meshes.size() || cloud_count > h->clouds.size()) {
+        MIDDLEWARE_LOG_ERROR("FillUSDFullCompact_C: requested more elements than parsed (%zu meshes, %zu clouds)",
+                             h->meshes.size(), h->clouds.size());
+        return 0;
+    }
+    try {
+        for (size_t i = 0; i < mesh_count; ++i) {
+            if (!FillMeshIntoBufferCompact(h->meshes[i], meshes[i])) return 0;
+        }
+        for (size_t i = 0; i < cloud_count; ++i) {
+            if (!FillCloudIntoBuffer(h->clouds[i], clouds[i])) return 0;
+        }
+        return 1;
+    } catch (...) {
+        MIDDLEWARE_LOG_ERROR("FillUSDFullCompact_C: exception");
         return 0;
     }
 }
@@ -1969,6 +2093,10 @@ void RegisterUpdateCallback_C(FileReceivedCallback_C callback) {
     g_file_callback.store(callback, std::memory_order_release);
 }
 
+void RegisterUpdateCallbackSpan_C(FileReceivedSpanCallback_C callback) {
+    g_file_span_callback.store(callback, std::memory_order_release);
+}
+
 /**
  * Register callback function for message reception notifications
  * Only one message callback can be registered at a time
@@ -1988,11 +2116,11 @@ void RegisterNotificationCallback_C(NotificationCallback_C callback) {
     if (callback) {
         MIDDLEWARE_LOG_INFO("RegisterNotificationCallback_C: registering notification callback (V2-aware)");
         g_middleware->setNotificationCallback([callback](uint32_t messageType, int32_t sourceRank,
-                                                            const std::string& filename,
-                                                            uint64_t fileSize, uint64_t timestamp,
-                                                            uint64_t hashLo, uint64_t hashHi,
-                                                            uint64_t hashPrevLo, uint64_t hashPrevHi,
-                                                            bool hasOldData) {
+                                                             const std::string& filename,
+                                                             uint64_t fileSize, uint64_t timestamp,
+                                                             uint64_t hashLo, uint64_t hashHi,
+                                                             uint64_t hashPrevLo, uint64_t hashPrevHi,
+                                                             bool hasOldData) {
             callback(messageType, sourceRank, filename.c_str(), fileSize, timestamp,
                      hashLo, hashHi, hashPrevLo, hashPrevHi, hasOldData);
         });
@@ -2000,6 +2128,74 @@ void RegisterNotificationCallback_C(NotificationCallback_C callback) {
         MIDDLEWARE_LOG_INFO("RegisterNotificationCallback_C: clearing notification callback");
         g_middleware->setNotificationCallback(nullptr);
     }
+}
+
+void RegisterSceneUpdateCallback_C(SceneUpdateCallback_C callback) {
+    if (!g_middleware) {
+        MIDDLEWARE_LOG_WARNING("RegisterSceneUpdateCallback_C: g_middleware is NULL!");
+        return;
+    }
+    if (callback) {
+        MIDDLEWARE_LOG_INFO("RegisterSceneUpdateCallback_C: registering typed scene/property callback");
+        g_middleware->setSceneUpdateCallback([callback](uint32_t messageType,
+                                                         int32_t sourceRank,
+                                                         uint64_t timestamp,
+                                                         uint64_t commitId,
+                                                         uint64_t revision,
+                                                         const std::string& primPath,
+                                                         const std::string& propertyName,
+                                                         int32_t changeType,
+                                                         int32_t valueType,
+                                                         int64_t intValue,
+                                                         float floatValue,
+                                                         const float* vec4,
+                                                         const std::string& stringValue,
+                                                         uint32_t payloadSize) {
+            callback(messageType,
+                     sourceRank,
+                     timestamp,
+                     commitId,
+                     revision,
+                     primPath.c_str(),
+                     propertyName.c_str(),
+                     changeType,
+                     valueType,
+                     intValue,
+                     floatValue,
+                     vec4,
+                     stringValue.c_str(),
+                     payloadSize);
+        });
+    } else {
+        MIDDLEWARE_LOG_INFO("RegisterSceneUpdateCallback_C: clearing typed scene/property callback");
+        g_middleware->setSceneUpdateCallback(nullptr);
+    }
+}
+
+void RegisterProtocolDiagnosticsCallback_C(ProtocolDiagnosticsCallback_C callback) {
+    if (!g_middleware) {
+        MIDDLEWARE_LOG_WARNING("RegisterProtocolDiagnosticsCallback_C: g_middleware is NULL!");
+        return;
+    }
+    if (callback) {
+        MIDDLEWARE_LOG_INFO("RegisterProtocolDiagnosticsCallback_C: registering protocol diagnostics callback");
+        g_middleware->setProtocolDiagnosticsCallback([callback](const std::string& event,
+                                                                 const std::string& message,
+                                                                 uint64_t value0,
+                                                                 uint64_t value1) {
+            callback(event.c_str(), message.c_str(), value0, value1);
+        });
+    } else {
+        MIDDLEWARE_LOG_INFO("RegisterProtocolDiagnosticsCallback_C: clearing protocol diagnostics callback");
+        g_middleware->setProtocolDiagnosticsCallback(nullptr);
+    }
+}
+
+uint32_t GetProtocolVersion_C(void) {
+    if (!g_middleware) {
+        return anari_usd_protocol::ANARI_USD_PROTOCOL_VERSION;
+    }
+    return g_middleware->getProtocolVersion();
 }
 
 // ============================================================================

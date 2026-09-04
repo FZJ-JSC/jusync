@@ -3,6 +3,7 @@
 #include "GameFramework/Actor.h"
 #include "Engine/Engine.h"
 #include "Async/ParallelFor.h"
+#include "HAL/PlatformTime.h"
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
 #include "LidarPointCloud.h"
@@ -16,6 +17,108 @@ FJUSYNCPointCloudSpawner::FJUSYNCPointCloudSpawner(TWeakObjectPtr<UObject> InOwn
 {
 }
 
+FJUSYNCPointCloudSpawner::~FJUSYNCPointCloudSpawner()
+{
+}
+
+bool FJUSYNCPointCloudSpawner::BeginTask()
+{
+    if (bShuttingDown.load())
+    {
+        return false;
+    }
+    InFlightTasks.fetch_add(1);
+    return true;
+}
+
+void FJUSYNCPointCloudSpawner::EndTask()
+{
+    InFlightTasks.fetch_sub(1);
+}
+
+void FJUSYNCPointCloudSpawner::WaitForCompletion(float TimeoutSeconds)
+{
+    bShuttingDown.store(true);
+    const double Start = FPlatformTime::Seconds();
+    while (InFlightTasks.load() > 0 && (FPlatformTime::Seconds() - Start) < FMath::Max(0.0f, TimeoutSeconds))
+    {
+        FPlatformProcess::Sleep(0.001f);
+    }
+}
+
+void FJUSYNCPointCloudSpawner::SetGradientLUT(const TArray<FColor>& InLUT)
+{
+    TArray<FPendingNoColorCloud> ToFlush;
+    {
+        FScopeLock Lock(&GradientMutex);
+        GradientLUT = InLUT;
+        ++LUTVersion;
+    }
+    {
+        FScopeLock Lock(&QueueMutex);
+        ToFlush = MoveTemp(PendingNoColorClouds);
+        PendingNoColorClouds.Empty();
+    }
+
+    for (FPendingNoColorCloud& Pending : ToFlush)
+    {
+        EnqueuePointCloud(MoveTemp(Pending.Data), Pending.Rank);
+    }
+}
+
+void FJUSYNCPointCloudSpawner::FlushExpiredNoColorClouds()
+{
+    const TArray<FColor> LUT = GetGradientLUT();
+    const bool bLUTReady = LUT.Num() > 0;
+
+    TArray<FPendingNoColorCloud> ToFlush;
+    {
+        FScopeLock Lock(&QueueMutex);
+        if (PendingNoColorClouds.Num() == 0)
+        {
+            return;
+        }
+
+        const double Now = FPlatformTime::Seconds();
+        TArray<FPendingNoColorCloud> Remaining;
+        for (FPendingNoColorCloud& Pending : PendingNoColorClouds)
+        {
+            if (bLUTReady || (Now - Pending.QueuedTime) > 2.0)
+            {
+                ToFlush.Add(MoveTemp(Pending));
+            }
+            else
+            {
+                Remaining.Add(MoveTemp(Pending));
+            }
+        }
+        PendingNoColorClouds = MoveTemp(Remaining);
+    }
+
+    for (FPendingNoColorCloud& Pending : ToFlush)
+    {
+        EnqueuePointCloud(MoveTemp(Pending.Data), Pending.Rank);
+    }
+}
+
+void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudRef&& PCRef, int32 InRank)
+{
+    if (!PCRef || !PCRef->IsValid())
+    {
+        return;
+    }
+
+    if (PCRef.IsUnique())
+    {
+        FJUSYNCPointCloudData Owned = MoveTemp(*PCRef);
+        EnqueuePointCloud(MoveTemp(Owned), InRank);
+        return;
+    }
+
+    FJUSYNCPointCloudData Copy = *PCRef;
+    EnqueuePointCloud(MoveTemp(Copy), InRank);
+}
+
 void FJUSYNCPointCloudSpawner::EnqueuePointCloud(const FJUSYNCPointCloudData& PCData, int32 InRank)
 {
     // Copy once, then move into the async task via the rvalue overload.
@@ -24,7 +127,131 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(const FJUSYNCPointCloudData& PC
 
 void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData, int32 InRank)
 {
-    if (!PCData.IsValid() || !Owner.IsValid()) return;
+    if (!PCData.IsValid() || !Owner.IsValid() || bShuttingDown.load()) return;
+
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (PCData.HasLidarPoints())
+    {
+        const int32 DirectPointCount = PCData.PointCount;
+        const bool bHasBakedColors = PCData.HasBakedColors();
+
+        if (!bHasBakedColors && PCData.Widths.Num() > 0)
+        {
+            const TArray<FColor> LocalLUT = GetGradientLUT();
+            if (LocalLUT.Num() == 0)
+            {
+                FScopeLock Lock(&QueueMutex);
+                FPendingNoColorCloud Pending;
+                Pending.Data = MoveTemp(PCData);
+                Pending.Rank = InRank;
+                Pending.QueuedTime = FPlatformTime::Seconds();
+                const FString ElementNameForLog = Pending.Data.ElementName;
+                PendingNoColorClouds.Add(MoveTemp(Pending));
+                UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: delaying PC '%s' for gradient LUT"), *ElementNameForLog);
+                return;
+            }
+        }
+
+        if (!BeginTask())
+        {
+            return;
+        }
+
+        UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: queued PC '%s' for direct LiDAR spawn (%d points)"),
+               *PCData.ElementName, DirectPointCount);
+
+        auto* DirectPointsPtr = new TArray64<FLidarPointCloudPoint>(MoveTemp(PCData.LidarPoints));
+        auto* DirectWidthsPtr = new TArray<float>(MoveTemp(PCData.Widths));
+
+        AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
+            [this, DirectPointCount, bHasBakedColors,
+             DirectPointsPtr, DirectWidthsPtr,
+             ElementName = MoveTemp(PCData.ElementName),
+             InRank]()
+        {
+            TArray64<FLidarPointCloudPoint>& Points = *DirectPointsPtr;
+            TArray<float>& Widths = *DirectWidthsPtr;
+
+            if (!bHasBakedColors && Widths.Num() > 0)
+            {
+                TArray<FColor> LocalLUT;
+                {
+                    FScopeLock Lock(&this->GradientMutex);
+                    LocalLUT = this->GradientLUT;
+                }
+
+                if (LocalLUT.Num() > 0)
+                {
+                    for (int64 i = 0; i < Points.Num(); ++i)
+                    {
+                        const float Attr0 = (i < Widths.Num()) ? Widths[i] : 0.0f;
+                        const int32 LUTIdx = FMath::Clamp(
+                            FMath::RoundToInt(Attr0 * static_cast<float>(LocalLUT.Num() - 1)),
+                            0,
+                            LocalLUT.Num() - 1
+                        );
+                        Points[i].Color = LocalLUT[LUTIdx];
+                    }
+                }
+            }
+
+            FPointCloudReadyEntry Entry;
+            Entry.Points = MoveTemp(Points);
+            Entry.ElementName = ElementName;
+            Entry.Key = ElementName.IsEmpty()
+                ? FString::Printf(TEXT("jusync_pc_r%d"), InRank)
+                : FString::Printf(TEXT("%s_r%d"), *ElementName, InRank);
+            Entry.Rank = InRank;
+            Entry.PointSize = PointSize;
+            Entry.bSpawned = false;
+            Entry.bNeedsRecolor = false;
+
+            delete DirectPointsPtr;
+            delete DirectWidthsPtr;
+
+            FFunctionGraphTask::CreateAndDispatchWhenReady(
+                [this, Entry = MoveTemp(Entry)]() mutable
+                {
+                    {
+                        FScopeLock Lock(&QueueMutex);
+                        ReadyQueue.Add(MoveTemp(Entry));
+
+                        if (ReadyQueue.Num() >= 8)
+                        {
+                            DrainReadyQueueLocked();
+                        }
+                    }
+                },
+                TStatId(), nullptr, ENamedThreads::GameThread);
+
+            EndTask();
+        });
+        return;
+    }
+#endif
+
+    const bool bLegacyHasColors = PCData.HasColors();
+    if (!bLegacyHasColors && PCData.Widths.Num() > 0)
+    {
+        const TArray<FColor> LocalLUT = GetGradientLUT();
+        if (LocalLUT.Num() == 0)
+        {
+            FScopeLock Lock(&QueueMutex);
+            FPendingNoColorCloud Pending;
+            Pending.Data = MoveTemp(PCData);
+            Pending.Rank = InRank;
+            Pending.QueuedTime = FPlatformTime::Seconds();
+            const FString ElementNameForLog = Pending.Data.ElementName;
+            PendingNoColorClouds.Add(MoveTemp(Pending));
+            UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: delaying PC '%s' for gradient LUT"), *ElementNameForLog);
+            return;
+        }
+    }
+
+    if (!BeginTask())
+    {
+        return;
+    }
 
     UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: queued PC '%s' for async conversion (%d points)"),
            *PCData.ElementName, PCData.PointCount);
@@ -33,7 +260,7 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
     // moves the arrays into the task instead of copying the whole cloud.
     AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
         [this, PointCount = PCData.PointCount, Positions = MoveTemp(PCData.Positions),
-          Colors = MoveTemp(PCData.Colors), bHasColors = PCData.HasColors(),
+          Colors = MoveTemp(PCData.Colors), bHasColors = bLegacyHasColors,
           Widths = MoveTemp(PCData.Widths), ElementName = MoveTemp(PCData.ElementName),
           InRank]()
     {
@@ -75,8 +302,9 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
         FPointCloudReadyEntry Entry;
         Entry.Points = MoveTemp(Points);
         Entry.ElementName = ElementName;
+        Entry.Key = FString::Printf(TEXT("%s_r%d"), *ElementName, InRank);
         Entry.Rank = InRank;
-        Entry.PointSize = 1.0f;
+        Entry.PointSize = PointSize;
         Entry.bSpawned = false;
         Entry.bNeedsRecolor = !bUseGradient && !bHasColors;
         if (Entry.bNeedsRecolor)
@@ -92,10 +320,11 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
                     FScopeLock Lock(&QueueMutex);
                     ReadyQueue.Add(MoveTemp(Entry));
 
-                    // Threshold flush: if queue exceeds 8, drain immediately
+                    // Threshold flush: if queue exceeds 8, drain immediately.
+                    // QueueMutex is already held by the enclosing game-thread task.
                     if (ReadyQueue.Num() >= 8)
                     {
-                        DrainReadyQueue();
+                        DrainReadyQueueLocked();
                     }
                 }
             },
@@ -111,17 +340,115 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
         (void)LocalLUT;
         (void)bUseGradient;
 #endif
+        EndTask();
     });
 }
+
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+ULidarPointCloud* FJUSYNCPointCloudSpawner::GetOrCreateCloudForComponent(ULidarPointCloudComponent* Comp)
+{
+    if (!Comp)
+    {
+        return nullptr;
+    }
+
+    ULidarPointCloud* Cloud = Comp->GetPointCloud();
+    if (!Cloud || Cloud->HasAnyFlags(RF_BeginDestroyed))
+    {
+        Cloud = NewObject<ULidarPointCloud>(Comp);
+        Comp->SetPointCloud(Cloud);
+    }
+
+    Cloud->SetOptimizedForDynamicData(true);
+    return Cloud;
+}
+#endif
+
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+void FJUSYNCPointCloudSpawner::ApplyVisualSettings(ULidarPointCloudComponent* Comp)
+{
+    if (!Comp)
+    {
+        return;
+    }
+
+    Comp->PointSize = FMath::Max(0.0f, PointSize);
+    Comp->PointSizeBias = FMath::Clamp(PointSizeBias, 0.0f, 0.15f);
+    Comp->GapFillingStrength = FMath::Max(0.0f, GapFillingStrength);
+    Comp->PointOrientation = PointOrientation;
+    Comp->ScalingMethod = PointScaling;
+
+    if (Comp->GetPointShape() != PointShape)
+    {
+        Comp->SetPointShape(PointShape);
+    }
+}
+
+void FJUSYNCPointCloudSpawner::ApplyVisualSettingsToActor(AActor* Actor)
+{
+    if (!Actor || !Actor->IsValidLowLevel())
+    {
+        return;
+    }
+
+    if (ALidarPointCloudActor* LidarActor = Cast<ALidarPointCloudActor>(Actor))
+    {
+        ApplyVisualSettings(LidarActor->GetPointCloudComponent());
+    }
+}
+
+void FJUSYNCPointCloudSpawner::MaybeCalculateNormals(ULidarPointCloud* Cloud, AActor* Actor, int32 PointCount)
+{
+    if (!Cloud || !bCalculateNormals || PointCount <= 0 || PointCount > MaxPointsForNormals)
+    {
+        return;
+    }
+
+    const double Now = FPlatformTime::Seconds();
+    if (Actor)
+    {
+        if (const double* LastTime = LastNormalCalcTime.Find(Actor))
+        {
+            if (Now - *LastTime < NormalsCooldownSeconds)
+            {
+                return;
+            }
+        }
+        LastNormalCalcTime.Add(Actor, Now);
+    }
+    else
+    {
+        static double LastGlobalNormalCalcTime = 0.0;
+        if (Now - LastGlobalNormalCalcTime < NormalsCooldownSeconds)
+        {
+            return;
+        }
+        LastGlobalNormalCalcTime = Now;
+    }
+
+    Cloud->NormalsQuality = FMath::Clamp(NormalsQuality, 1, 100);
+    Cloud->NormalsNoiseTolerance = FMath::Max(0.0f, NormalsNoiseTolerance);
+    if (bPerfLogging)
+    {
+        UE_LOG(LogTemp, Display, TEXT("JUSYNC PERF PC normals requested for %d points (quality %d)"), PointCount, Cloud->NormalsQuality);
+    }
+    Cloud->CalculateNormals(nullptr, TFunction<void(void)>());
+}
+#endif
 
 AActor* FJUSYNCPointCloudSpawner::AllocateActor()
 {
     if (AvailablePool.Num() > 0)
     {
         AActor* Actor = AvailablePool.Pop();
-        if (Actor)
+        if (Actor && Actor->IsValidLowLevel())
         {
+            UntrackActorElement(Actor);
             Actor->SetActorEnableCollision(false);
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+            ApplyVisualSettingsToActor(Actor);
+#endif
+            ActiveActors.Add(Actor);
             return Actor;
         }
     }
@@ -130,9 +457,17 @@ AActor* FJUSYNCPointCloudSpawner::AllocateActor()
     {
         if (AActor* Oldest = ActiveActors.Array().Num() > 0 ? ActiveActors.Array()[0] : nullptr)
         {
-            ActiveActors.Remove(Oldest);
-            Oldest->SetActorHiddenInGame(false);
-            return Oldest;
+            if (Oldest && Oldest->IsValidLowLevel())
+            {
+                ActiveActors.Remove(Oldest);
+                UntrackActorElement(Oldest);
+                Oldest->SetActorHiddenInGame(false);
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+                ApplyVisualSettingsToActor(Oldest);
+#endif
+                ActiveActors.Add(Oldest);
+                return Oldest;
+            }
         }
         return nullptr;
     }
@@ -159,7 +494,7 @@ AActor* FJUSYNCPointCloudSpawner::AllocateActor()
         {
             Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
             Comp->ColorSource = ELidarPointCloudColorationMode::Data;
-            Comp->PointSize = 1.0f;
+            ApplyVisualSettings(Comp);
             Comp->MinDepth = 0;
             Comp->MaxDepth = -1;
             Comp->bUseFrustumCulling = false;
@@ -174,21 +509,54 @@ AActor* FJUSYNCPointCloudSpawner::AllocateActor()
     return SpawnedActor;
 }
 
+void FJUSYNCPointCloudSpawner::UntrackActorElement(AActor* Actor)
+{
+    if (!Actor)
+    {
+        return;
+    }
+
+    if (const FString* Key = ActorToElement.Find(Actor))
+    {
+        ElementToActor.Remove(*Key);
+    }
+    ActorToElement.Remove(Actor);
+}
+
+AActor* FJUSYNCPointCloudSpawner::FindActorByElementKey(const FString& ElementKey) const
+{
+    const AActor* Found = ElementToActor.FindRef(ElementKey);
+    return (Found && Found->IsValidLowLevel()) ? const_cast<AActor*>(Found) : nullptr;
+}
+
+FString FJUSYNCPointCloudSpawner::GetElementKeyForActor(AActor* Actor) const
+{
+    return ActorToElement.FindRef(Actor);
+}
+
+void FJUSYNCPointCloudSpawner::DestroyTrackedActor(AActor* Actor)
+{
+    if (!Actor) return;
+
+    ActiveActors.Remove(Actor);
+    AvailablePool.Remove(Actor);
+    GradientPendingActors.Remove(Actor);
+    GradientPendingData.Remove(Actor);
+    LastNormalCalcTime.Remove(Actor);
+    UntrackActorElement(Actor);
+
+    if (Actor->IsValidLowLevel())
+    {
+        Actor->Destroy();
+    }
+}
+
 void FJUSYNCPointCloudSpawner::ReleaseActor(AActor* Actor)
 {
     if (!Actor) return;
 
     ActiveActors.Remove(Actor);
-#ifdef WITH_ANARI_USD_MIDDLEWARE
-    if (auto* LidarActor = Cast<ALidarPointCloudActor>(Actor))
-    {
-        if (auto* Comp = LidarActor->GetPointCloudComponent())
-        {
-            Comp->SetPointCloud(nullptr);
-        }
-    }
-#endif
-
+    UntrackActorElement(Actor);
     Actor->SetActorHiddenInGame(true);
     Actor->SetActorEnableCollision(false);
     AvailablePool.Add(Actor);
@@ -202,63 +570,121 @@ void FJUSYNCPointCloudSpawner::SetSpawnLocation(const FVector& In)
 void FJUSYNCPointCloudSpawner::Tick(float DeltaTime)
 {
     if (!Owner.IsValid()) return;
+    FlushExpiredNoColorClouds();
     DrainReadyQueue();
 }
 
 void FJUSYNCPointCloudSpawner::DrainReadyQueue()
 {
+    FScopeLock Lock(&QueueMutex);
+    DrainReadyQueueLocked();
+}
+
+void FJUSYNCPointCloudSpawner::DrainReadyQueueLocked()
+{
     if (ReadyQueue.Num() == 0) return;
 
     double StartTime = FPlatformTime::Seconds();
     int32 ItemsProcessed = 0;
+    const int32 MaxItemsPerTick = 1;
     double RemainingBudget = (BudgetMs / 1000.0);
 
     while (ReadyQueue.Num() > 0)
     {
         double Elapsed = FPlatformTime::Seconds() - StartTime;
-        if (Elapsed > RemainingBudget && ItemsProcessed > 0)
+        if (ItemsProcessed >= MaxItemsPerTick || (Elapsed > RemainingBudget && ItemsProcessed > 0))
         {
             break;
         }
 
-        FPointCloudReadyEntry& Entry = ReadyQueue.Last();
+        FPointCloudReadyEntry Entry = ReadyQueue.Pop();
 
         if (Entry.bSpawned)
         {
-            ReadyQueue.Pop();
             continue;
         }
 
-        AActor* Actor = AllocateActor();
+        if (Entry.Key.IsEmpty())
+        {
+            Entry.Key = Entry.ElementName.IsEmpty()
+                ? FString::Printf(TEXT("jusync_pc_r%d"), Entry.Rank)
+                : FString::Printf(TEXT("%s_r%d"), *Entry.ElementName, Entry.Rank);
+        }
+
+        if (Entry.Points.Num() == 0)
+        {
+            if (AActor* ExistingActor = FindActorByElementKey(Entry.Key))
+            {
+                ReleaseActor(ExistingActor);
+            }
+            UE_LOG(LogTemp, Warning, TEXT("JUSYNC Spawner: skipped empty PC entry '%s'"), *Entry.Key);
+            continue;
+        }
+
+        AActor* Actor = FindActorByElementKey(Entry.Key);
+        const bool bInPlaceUpdate = (Actor != nullptr);
         if (!Actor)
         {
-            break;
+            Actor = AllocateActor();
+            if (!Actor)
+            {
+                ReadyQueue.Add(MoveTemp(Entry));
+                break;
+            }
         }
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
-        ULidarPointCloud* LidarCloud = ULidarPointCloud::CreateFromData(Entry.Points, false);
-
-        if (!LidarCloud)
+        bool bPointCloudUpdateFailed = false;
+        if (ALidarPointCloudActor* LidarActor = Cast<ALidarPointCloudActor>(Actor))
         {
-            FString EntryName = Entry.ElementName;
-            UE_LOG(LogTemp, Warning, TEXT("JUSYNC Spawner: failed to create LiDAR cloud for '%s'"),
-                   *EntryName);
-            ReleaseActor(Actor);
-            ReadyQueue.Pop();
-            continue;
+            if (ULidarPointCloudComponent* Comp = LidarActor->GetPointCloudComponent())
+            {
+                ULidarPointCloud* LidarCloud = GetOrCreateCloudForComponent(Comp);
+                const double SetDataStart = FPlatformTime::Seconds();
+                const bool bSetDataAccepted = LidarCloud && LidarCloud->SetData(Entry.Points);
+                if (bPerfLogging)
+                {
+                    UE_LOG(LogTemp, Display, TEXT("JUSYNC PERF PC SetData '%s' %d points %.3f ms"),
+                           *Entry.Key, Entry.Points.Num(), (FPlatformTime::Seconds() - SetDataStart) * 1000.0);
+                }
+                if (!bSetDataAccepted)
+                {
+                    UE_LOG(LogTemp, Warning, TEXT("JUSYNC Spawner: failed to update LiDAR cloud for '%s'"),
+                           *Entry.Key);
+                    bPointCloudUpdateFailed = true;
+                }
+                else
+                {
+                    MaybeCalculateNormals(LidarCloud, Actor, static_cast<int32>(Entry.Points.Num()));
+                }
+            }
+            else
+            {
+                bPointCloudUpdateFailed = true;
+            }
+        }
+        else
+        {
+            bPointCloudUpdateFailed = true;
         }
 
-        // Refresh bounds to ensure correct frustum intersection in LOD Manager
-        LidarCloud->RefreshBounds();
-
-        ULidarPointCloudComponent* Comp = Cast<ALidarPointCloudActor>(Actor)->GetPointCloudComponent();
-        if (Comp)
+        if (bPointCloudUpdateFailed)
         {
-            Comp->SetPointCloud(LidarCloud);
+            if (!bInPlaceUpdate)
+            {
+                ReleaseActor(Actor);
+            }
+            continue;
         }
 
         Actor->SetActorHiddenInGame(false);
         Actor->SetActorEnableCollision(false);
+
+        if (!bInPlaceUpdate)
+        {
+            ElementToActor.Add(Entry.Key, Actor);
+            ActorToElement.Add(Actor, Entry.Key);
+        }
 
         if (Entry.bNeedsRecolor)
         {
@@ -266,16 +692,15 @@ void FJUSYNCPointCloudSpawner::DrainReadyQueue()
             GradientPendingData.Add(Actor, FRecolorData{ MoveTemp(Entry.Positions), MoveTemp(Entry.Widths) });
         }
 
-        FString EntryName = FString::Printf(TEXT("%s_r%d"), *Entry.ElementName, Entry.Rank);
-        int32 EntryPoints = Entry.Points.Num();
-        Entry.bSpawned = true;
-        ReadyQueue.Pop();
+        const FString EntryName = Entry.Key;
+        const int32 EntryPoints = Entry.Points.Num();
         ItemsProcessed++;
 
         OnPointCloudSpawned.Broadcast(EntryName, Actor);
 
         {
-            UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: loaded PC actor '%s' (%d points, budget: %.1fms remaining)"),
+            UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: %s PC actor '%s' (%d points, budget: %.1fms remaining)"),
+                   bInPlaceUpdate ? TEXT("updated") : TEXT("loaded"),
                    *EntryName, EntryPoints, (RemainingBudget - Elapsed) * 1000.0f);
         }
 #endif
@@ -303,6 +728,12 @@ void FJUSYNCPointCloudSpawner::ClearAllActors()
 
 void FJUSYNCPointCloudSpawner::DestroyAllActors()
 {
+    {
+        FScopeLock Lock(&QueueMutex);
+        ReadyQueue.Empty();
+        PendingNoColorClouds.Empty();
+    }
+
     for (AActor* Actor : ActiveActors)
     {
         if (Actor && Actor->IsValidLowLevel()) Actor->Destroy();
@@ -317,6 +748,9 @@ void FJUSYNCPointCloudSpawner::DestroyAllActors()
 
     GradientPendingActors.Empty();
     GradientPendingData.Empty();
+    ElementToActor.Empty();
+    ActorToElement.Empty();
+    LastNormalCalcTime.Empty();
 }
 
 void FJUSYNCPointCloudSpawner::RecolorGradientPendingActors()
@@ -356,11 +790,10 @@ void FJUSYNCPointCloudSpawner::RecolorGradientPendingActors()
             NewPoints[i] = FLidarPointCloudPoint(Pos.X, Pos.Y, Pos.Z, Col.R / 255.f, Col.G / 255.f, Col.B / 255.f, Col.A / 255.f);
         }
 
-        ULidarPointCloud* NewCloud = ULidarPointCloud::CreateFromData(NewPoints, false);
-        if (NewCloud)
+        ULidarPointCloud* Cloud = GetOrCreateCloudForComponent(Comp);
+        if (Cloud && Cloud->SetData(NewPoints))
         {
-            NewCloud->RefreshBounds();
-            Comp->SetPointCloud(NewCloud);
+            MaybeCalculateNormals(Cloud, Actor, static_cast<int32>(NewPoints.Num()));
             Recolored++;
         }
     }

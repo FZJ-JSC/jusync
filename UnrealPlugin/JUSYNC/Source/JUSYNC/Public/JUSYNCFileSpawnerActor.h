@@ -6,11 +6,17 @@
 #include "JUSYNCTypes.h"
 #include "JUSYNCBlueprintLibrary.h"
 #include "JUSYNCPointCloudSpawner.h"
+#include "JUSYNCMeshCache.h"
+#include "JUSYNCFileChangeTracker.h"
+#include "JUSYNCAnimationController.h"
+#include "JUSYNCUSDLoader.h"
 #include "JUSYNCFileSpawnerActor.generated.h"
 
 class UTexture2D;
 class URealtimeMeshComponent;
 class UMaterialInterface;
+class UMaterialInstanceDynamic;
+struct FJUSYNCParsedFileResult;
 
 UENUM(BlueprintType)
 enum class EJUSYNCSpawnerState : uint8
@@ -22,6 +28,29 @@ enum class EJUSYNCSpawnerState : uint8
     Spawning      UMETA(DisplayName = "Spawning Meshes"),
     Complete      UMETA(DisplayName = "Complete"),
     Error         UMETA(DisplayName = "Error")
+};
+
+UENUM(BlueprintType)
+enum class EJUSYNCPointShape : uint8
+{
+    Square UMETA(DisplayName = "Square"),
+    Circle UMETA(DisplayName = "Circle")
+};
+
+UENUM(BlueprintType)
+enum class EJUSYNCPointOrientation : uint8
+{
+    FacingCamera UMETA(DisplayName = "Facing Camera"),
+    FacingNormal UMETA(DisplayName = "Facing Normal")
+};
+
+UENUM(BlueprintType)
+enum class EJUSYNCPointScaling : uint8
+{
+    PerNode UMETA(DisplayName = "Per Node"),
+    PerNodeAdaptive UMETA(DisplayName = "Per Node Adaptive"),
+    PerPoint UMETA(DisplayName = "Per Point"),
+    FixedScreenSize UMETA(DisplayName = "Fixed Screen Size")
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnSpawnerFileProgress, int32, CurrentFile, int32, TotalFiles);
@@ -37,96 +66,144 @@ class JUSYNC_API AJUSYNCFileSpawnerActor : public AActor
 public:
     AJUSYNCFileSpawnerActor();
 
-    /** Broker endpoint, e.g. "tcp://192.168.1.100:5556" */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Connection")
     FString BrokerEndpoint;
 
-    /** Minimum timeout for any file request (ms). Actual timeout is dynamic based on file size. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Connection")
     int32 RequestTimeoutMs;
 
-    /** Estimated network bandwidth in bytes/sec for dynamic timeout calculation (default: 10GB/s = 10737418240) */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Connection")
     float BandwidthBytesPerSecond;
 
-    /** Minimum file size to include in bytes (skip manifests/metadata) */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Filters")
     int32 MinimumFileSizeBytes;
 
-    /** Only process USD files */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Filters")
     bool bFilterUSDOnly;
 
-    /** Only spawn files under "clips/" path (excludes shared manifests/materials/camera) */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Filters")
     bool bClipsOnly;
 
-    /** Target actor (e.g., Target Point, Empty, etc.) — spawns use its location as origin. Leave blank to use this actor's location. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Placement")
     AActor* SpawnTargetActor;
 
-    /** Fallback spawn location when SpawnTargetActor is not set */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Placement")
     FVector BaseSpawnLocation;
 
-    /** Spacing between spawned meshes */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Placement")
     float SpawnSpacing;
 
-    /** Number of columns in the spawn grid (default: 10) */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Placement", meta = (ClampMin = "1", ClampMax = "100"))
     int32 SpawnGridColumns;
 
-    /** Base material — a dynamic instance is created per mesh. If blank, default material is used. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Material")
     UMaterialInterface* SpawnMaterial;
 
-    /** Texture sample parameter name on the material to assign downloaded textures to. Leave blank to auto-detect. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Material")
     FString TextureSampleParameterName;
 
-    /** Scale factor for spawned meshes */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Placement")
     FVector SpawnScale;
 
-    /** Use uniform scaling (X = Y = Z) */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Placement")
     bool bUseUniformScaling;
 
-    /** Automatically start spawning when the actor begins play */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Behavior")
     bool bAutoStart;
 
-    /** Enable live update mode: watches for broker notifications and polls for file changes */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|LiveUpdate", meta = (DisplayName = "Enable Live Updates"))
     bool bEnableLiveUpdates;
 
-    /** Poll interval for checking file changes when in live update mode (seconds). Set to 0 to rely solely on broker notifications. */
+    /**
+     * Slow backstop poll interval. Broker push notifications are the primary
+     * update path; this only catches missed notifications. Set to 0 to disable.
+     */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|LiveUpdate", meta = (EditCondition = "bEnableLiveUpdates", EditConditionHides))
     float LiveUpdatePollInterval;
 
-    /** Automatically destroy and re-spawn updated meshes when a file change is detected */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|LiveUpdate", meta = (EditCondition = "bEnableLiveUpdates", EditConditionHides))
     bool bAutoRefreshMeshes;
 
-    /** Pipeline depth: how many files to download ahead while spawning previous ones (1 = sequential, higher = more overlap) */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pipeline", meta = (ClampMin = "1", ClampMax = "16"))
     int32 PipelineDepth;
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pipeline", meta = (ClampMin = "1", ClampMax = "64"))
+    int32 MaxSpawnsPerFrame;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|LiveUpdate", meta = (ClampMin = "0.0", ClampMax = "30.0"))
+    float CommitCompleteCooldownSeconds;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Diagnostics")
+    bool bEnablePerfLogging;
+
     // Point cloud settings
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud", meta = (ClampMin = "0.0"))
     float PointCloudSize;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud")
+    EJUSYNCPointShape PointShape;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud")
+    EJUSYNCPointOrientation PointOrientation;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud")
+    EJUSYNCPointScaling PointScaling;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud", meta = (ClampMin = "0.0", ClampMax = "0.15"))
+    float PointSizeBias;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud", meta = (ClampMin = "0.0"))
+    float GapFillingStrength;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud", meta = (ClampMin = "1", ClampMax = "256"))
+    int32 PointCloudPoolSize;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud")
+    bool bCalculatePointCloudNormals;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud", meta = (ClampMin = "0", ClampMax = "10000000"))
+    int32 PointCloudNormalsMaxPoints;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud", meta = (ClampMin = "1", ClampMax = "100"))
+    int32 PointCloudNormalsQuality;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud", meta = (ClampMin = "0.0"))
+    float PointCloudNormalsNoiseTolerance;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud", meta = (ClampMin = "0.0", ClampMax = "30.0"))
+    float PointCloudNormalsCooldownSeconds;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud")
     bool bSpawnPointClouds;
 
-    /** Gradient PNG filename on the broker (e.g. "shared/gradient.png"). Leave blank to auto-detect first .png */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud")
     FString GradientPngFilename;
 
-    /** Look up point colors from gradient PNG using attribute0 as the index */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud", meta = (InlineEditConditionToggle))
     bool bUseGradientColors;
+
+    // Parsed-file cache
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Cache")
+    bool bEnableMeshCache;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Cache", meta = (EditCondition = "bEnableMeshCache", EditConditionHides, ClampMin = "1", ClampMax = "4096"))
+    int32 MeshCacheMaxEntries;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Cache", meta = (EditCondition = "bEnableMeshCache", EditConditionHides, ClampMin = "16"))
+    int32 MeshCacheMaxMB;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Cache", meta = (EditCondition = "bEnableMeshCache", EditConditionHides))
+    bool bCachePointClouds;
+
+    // Time-step animation
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Animation")
+    bool bEnableTimeStepAnimation;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Animation", meta = (EditCondition = "bEnableTimeStepAnimation", EditConditionHides, ClampMin = "1.0", ClampMax = "240.0"))
+    float TimeStepPlaybackFPS;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Animation", meta = (EditCondition = "bEnableTimeStepAnimation", EditConditionHides))
+    bool bLoopTimeStepAnimation;
 
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Spawner|State")
     EJUSYNCSpawnerState CurrentState;
@@ -164,9 +241,17 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Spawner")
     void ClearSpawnedActors();
 
-    /** Manually trigger a full refresh: re-fetch file list, diff changes, and update spawned actors */
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Spawner|LiveUpdate", meta = (DisplayName = "Manual Refresh"))
     void ManualRefresh();
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Spawner|Animation")
+    void PlayTimeStepAnimation();
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Spawner|Animation")
+    void StopTimeStepAnimation();
+
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Spawner|Animation")
+    void SetTimeStepIndex(int32 NewIndex);
 
     UFUNCTION(BlueprintPure, Category = "JUSYNC|Spawner")
     FVector GetNextSpawnLocation() const;
@@ -174,56 +259,65 @@ public:
 protected:
     virtual void BeginPlay() override;
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+    virtual void Tick(float DeltaSeconds) override;
 
 private:
     void ConnectToBroker();
     void RequestFileList();
     void ProcessAndDownloadFiles();
 
-    void OnFileListReceived(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<int32>& FileRanks);
-    void OnFileListReceived_Internal(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<int32>& FileRanks, bool bSuccess);
     void OnFileListReceived_Internal(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<int32>& FileRanks, bool bSuccess, const TArray<uint64>& HashLo, const TArray<uint64>& HashHi);
-    void OnFileListReceived_Internal_Common(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<int32>& FileRanks, bool bSuccess);
     void OnFileListError(const FString& ErrorMessage);
-    void OnFileDownloaded(const FString& Filename, const TArray<uint8>& FileData);
-    void OnSingleFileDownloaded(const FString& Filename, TUniquePtr<TArray<uint8>> FileData, bool bSuccess, int32 FileIndex, int32 TargetRank);
-    void OnFileDownloadError(const FString& ErrorMessage);
+
     void DownloadGradientPng(UJUSYNCSubsystem* Subsystem);
     void LoadMeshTextureAsync(UJUSYNCSubsystem* Subsystem);
-    // Ingest any gradient PNGs found in Files and kick off the LUT download once (idempotent).
-    void MaybeTriggerGradientLoad(const TArray<FString>& Files, const TArray<int32>& Ranks, UJUSYNCSubsystem* Subsystem);
+    void MaybeTriggerGradientLoad(const TArray<FString>& Files, const TArray<int64>& Sizes, const TArray<int32>& Ranks, UJUSYNCSubsystem* Subsystem);
     void ApplySenderTextureToActor(AActor* Actor);
     void ApplySenderTextureToComponent(URealtimeMeshComponent* Comp, UTexture2D* SenderTex);
+    UMaterialInstanceDynamic* GetOrCreateSenderMID(URealtimeMeshComponent* Comp, UTexture2D* SenderTex);
     void PipelineDownloadNext(UJUSYNCSubsystem* Subsystem);
+    void ApplyPointCloudSettingsToSpawner(FJUSYNCPointCloudSpawner* Spawner);
 
     int32 CalculateDynamicTimeout(int64 FileSizeBytes) const;
-    void SpawnMeshFromData(const FString& Filename, bool bParsed, TArray<FJUSYNCMeshData>&& MeshData, TArray<FJUSYNCPointCloudData>&& PointCloudData, int32 FileIndex, int32 TargetRank);
-    /** Bake the point-cloud color-map LUT into per-vertex color (USD primvars:attribute0 -> UV.x,
-        the same scalar the point cloud indexes the LUT with) and return the vertex-color material
-        to use. Returns false if a real sender texture is present, the LUT is not ready, the mesh
-        has no per-vertex scalar, or the vertex-color material is missing — in which case the caller
-        should fall back to the spawn material. */
-    bool BakeLUTVertexColor(FJUSYNCMeshData& Mesh, UMaterialInterface*& OutVertexMaterial);
-    /** Queue a spawned mesh for LUT recolor if it fell back because the color-map LUT was not ready yet. */
-    void RegisterMeshForLUTRecolor(AActor* Spawned, const FJUSYNCMeshData& Mesh, const FString& Filename, const FVector& Loc);
-    /** Re-spawn any mesh queued via RegisterMeshForLUTRecolor now that the LUT is ready. */
+    void LoadFileThroughPipeline(const FString& Filename, int32 Rank, int64 Size, uint64 HashLo, uint64 HashHi, int32 FileIndex, bool bIsInitial);
+    void ApplyParsedFileData(FJUSYNCParsedFileResult&& Result);
+    AActor* SpawnOrUpdateMesh(FJUSYNCCompactMeshRef& Mesh, const FString& Filename, bool bIsRefresh, TArray<AActor*>& ReplacementActors, RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams = nullptr, const TArray<AActor*>* OldMeshActors = nullptr, bool bForceGradientSpawn = false);
+    void DestroyUnreplacedMeshActors(const FString& Filename, const TArray<AActor*>& OldMeshActors, const TArray<AActor*>& ReplacementActors);
+    void DestroyUnreplacedPCActors(const FString& Filename, const TArray<AActor*>& OldPCActors, const TSet<FString>& NewPCKeys);
+
+    bool BakeLUTVertexColorCompact(FJUSYNCCompactMeshRef& Mesh, UMaterialInterface*& OutVertexMaterial);
+    void RegisterMeshForLUTRecolor(AActor* Spawned, FJUSYNCCompactMeshRef& Mesh, const FString& Filename, const FVector& Loc);
     void RecolorGradientPendingMeshes();
-    void ApplyDynamicMaterial(UPrimitiveComponent* Comp, const FString& Filename);
+    void ProcessGradientDeferredMeshes(bool bForce = false);
+    void ProcessGradientDeferredMeshesTimer();
+    void RebuildGradientMaterial();
+    void FlushHiddenMeshUpdates();
+
     void CheckAllDownloadsComplete();
     void RetryFailedDownloads();
-    void FlushBufferedPointClouds();
     void OnPointCloudSpawnedHandler(const FString& EleName, AActor* Spawned);
 
-    // Live update support
     UFUNCTION()
     void OnBrokerNotification(const FJUSYNCNotification& Notification);
-    void HandleFileUpdateNotification(const FString& Filename, int32_t SourceRank);
+    void HandleFileUpdateNotification(const FString& Filename, int32_t SourceRank, int64 FileSize, uint64 HashLo, uint64 HashHi);
     void HandleCommitCompleteNotification(bool bIsTimer = false);
     void StartLiveUpdatePolling();
     void StopLiveUpdatePolling();
     void OnLiveUpdateTimer();
-    bool RefreshSingleFile(const FString& Filename, int32 TargetRank);
     void DiffAndRefreshFileList(const TArray<FString>& NewFiles, const TArray<int64>& NewSizes, const TArray<int32>& NewRanks, bool bIsManual);
+
+    void FilterFileList(const TArray<FString>& InFiles, const TArray<int64>& InSizes, const TArray<int32>& InRanks,
+        const TArray<uint64>& InHashLo, const TArray<uint64>& InHashHi,
+        TArray<FString>& OutFiles, TArray<int64>& OutSizes, TArray<int32>& OutRanks,
+        TArray<uint64>& OutHashLo, TArray<uint64>& OutHashHi,
+        TArray<FString>& OutPngFiles, TArray<int64>& OutPngSizes, TArray<int32>& OutPngRanks) const;
+    bool QueueRefreshFile(const FString& Filename, int32 Rank, int64 Size, uint64 HashLo, uint64 HashHi);
+    void UpdateTrackedFileMetadata(const FString& Filename, int32 Rank, int64 Size, uint64 HashLo, uint64 HashHi);
+    int32 DestroyFileActors(const FString& Filename);
+
+    void ChainRefreshNext();
+    void RetryRemainingFiles();
+    void ProcessDeferredSpawns();
 
     TArray<FString> RawFileList;
     TArray<int64> RawFileSizes;
@@ -236,35 +330,42 @@ private:
     TArray<int32> FilteredRanks;
     TArray<uint64> FilteredHashLo;
     TArray<uint64> FilteredHashHi;
-    TMap<FString, int32> GradientPngRankMap;
+    struct FJUSYNCFileCandidateMeta
+    {
+        int32 Rank = 0;
+        int64 Size = 0;
+    };
+    TMap<FString, FJUSYNCFileCandidateMeta> GradientPngRankMap;
     TMap<int32, TArray<FColor>> RankGradients;
     std::atomic<bool> bGradientReady;
-    std::atomic<bool> bGradientDownloadStarted;  // Set once the gradient PNG download has been kicked off
-    bool bGradientAttempted;  // Guard: only attempt middleware gradient once
-    // Meshes spawned before the color-map LUT was ready (fell back to the spawn/texture material).
-    // Recolored (re-spawned with per-vertex color) by RecolorGradientPendingMeshes() once the LUT
-    // arrives — mirrors the point-cloud GradientPendingActors / RecolorGradientPendingActors path.
+    std::atomic<bool> bGradientDownloadStarted;
+    bool bGradientAttempted;
+    TWeakObjectPtr<UTexture2D> GradientLUTTexture;
+    TWeakObjectPtr<UMaterialInterface> GradientMaterial;
+    FName GradientTextureParameterName;
+
     struct FRecolorMeshEntry
     {
-        FJUSYNCMeshData Mesh;
+        FJUSYNCCompactMeshRef Mesh;
         FString Filename;
         FVector Loc = FVector::ZeroVector;
         FRotator Rot = FRotator::ZeroRotator;
         FVector Scale = FVector::OneVector;
     };
     TMap<AActor*, FRecolorMeshEntry> GradientPendingMeshes;
+    TMap<AActor*, FRecolorMeshEntry> HiddenPendingMeshUpdates;
 
-    // Sender full-texture for meshes (distinct from the point-cloud gradient LUT).
     TMap<FString, TWeakObjectPtr<UTexture2D>> MeshTextureCache;
     TWeakObjectPtr<UTexture2D> ActiveMeshTexture;
     std::atomic<bool> bMeshTextureLoading;
     bool bMeshTextureReady;
-    TArray<FJUSYNCPointCloudData> PendingPointClouds;
+    TMap<URealtimeMeshComponent*, TWeakObjectPtr<UMaterialInstanceDynamic>> SenderMIDCache;
 
     int32 NextSpawnIndex;
     int32 PendingDownloads;
     int32 PendingAsyncSpawns;
     int32 PendingAsyncPCS;
+    int32 PendingParseTasks;
     int32 PipelineNextIndex;
     int32 PipelineActive;
     bool bIsCancelled;
@@ -275,38 +376,54 @@ private:
 
     // Live update state
     FTimerHandle LiveUpdateTimerHandle;
+    float LiveUpdatePollAccumulator = 0.0f;
     TMap<FString, AActor*> FileToActorMap;
-    // Reverse index: filename → actors spawned from it (for O(1) old actor collection)
     TMap<FString, TArray<AActor*>> FilenameToActors;
+    TMap<FString, TArray<AActor*>> FilenameToPCActors;
+    TMap<FString, FString> PCElementToFilename;
+
     TMap<FString, uint64> FileHashLo;
     TMap<FString, uint64> FileHashHi;
     TMap<FString, int64> FileLastSize;
     double LastCommitCompleteTime;
-    double CommitCompleteCooldown;
-    bool bCommitDiffInProgress;
-
-    // Live update guards
+    bool bSceneDiffInFlight;
     bool bInitialSpawnDone;
-    TSet<FString> RefreshedFiles;
-    TSet<FString> RefreshingFiles;
 
-    // Depth-gated refresh queue (reuses PipelineDepth)
-    int32 RefreshActive;
-    TArray<TPair<FString, int32>> RefreshRemainingFiles;
-
-    // V2 download-active counter: prevents timer chain refresh from firing while
-    // V2 per-file refreshes are downloading+spawning on background threads.
-    std::atomic<int32> V2ActiveDownloads;
-
-    // Persistent V2-seen file→rank map: tracks ALL files the broker notifies about,
-    // so when a stub file (tiny, filtered) later grows into real geometry, we can spawn it.
+    // Persistent V2-seen file→rank map.
     TMap<FString, int32> SeenV2Files;
     FTimerHandle SpawnThrottleTimer;
-    int32 MaxSpawnsPerFrame;
-    TArray<TPair<TArray<FJUSYNCMeshData>, FString>> DeferredSpawns;
 
-    // Forward-declare helper
-    void ChainRefreshNext();
-    void RetryRemainingFiles();
-    void ProcessDeferredSpawns();
+    TUniquePtr<FJUSYNCMeshCache> MeshCache;
+    TUniquePtr<FJUSYNCFileChangeTracker> ChangeTracker;
+    TUniquePtr<FJUSYNCAnimationController> AnimationController;
+
+    struct FDeferredSpawnEntry
+    {
+        TArray<FJUSYNCCompactMeshRef> Meshes;
+        FString Filename;
+        TArray<AActor*> OldActors;
+        TArray<AActor*> ReplacementActors;
+        int32 ExpectedNewMeshes = 0;
+        int32 SpawnedNewMeshes = 0;
+        uint64 Generation = 0;
+        TArray<TUniquePtr<RealtimeMesh::FRealtimeMeshStreamSet>> PrebuiltStreams;
+    };
+    TArray<FDeferredSpawnEntry> DeferredSpawns;
+
+    struct FJUSYNCGradientDeferredMeshEntry
+    {
+        FJUSYNCCompactMeshRef Mesh;
+        FString Filename;
+        bool bIsRefresh = false;
+        TArray<AActor*> OldActors;
+        int32 ExpectedNewMeshes = 1;
+        int32 SpawnedNewMeshes = 0;
+        uint64 Generation = 0;
+        double DeferredTime = 0.0;
+        TUniquePtr<RealtimeMesh::FRealtimeMeshStreamSet> PrebuiltStream;
+    };
+    TArray<FJUSYNCGradientDeferredMeshEntry> GradientDeferredMeshes;
+    TMap<FString, TArray<AActor*>> GradientDeferredReplacementActors;
+    FTimerHandle GradientDeferredTimerHandle;
+    float GradientDeferredTimeoutSeconds = 3.0f;
 };

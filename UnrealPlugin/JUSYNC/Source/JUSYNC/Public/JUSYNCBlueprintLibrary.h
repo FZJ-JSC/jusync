@@ -283,6 +283,18 @@ public:
         AActor* TargetActor,
         UMaterialInterface* CustomMaterial = nullptr);
 
+    static AActor* SpawnRealtimeMeshAtLocation_WithStreams(const FJUSYNCMeshData& MeshData,
+        const FVector& SpawnLocation,
+        const FRotator& SpawnRotation,
+        UMaterialInterface* CustomMaterial,
+        RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams);
+
+    static AActor* SpawnRealtimeMeshAtLocation_WithCompact(const FJUSYNCCompactMeshData& MeshData,
+        const FVector& SpawnLocation,
+        const FRotator& SpawnRotation,
+        UMaterialInterface* CustomMaterial,
+        RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams);
+
 
     DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnBatchSpawnProgress,
         const TArray<AActor*>&, SpawnedActors, float, Progress);

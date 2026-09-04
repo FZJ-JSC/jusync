@@ -12,7 +12,8 @@
 #include "Misc/FileHelper.h"
 #include "Engine/GameInstance.h"
 #include "Kismet/GameplayStatics.h"
-#include "RealtimeMeshSimple.h" 
+#include "RealtimeMeshSimple.h"
+#include "JUSYNCStreamBuilder.h"
 #include "UObject/UObjectGlobals.h"  // For MakeUniqueObjectName
 #include "Misc/DateTime.h"  // For FDateTime
 #include "HAL/PlatformTime.h"  // For FPlatformTime
@@ -148,6 +149,75 @@ extern "C" void FileReceivedCallback_Static(const CFileData* file_data)
     });
 }
 
+extern "C" void FileReceivedSpanCallback_Static(
+    const char* filename,
+    const unsigned char* /*data*/,
+    size_t data_size,
+    const char* hash,
+    const char* file_type)
+{
+    UE_LOG(LogJUSYNC, Verbose, TEXT("File received span callback triggered"));
+
+    if (!filename)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("FileReceivedSpanCallback_Static: NULL filename received"));
+        return;
+    }
+
+    FString CapturedFilename = FString(UTF8_TO_TCHAR(filename));
+
+    // Check for duplicate files (broadcast sends same file from multiple ranks)
+    {
+        FScopeLock Lock(&ProcessedFilesCriticalSection);
+        if (ProcessedFiles.Contains(CapturedFilename))
+        {
+            UE_LOG(LogJUSYNC, Log, TEXT("Skipping duplicate file: %s (already processed)"), *CapturedFilename);
+            return;
+        }
+        ProcessedFiles.Add(CapturedFilename);
+
+        // Bound memory: this set only needs recent entries to drop multi-rank duplicates within a
+        // single broadcast. Reset the window once it grows large (long sessions with live updates).
+        if (ProcessedFiles.Num() >= 4096)
+        {
+            ProcessedFiles.Reset();
+        }
+    }
+
+    UE_LOG(LogJUSYNC, Verbose, TEXT("ZMQ file received (metadata only): %s (type=%s, %d bytes)"),
+        *CapturedFilename, file_type ? UTF8_TO_TCHAR(file_type) : TEXT(""), static_cast<int32>(data_size));
+
+    UJUSYNCSubsystem* Subsystem = g_SubsystemInstance.load();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("FileReceivedSpanCallback_Static: g_SubsystemInstance is NULL"));
+        return;
+    }
+
+    FString CapturedHash = hash ? FString(UTF8_TO_TCHAR(hash)) : TEXT("");
+    FString CapturedFileType = file_type ? FString(UTF8_TO_TCHAR(file_type)) : TEXT("");
+
+    AsyncTask(ENamedThreads::GameThread, [CapturedFilename = MoveTemp(CapturedFilename),
+        CapturedHash = MoveTemp(CapturedHash),
+        CapturedFileType = MoveTemp(CapturedFileType)]()
+    {
+        UJUSYNCSubsystem* Subsystem = g_SubsystemInstance.load();
+        if (!Subsystem)
+        {
+            UE_LOG(LogJUSYNC, Error, TEXT("FileReceivedSpanCallback_Static: Subsystem null on game thread"));
+            return;
+        }
+
+        FJUSYNCFileData UEFileData;
+        UEFileData.Filename = CapturedFilename;
+        UEFileData.Hash = CapturedHash;
+        UEFileData.FileType = CapturedFileType;
+
+        Subsystem->HandleFileReceivedForLibrary(UEFileData);
+        Subsystem->OnFileReceived.Broadcast(UEFileData);
+    });
+}
+
 extern "C" void MessageReceivedCallback_Static(const char* message)
 {
     UE_LOG(LogJUSYNC, Log, TEXT("=== ZMQ MESSAGE CALLBACK TRIGGERED ==="));
@@ -255,10 +325,150 @@ extern "C" void NotificationCallback_Static(uint32_t messageType, int32_t source
         Notification.bHasOldData  = hasOldData;
 
         UE_LOG(LogJUSYNC, Log, TEXT("Broadcasting notification to Blueprint: %s '%s'"),
-               (NotifType == EJUSYNCNotificationType::FileUpdateV2) ? TEXT("FileUpdateV2") :
-               (NotifType == EJUSYNCNotificationType::CommitComplete) ? TEXT("CommitComplete") : TEXT("FileUpdate"),
-               *Notification.Filename);
+                (NotifType == EJUSYNCNotificationType::FileUpdateV2) ? TEXT("FileUpdateV2") :
+                (NotifType == EJUSYNCNotificationType::CommitComplete) ? TEXT("CommitComplete") : TEXT("FileUpdate"),
+                *Notification.Filename);
         Subsystem->OnNotificationReceived.Broadcast(Notification);
+    });
+}
+
+static EJUSYNCSceneChangeType ConvertCSceneChangeType(int32 ChangeType)
+{
+    switch (ChangeType)
+    {
+        case 1:  return EJUSYNCSceneChangeType::Created;
+        case 2:  return EJUSYNCSceneChangeType::Removed;
+        case 3:  return EJUSYNCSceneChangeType::Visibility;
+        case 4:  return EJUSYNCSceneChangeType::Transform;
+        case 5:  return EJUSYNCSceneChangeType::Material;
+        case 6:  return EJUSYNCSceneChangeType::Attribute;
+        case 7:  return EJUSYNCSceneChangeType::Commit;
+        case 8:  return EJUSYNCSceneChangeType::Property;
+        case 0:
+        default: return EJUSYNCSceneChangeType::None;
+    }
+}
+
+static EJUSYNCPropertyValueType ConvertCPropertyValueType(int32 ValueType)
+{
+    switch (ValueType)
+    {
+        case 1:  return EJUSYNCPropertyValueType::Int;
+        case 2:  return EJUSYNCPropertyValueType::Bool;
+        case 3:  return EJUSYNCPropertyValueType::Float;
+        case 4:  return EJUSYNCPropertyValueType::Float2;
+        case 5:  return EJUSYNCPropertyValueType::Float3;
+        case 6:  return EJUSYNCPropertyValueType::Float4;
+        case 7:  return EJUSYNCPropertyValueType::String;
+        case 8:  return EJUSYNCPropertyValueType::Path;
+        case 9:  return EJUSYNCPropertyValueType::ArrayRef;
+        case 0:
+        default: return EJUSYNCPropertyValueType::None;
+    }
+}
+
+extern "C" void JUSYNCSceneUpdateCallback_Static(
+    uint32_t messageType,
+    int32_t sourceRank,
+    uint64_t timestamp,
+    uint64_t commitId,
+    uint64_t revision,
+    const char* primPath,
+    const char* propertyName,
+    int32_t changeType,
+    int32_t valueType,
+    int64_t intValue,
+    float floatValue,
+    const float* vec4,
+    const char* stringValue,
+    uint32_t payloadSize)
+{
+    const FString PrimPathCopy = primPath ? FString(UTF8_TO_TCHAR(primPath)) : TEXT("");
+    const FString PropertyNameCopy = propertyName ? FString(UTF8_TO_TCHAR(propertyName)) : TEXT("");
+    const FString StringValueCopy = stringValue ? FString(UTF8_TO_TCHAR(stringValue)) : TEXT("");
+
+    const FVector4 Vec4Copy = vec4
+        ? FVector4(static_cast<double>(vec4[0]), static_cast<double>(vec4[1]), static_cast<double>(vec4[2]), static_cast<double>(vec4[3]))
+        : FVector4(0.0, 0.0, 0.0, 0.0);
+
+    UE_LOG(LogJUSYNC, Display,
+        TEXT("=== JUSYNC SCENE/PROPERTY UPDATE: type=%u rank=%d prim='%s' property='%s' change=%d valueType=%d commit=%llu revision=%llu int=%lld float=%f vec=(%f,%f,%f,%f) string='%s' payload=%u ==="),
+        messageType,
+        sourceRank,
+        *PrimPathCopy,
+        *PropertyNameCopy,
+        changeType,
+        valueType,
+        static_cast<unsigned long long>(commitId),
+        static_cast<unsigned long long>(revision),
+        static_cast<long long>(intValue),
+        static_cast<double>(floatValue),
+        Vec4Copy.X, Vec4Copy.Y, Vec4Copy.Z, Vec4Copy.W,
+        *StringValueCopy,
+        payloadSize);
+
+    AsyncTask(ENamedThreads::GameThread, [messageType, sourceRank, timestamp, commitId, revision,
+                                           PrimPathCopy, PropertyNameCopy, changeType, valueType,
+                                           intValue, floatValue, Vec4Copy, StringValueCopy, payloadSize]()
+    {
+        UJUSYNCSubsystem* Subsystem = g_SubsystemInstance.load();
+        if (!Subsystem)
+        {
+            UE_LOG(LogJUSYNC, Warning, TEXT("JUSYNCSceneUpdateCallback_Static: Subsystem instance is null, scene update dropped"));
+            return;
+        }
+
+        FJUSYNCSceneUpdate Update;
+        Update.MessageType      = static_cast<int32>(messageType);
+        Update.SourceRank       = sourceRank;
+        Update.Timestamp        = static_cast<int64>(timestamp);
+        Update.CommitId         = static_cast<int64>(commitId);
+        Update.Revision         = static_cast<int64>(revision);
+        Update.PrimPath         = PrimPathCopy;
+        Update.PropertyName     = PropertyNameCopy;
+        Update.ChangeType       = ConvertCSceneChangeType(changeType);
+        Update.ValueType        = ConvertCPropertyValueType(valueType);
+        Update.IntValue         = intValue;
+        Update.FloatValue       = floatValue;
+        Update.Vec4             = Vec4Copy;
+        Update.StringValue      = StringValueCopy;
+        Update.PayloadSize      = static_cast<int32>(payloadSize);
+
+        Subsystem->OnSceneUpdateReceived.Broadcast(Update);
+    });
+}
+
+extern "C" void JUSYNCProtocolDiagnosticsCallback_Static(
+    const char* event,
+    const char* message,
+    uint64_t value0,
+    uint64_t value1)
+{
+    const FString EventCopy = event ? FString(UTF8_TO_TCHAR(event)) : TEXT("unknown");
+    const FString MessageCopy = message ? FString(UTF8_TO_TCHAR(message)) : TEXT("");
+
+    UE_LOG(LogJUSYNC, Display,
+        TEXT("=== JUSYNC PROTOCOL DIAGNOSTICS: %s | %s (%llu, %llu) ==="),
+        *EventCopy,
+        *MessageCopy,
+        static_cast<unsigned long long>(value0),
+        static_cast<unsigned long long>(value1));
+
+    AsyncTask(ENamedThreads::GameThread, [EventCopy, MessageCopy, value0, value1]()
+    {
+        UJUSYNCSubsystem* Subsystem = g_SubsystemInstance.load();
+        if (!Subsystem)
+        {
+            return;
+        }
+
+        FJUSYNCProtocolDiagnostics Diagnostics;
+        Diagnostics.Event   = EventCopy;
+        Diagnostics.Message = MessageCopy;
+        Diagnostics.Value0  = static_cast<int64>(value0);
+        Diagnostics.Value1  = static_cast<int64>(value1);
+
+        Subsystem->OnProtocolDiagnosticsReceived.Broadcast(Diagnostics);
     });
 }
 
@@ -504,7 +714,7 @@ void UJUSYNCSubsystem::Initialize(FSubsystemCollectionBase& Collection)
     // Initialize async point cloud spawner
     PCSpawner = MakeUnique<FJUSYNCPointCloudSpawner>(TWeakObjectPtr<UJUSYNCSubsystem>(this));
     PCSpawner->SetMaxPoolSize(16);
-    PCSpawner->SetBudgetMs(500.0f);
+    PCSpawner->SetBudgetMs(33.0f);
 
     // Set LiDAR point budget to handle many simultaneous point clouds (100M+ points)
     // Prevents the LOD manager from culling distant clouds due to adaptive budget scaling
@@ -526,7 +736,12 @@ void UJUSYNCSubsystem::Deinitialize()
     
     // Clear global instance
     g_SubsystemInstance.store(nullptr);
-    
+
+    if (PCSpawner.IsValid())
+    {
+        PCSpawner->WaitForCompletion(5.0f);
+    }
+
     Super::Deinitialize();
     UE_LOG(LogJUSYNC, Log, TEXT("JUSYNCSubsystem deinitialized"));
 }
@@ -576,7 +791,7 @@ bool UJUSYNCSubsystem::InitializeMiddleware(const FString& Endpoint)
         // NOTE: Notification callback is registered AFTER ConnectToBroker because the AnariUsdClient
         // is created lazily inside connectToBroker(). Registering it here would be a no-op.
         UE_LOG(LogJUSYNC, Log, TEXT("Registering ZMQ callbacks (deferred)..."));
-        RegisterUpdateCallback_C(FileReceivedCallback_Static);
+        RegisterUpdateCallbackSpan_C(FileReceivedSpanCallback_Static);
         RegisterMessageCallback_C(MessageReceivedCallback_Static);
         UE_LOG(LogJUSYNC, Log, TEXT(" File & message callbacks registered"));
         
@@ -1100,8 +1315,28 @@ bool UJUSYNCSubsystem::LoadUSDFullFromBufferNoCopy(const TArray<uint8>& Buffer, 
             pc.bHasColors = lay.has_colors != 0;
             pc.bHasNormals = lay.has_normals != 0;
 
-            if (lay.point_count > 0) pc.Positions.SetNumUninitialized(pc.PointCount);
-            if (lay.has_colors && lay.point_count > 0) pc.Colors.SetNumUninitialized(pc.PointCount);
+            const bool bLUTReadyForDirectFill = PCSpawner.IsValid() && PCSpawner->GetGradientLUT().Num() > 0;
+            const bool bUseDirectLidarFill = lay.point_count > 0 &&
+                (lay.has_colors || !lay.has_widths || bLUTReadyForDirectFill);
+
+            if (bUseDirectLidarFill)
+            {
+                static_assert(sizeof(FLidarPointCloudPoint) == sizeof(CPointCloudLidarPoint_v1),
+                    "FLidarPointCloudPoint layout no longer matches CPointCloudLidarPoint_v1");
+
+                pc.bHasLidarPoints = true;
+                pc.LidarPoints.SetNumUninitialized(pc.PointCount);
+
+                dst.lidar_points = pc.LidarPoints.Num() > 0 ? pc.LidarPoints.GetData() : nullptr;
+                dst.lidar_point_stride = static_cast<int32_t>(sizeof(FLidarPointCloudPoint));
+                dst.lidar_point_version = 1u;
+            }
+            else
+            {
+                if (lay.point_count > 0) pc.Positions.SetNumUninitialized(pc.PointCount);
+                if (lay.has_colors && lay.point_count > 0) pc.Colors.SetNumUninitialized(pc.PointCount);
+            }
+
             if (lay.has_widths && lay.point_count > 0) pc.Widths.SetNumUninitialized(pc.PointCount);
 
             dst.positions = pc.Positions.Num() > 0 ? reinterpret_cast<double*>(pc.Positions.GetData()) : nullptr;
@@ -1138,6 +1373,185 @@ bool UJUSYNCSubsystem::LoadUSDFullFromBufferNoCopy(const TArray<uint8>& Buffer, 
     return true;
 #else
     UE_LOG(LogTemp, Warning, TEXT("JUSYNC: LoadUSDFullFromBufferNoCopy called but middleware not available"));
+    return false;
+#endif
+}
+
+bool UJUSYNCSubsystem::LoadUSDFullCompactFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCCompactMeshRef>& OutMeshes, TArray<FJUSYNCPointCloudRef>& OutPointCloudData)
+{
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    if (!bIsInitialized.load())
+    {
+        UE_LOG(LogTemp, Error, TEXT("JUSYNC: LoadUSDFullCompactFromBuffer called but middleware is not initialized"));
+        return false;
+    }
+
+    OutMeshes.Empty();
+    OutPointCloudData.Empty();
+
+    if (Buffer.Num() == 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("JUSYNC: LoadUSDFullCompactFromBuffer called with empty buffer"));
+        return false;
+    }
+
+    FTCHARToUTF8 FilenameConverter(*Filename);
+    const char* FilenameCStr = FilenameConverter.Get();
+
+    void* ParseHandle = nullptr;
+    CMeshLayout* MeshLayouts = nullptr;
+    size_t MeshCount = 0;
+    CPointCloudLayout* CloudLayouts = nullptr;
+    size_t CloudCount = 0;
+
+    int Result = 0;
+    {
+        FScopeLock Lock(&ParseMutex);
+        Result = QueryUSDFullLayout_C(
+            Buffer.GetData(), Buffer.Num(), FilenameCStr,
+            &ParseHandle, &MeshLayouts, &MeshCount,
+            &CloudLayouts, &CloudCount
+        );
+    }
+
+    if (Result != 1 || !ParseHandle)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("JUSYNC: LoadUSDFullCompactFromBuffer failed for '%s' (buffer=%d bytes, C_result=%d MeshCount=%llu CloudCount=%llu)"),
+            *Filename, Buffer.Num(), Result, (uint64)MeshCount, (uint64)CloudCount);
+        if (ParseHandle) FreeParsedUSD_C(ParseHandle);
+        FreeUSDFullLayouts_C(MeshLayouts, MeshCount, CloudLayouts, CloudCount);
+        return false;
+    }
+
+    if (MeshCount > 0)
+    {
+        OutMeshes.SetNum(static_cast<int32>(MeshCount));
+        CMeshDataFillCompact* FillMeshes = reinterpret_cast<CMeshDataFillCompact*>(FMemory::Malloc(MeshCount * sizeof(CMeshDataFillCompact)));
+        FMemory::Memzero(FillMeshes, MeshCount * sizeof(CMeshDataFillCompact));
+
+        for (size_t i = 0; i < MeshCount; ++i)
+        {
+            const CMeshLayout& lay = MeshLayouts[i];
+            OutMeshes[i] = MakeShared<FJUSYNCCompactMeshData, ESPMode::ThreadSafe>();
+            FJUSYNCCompactMeshData& Mesh = *OutMeshes[i];
+            CMeshDataFillCompact& dst = FillMeshes[i];
+
+            Mesh.ElementName = UTF8_TO_TCHAR(lay.element_name);
+            Mesh.TypeName = UTF8_TO_TCHAR(lay.type_name);
+
+            if (lay.points_count > 0) Mesh.Points.SetNumUninitialized(static_cast<int32>(lay.points_count));
+            if (lay.indices_count > 0) Mesh.Triangles.SetNumUninitialized(static_cast<int32>(lay.indices_count));
+            if (lay.normals_count > 0) Mesh.Normals.SetNumUninitialized(static_cast<int32>(lay.normals_count));
+            if (lay.uvs_count > 0) Mesh.UVs.SetNumUninitialized(static_cast<int32>(lay.uvs_count));
+            if (lay.vertex_colors_count > 0) Mesh.VertexColors.SetNumUninitialized(static_cast<int32>(lay.vertex_colors_count));
+
+            dst.points = Mesh.Points.Num() > 0 ? reinterpret_cast<float*>(Mesh.Points.GetData()) : nullptr;
+            dst.indices = Mesh.Triangles.Num() > 0 ? Mesh.Triangles.GetData() : nullptr;
+            dst.normals = Mesh.Normals.Num() > 0 ? reinterpret_cast<float*>(Mesh.Normals.GetData()) : nullptr;
+            dst.uvs = Mesh.UVs.Num() > 0 ? reinterpret_cast<float*>(Mesh.UVs.GetData()) : nullptr;
+            dst.vertex_colors8 = Mesh.VertexColors.Num() > 0 ? reinterpret_cast<unsigned char*>(Mesh.VertexColors.GetData()) : nullptr;
+        }
+
+        const int FillResult = FillUSDFullCompact_C(ParseHandle, FillMeshes, MeshCount, nullptr, 0);
+        FMemory::Free(FillMeshes);
+        if (FillResult != 1)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("JUSYNC: FillUSDFullCompact_C (meshes) failed for '%s'"), *Filename);
+            FreeParsedUSD_C(ParseHandle);
+            FreeUSDFullLayouts_C(MeshLayouts, MeshCount, CloudLayouts, CloudCount);
+            return false;
+        }
+
+        for (int32 i = 0; i < OutMeshes.Num(); ++i)
+        {
+            FJUSYNCCompactMeshData& Mesh = *OutMeshes[i];
+            for (int32 j = 0; j < Mesh.Normals.Num(); ++j)
+            {
+                Mesh.Normals[j] = Mesh.Normals[j].GetSafeNormal();
+                if (Mesh.Normals[j].IsNearlyZero())
+                {
+                    Mesh.Normals[j] = FVector3f(0.0f, 0.0f, 1.0f);
+                }
+            }
+            Mesh.bHasBakedColors = Mesh.VertexColors.Num() > 0;
+        }
+    }
+
+    if (CloudCount > 0)
+    {
+        OutPointCloudData.SetNum(static_cast<int32>(CloudCount));
+        CPointCloudDataFill* FillClouds = reinterpret_cast<CPointCloudDataFill*>(FMemory::Malloc(CloudCount * sizeof(CPointCloudDataFill)));
+        FMemory::Memzero(FillClouds, CloudCount * sizeof(CPointCloudDataFill));
+
+        for (size_t i = 0; i < CloudCount; ++i)
+        {
+            const CPointCloudLayout& lay = CloudLayouts[i];
+            OutPointCloudData[i] = MakeShared<FJUSYNCPointCloudData, ESPMode::ThreadSafe>();
+            FJUSYNCPointCloudData& pc = *OutPointCloudData[i];
+            CPointCloudDataFill& dst = FillClouds[i];
+
+            pc.ElementName = UTF8_TO_TCHAR(lay.element_name);
+            pc.TypeName = TEXT("GeomPoints");
+            pc.PointCount = static_cast<int32>(lay.point_count);
+            pc.bHasColors = lay.has_colors != 0;
+            pc.bHasNormals = lay.has_normals != 0;
+
+            const bool bLUTReadyForDirectFill = PCSpawner.IsValid() && PCSpawner->GetGradientLUT().Num() > 0;
+            const bool bUseDirectLidarFill = lay.point_count > 0 &&
+                (lay.has_colors || !lay.has_widths || bLUTReadyForDirectFill);
+
+            if (bUseDirectLidarFill)
+            {
+                static_assert(sizeof(FLidarPointCloudPoint) == sizeof(CPointCloudLidarPoint_v1),
+                    "FLidarPointCloudPoint layout no longer matches CPointCloudLidarPoint_v1");
+
+                pc.bHasLidarPoints = true;
+                pc.LidarPoints.SetNumUninitialized(pc.PointCount);
+
+                dst.lidar_points = pc.LidarPoints.Num() > 0 ? pc.LidarPoints.GetData() : nullptr;
+                dst.lidar_point_stride = static_cast<int32_t>(sizeof(FLidarPointCloudPoint));
+                dst.lidar_point_version = 1u;
+            }
+            else
+            {
+                if (lay.point_count > 0) pc.Positions.SetNumUninitialized(pc.PointCount);
+                if (lay.has_colors && lay.point_count > 0) pc.Colors.SetNumUninitialized(pc.PointCount);
+            }
+
+            if (lay.has_widths && lay.point_count > 0) pc.Widths.SetNumUninitialized(pc.PointCount);
+
+            dst.positions = pc.Positions.Num() > 0 ? reinterpret_cast<double*>(pc.Positions.GetData()) : nullptr;
+            dst.colors8 = pc.Colors.Num() > 0 ? reinterpret_cast<unsigned char*>(pc.Colors.GetData()) : nullptr;
+            dst.widths = pc.Widths.Num() > 0 ? pc.Widths.GetData() : nullptr;
+        }
+
+        const int FillResult = FillUSDFullCompact_C(ParseHandle, nullptr, 0, FillClouds, CloudCount);
+        if (FillResult != 1)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("JUSYNC: FillUSDFullCompact_C (point clouds) failed for '%s'"), *Filename);
+            FMemory::Free(FillClouds);
+            FreeParsedUSD_C(ParseHandle);
+            FreeUSDFullLayouts_C(MeshLayouts, MeshCount, CloudLayouts, CloudCount);
+            return false;
+        }
+
+        for (int32 i = 0; i < OutPointCloudData.Num(); ++i)
+        {
+            const CPointCloudDataFill& dst = FillClouds[i];
+            OutPointCloudData[i]->BoundingBoxMin = FVector(dst.bounding_box_min[0], dst.bounding_box_min[2], -dst.bounding_box_min[1]);
+            OutPointCloudData[i]->BoundingBoxMax = FVector(dst.bounding_box_max[0], dst.bounding_box_max[2], -dst.bounding_box_max[1]);
+        }
+        FMemory::Free(FillClouds);
+    }
+
+    FreeParsedUSD_C(ParseHandle);
+    FreeUSDFullLayouts_C(MeshLayouts, MeshCount, CloudLayouts, CloudCount);
+
+    UE_LOG(LogTemp, Log, TEXT("JUSYNC: LoadUSDFullCompactFromBuffer: %d compact meshes + %d point clouds from '%s'"),
+        OutMeshes.Num(), OutPointCloudData.Num(), *Filename);
+    return true;
+#else
+    UE_LOG(LogTemp, Warning, TEXT("JUSYNC: LoadUSDFullCompactFromBuffer called but middleware not available"));
     return false;
 #endif
 }
@@ -1416,9 +1830,193 @@ void RecalculateNormals(FJUSYNCMeshData& MeshData)
     UE_LOG(LogJUSYNC, Log, TEXT("Recalculated normals with correct CCW winding"));
 }
 
+bool UJUSYNCSubsystem::UpdateRealtimeMeshFromJUSYNC(
+    const FJUSYNCMeshData& MeshData,
+    URealtimeMeshComponent* RealtimeMeshComponent,
+    UMaterialInterface* MaterialToApply,
+    RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams)
+{
+    if (!RealtimeMeshComponent || !RealtimeMeshComponent->IsValidLowLevel())
+    {
+        return false;
+    }
+    if (!MeshData.IsValid())
+    {
+        return false;
+    }
+
+    const double UpdateStart = FPlatformTime::Seconds();
+    RealtimeMesh::FRealtimeMeshStreamSet Streams;
+    if (PrebuiltStreams)
+    {
+        Streams = MoveTemp(*PrebuiltStreams);
+    }
+    else
+    {
+        const double BuildStart = FPlatformTime::Seconds();
+        if (!JUSYNCBuildRealtimeMeshStreams(MeshData, Streams))
+        {
+            return false;
+        }
+        UE_LOG(LogJUSYNC, Verbose, TEXT("JUSYNC PERF BuildStreams '%s' %.3f ms"),
+               *MeshData.ElementName, (FPlatformTime::Seconds() - BuildStart) * 1000.0);
+    }
+
+    URealtimeMeshSimple* RealtimeMesh = Cast<URealtimeMeshSimple>(RealtimeMeshComponent->GetRealtimeMesh());
+    if (!RealtimeMesh)
+    {
+        RealtimeMesh = RealtimeMeshComponent->InitializeRealtimeMesh<URealtimeMeshSimple>();
+    }
+    if (!RealtimeMesh)
+    {
+        return false;
+    }
+
+    RealtimeMesh->SetupMaterialSlot(0, TEXT("PrimaryMaterial"));
+
+    UMaterialInterface* ActiveMaterial = MaterialToApply ? MaterialToApply : RealtimeMeshComponent->GetMaterial(0);
+    if (!ActiveMaterial)
+    {
+        ActiveMaterial = GetCachedMaterial(TEXT("/Game/Materials/M_VertexColor"));
+        if (!ActiveMaterial)
+        {
+            UMaterialInterface* DefaultMat = GetCachedMaterial(TEXT("/Engine/EngineMaterials/DefaultMaterial"));
+            if (DefaultMat)
+            {
+                auto* DynMat = UMaterialInstanceDynamic::Create(DefaultMat, RealtimeMeshComponent);
+                if (DynMat)
+                {
+                    DynMat->SetScalarParameterValue(TEXT("UseVertexColor"), 1.0f);
+                    ActiveMaterial = DynMat;
+                }
+            }
+        }
+    }
+    const FRealtimeMeshSectionGroupKey GroupKey = FRealtimeMeshSectionGroupKey::Create(0, TEXT("USDGroup"));
+    const FRealtimeMeshSectionKey SectionKey = FRealtimeMeshSectionKey::CreateForPolyGroup(GroupKey, 0);
+
+    if (RealtimeMesh->GetSectionGroup(GroupKey))
+    {
+        RealtimeMesh->UpdateSectionGroup(GroupKey, MoveTemp(Streams));
+    }
+    else
+    {
+        RealtimeMesh->CreateSectionGroup(GroupKey, MoveTemp(Streams));
+    }
+
+    FRealtimeMeshSectionConfig SectionConfig(0);
+    SectionConfig.bIsVisible = true;
+    SectionConfig.bCastsShadow = true;
+    RealtimeMesh->UpdateSectionConfig(SectionKey, SectionConfig, false);
+
+    if (ActiveMaterial)
+    {
+        RealtimeMeshComponent->SetMaterial(0, ActiveMaterial);
+    }
+
+    UE_LOG(LogJUSYNC, Verbose, TEXT("JUSYNC PERF UpdateRealtimeMesh '%s' %.3f ms"),
+           *MeshData.ElementName, (FPlatformTime::Seconds() - UpdateStart) * 1000.0);
+    return true;
+}
+
+bool UJUSYNCSubsystem::UpdateRealtimeMeshFromJUSYNC_WithCompact(
+    const FJUSYNCCompactMeshData& MeshData,
+    URealtimeMeshComponent* RealtimeMeshComponent,
+    UMaterialInterface* MaterialToApply,
+    RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams)
+{
+    if (!RealtimeMeshComponent || !RealtimeMeshComponent->IsValidLowLevel())
+    {
+        return false;
+    }
+    if (!MeshData.IsValid())
+    {
+        return false;
+    }
+
+    const double UpdateStart = FPlatformTime::Seconds();
+    RealtimeMesh::FRealtimeMeshStreamSet Streams;
+    if (PrebuiltStreams)
+    {
+        Streams = MoveTemp(*PrebuiltStreams);
+    }
+    else
+    {
+        if (!JUSYNCBuildRealtimeMeshStreams(MeshData, Streams))
+        {
+            return false;
+        }
+    }
+
+    URealtimeMeshSimple* RealtimeMesh = Cast<URealtimeMeshSimple>(RealtimeMeshComponent->GetRealtimeMesh());
+    if (!RealtimeMesh)
+    {
+        RealtimeMesh = RealtimeMeshComponent->InitializeRealtimeMesh<URealtimeMeshSimple>();
+    }
+    if (!RealtimeMesh)
+    {
+        return false;
+    }
+
+    RealtimeMesh->SetupMaterialSlot(0, TEXT("PrimaryMaterial"));
+
+    UMaterialInterface* ActiveMaterial = MaterialToApply ? MaterialToApply : RealtimeMeshComponent->GetMaterial(0);
+    if (!ActiveMaterial)
+    {
+        ActiveMaterial = GetCachedMaterial(TEXT("/Game/Materials/M_VertexColor"));
+        if (!ActiveMaterial)
+        {
+            UMaterialInterface* DefaultMat = GetCachedMaterial(TEXT("/Engine/EngineMaterials/DefaultMaterial"));
+            if (DefaultMat)
+            {
+                auto* DynMat = UMaterialInstanceDynamic::Create(DefaultMat, RealtimeMeshComponent);
+                if (DynMat)
+                {
+                    DynMat->SetScalarParameterValue(TEXT("UseVertexColor"), 1.0f);
+                    ActiveMaterial = DynMat;
+                }
+            }
+        }
+    }
+
+    const FRealtimeMeshSectionGroupKey GroupKey = FRealtimeMeshSectionGroupKey::Create(0, TEXT("USDGroup"));
+    const FRealtimeMeshSectionKey SectionKey = FRealtimeMeshSectionKey::CreateForPolyGroup(GroupKey, 0);
+
+    if (RealtimeMesh->GetSectionGroup(GroupKey))
+    {
+        RealtimeMesh->UpdateSectionGroup(GroupKey, MoveTemp(Streams));
+    }
+    else
+    {
+        RealtimeMesh->CreateSectionGroup(GroupKey, MoveTemp(Streams));
+    }
+
+    FRealtimeMeshSectionConfig SectionConfig(0);
+    SectionConfig.bIsVisible = true;
+    SectionConfig.bCastsShadow = true;
+    RealtimeMesh->UpdateSectionConfig(SectionKey, SectionConfig, false);
+
+    if (ActiveMaterial)
+    {
+        RealtimeMeshComponent->SetMaterial(0, ActiveMaterial);
+    }
+
+    UE_LOG(LogJUSYNC, Verbose, TEXT("JUSYNC PERF UpdateRealtimeMeshCompact '%s' %.3f ms"),
+        *MeshData.ElementName, (FPlatformTime::Seconds() - UpdateStart) * 1000.0);
+    return true;
+}
+
 bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
     const FJUSYNCMeshData& InMeshData,
     URealtimeMeshComponent* RealtimeMeshComponent)
+{
+    return CreateRealtimeMeshFromJUSYNC_WithStreams(InMeshData, RealtimeMeshComponent, nullptr);
+}
+
+bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC_WithStreams(
+    const FJUSYNCMeshData& InMeshData,
+    URealtimeMeshComponent* RealtimeMeshComponent,
+    RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams)
 {
     // Enhanced safety checks
     if (!RealtimeMeshComponent || !RealtimeMeshComponent->IsValidLowLevel())
@@ -1507,81 +2105,24 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
 
 
     RealtimeMesh::FRealtimeMeshStreamSet Streams;
-    auto Builder = RealtimeMesh::TRealtimeMeshBuilderLocal<uint32>(Streams);
-    Builder.EnableTangents();
-    Builder.EnableTexCoords();
-    Builder.EnableColors();
-    Builder.EnablePolyGroups();
-
-    // Add vertices and attributes - OPTIMIZED for performance
-    // Pre-calculate common values to avoid repeated function calls
-    const bool bHasNormals = MeshData.HasNormals();
-    const bool bHasUVs = MeshData.HasUVs();
-    const bool bHasVertexColors = MeshData.HasVertexColors();
-    
-    for (int32 i = 0; i < FinalVertexCount; ++i)
+    if (PrebuiltStreams)
     {
-        Builder.AddVertex(FVector3f(MeshData.Vertices[i]));
-
-        // Normals - optimized check
-        FVector3f N = bHasNormals && MeshData.Normals.IsValidIndex(i) 
-            ? FVector3f(MeshData.Normals[i]) 
-            : FVector3f(0.0f, 0.0f, 1.0f); // Default up vector
-        Builder.SetNormal(i, N);
-
-        // UVs - optimized check
-        if (bHasUVs && MeshData.UVs.IsValidIndex(i))
-        {
-            Builder.SetTexCoord(i, 0, FVector2DHalf(FVector2f(MeshData.UVs[i])));
-        }
-        else
-        {
-            Builder.SetTexCoord(i, 0, FVector2DHalf(FVector2f::ZeroVector));
-        }
-
-        // Colors - optimized check
-        if (bHasVertexColors && MeshData.VertexColors.IsValidIndex(i))
-        {
-            FColor VertexColor = MeshData.VertexColors[i];
-            Builder.SetColor(i, VertexColor);
-        }
-        else
-        {
-            Builder.SetColor(i, FColor::White);
-        }
+        Streams = MoveTemp(*PrebuiltStreams);
     }
-
-    // Add triangles - OPTIMIZED
-    const int32* TrianglesPtr = MeshData.Triangles.GetData();
-    for (int32 Face = 0; Face < FinalTriCount; ++Face)
+    else if (!JUSYNCBuildRealtimeMeshStreams(MeshData, Streams))
     {
-        int32 baseIdx = Face * 3;
-        int32 i0 = TrianglesPtr[baseIdx];
-        int32 i1 = TrianglesPtr[baseIdx + 1];
-        int32 i2 = TrianglesPtr[baseIdx + 2];
-        
-        // Fast bounds checking - most triangles will be valid
-        if (i0 < FinalVertexCount && i1 < FinalVertexCount && i2 < FinalVertexCount)
-        {
-            Builder.AddTriangle(i0, i1, i2);
-        }
-        else
-        {
-            UE_LOG(LogJUSYNC, Error, TEXT("âŒ Invalid triangle %d: [%d,%d,%d] vs %d vertices"), 
-                   Face, i0, i1, i2, FinalVertexCount);
-        }
+        UE_LOG(LogJUSYNC, Error, TEXT("Failed to build RealtimeMesh streams for '%s'"), *MeshData.ElementName);
+        return false;
     }
 
     // Finalize the mesh section
     const FRealtimeMeshSectionGroupKey GroupKey = FRealtimeMeshSectionGroupKey::Create(0, TEXT("USDGroup"));
     const FRealtimeMeshSectionKey SectionKey = FRealtimeMeshSectionKey::CreateForPolyGroup(GroupKey, 0);
-    RealtimeMesh->CreateSectionGroup(GroupKey, Streams);
+    RealtimeMesh->CreateSectionGroup(GroupKey, MoveTemp(Streams));
     FRealtimeMeshSectionConfig SectionConfig(0);
     SectionConfig.bIsVisible = true;
     SectionConfig.bCastsShadow = true;
-    RealtimeMesh->UpdateSectionConfig(SectionKey, SectionConfig, true);
-    
-    RealtimeMeshComponent->MarkRenderStateDirty();
+    RealtimeMesh->UpdateSectionConfig(SectionKey, SectionConfig, false);
 
     // CRITICAL FIX (mirrors async path): section creation can drop the material
     // binding, so force reapplication of the pre-set material afterwards.
@@ -1596,6 +2137,98 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC(
     UE_LOG(LogJUSYNC, Log, TEXT("âœ… CreateRealtimeMeshFromJUSYNC: Smooth mesh created '%s' (%d verts, %d tris)"),
            *MeshData.ElementName, FinalVertexCount, FinalTriCount);
 
+    return true;
+}
+
+bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC_WithCompact(
+    const FJUSYNCCompactMeshData& InMeshData,
+    URealtimeMeshComponent* RealtimeMeshComponent,
+    RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams)
+{
+    if (!RealtimeMeshComponent || !RealtimeMeshComponent->IsValidLowLevel())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("Invalid or destroyed RealtimeMeshComponent"));
+        return false;
+    }
+
+    if (!InMeshData.IsValid())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("Invalid compact mesh data"));
+        return false;
+    }
+
+    const FJUSYNCCompactMeshData& MeshData = InMeshData;
+
+    if (MeshData.Points.Num() == 0 ||
+        MeshData.Triangles.Num() < 3 ||
+        (MeshData.Triangles.Num() % 3) != 0)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("Invalid compact mesh arrays"));
+        return false;
+    }
+
+    UE_LOG(LogJUSYNC, Log, TEXT("COMPACT REALTIME MESH CREATION: %s (%d verts, %d tris, colors=%d)"),
+        *MeshData.ElementName, MeshData.Points.Num(), MeshData.Triangles.Num() / 3, MeshData.HasVertexColors() ? 1 : 0);
+
+    URealtimeMeshSimple* RealtimeMesh = RealtimeMeshComponent->InitializeRealtimeMesh<URealtimeMeshSimple>();
+    if (!RealtimeMesh)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("Failed to initialize RealtimeMesh"));
+        return false;
+    }
+
+    RealtimeMesh->SetupMaterialSlot(0, TEXT("PrimaryMaterial"));
+
+    UMaterialInterface* ExistingMaterial = RealtimeMeshComponent->GetMaterial(0);
+
+    if (!ExistingMaterial)
+    {
+        UMaterialInterface* VertexColorMaterial = GetCachedMaterial(TEXT("/Game/Materials/M_VertexColor"));
+        if (VertexColorMaterial)
+        {
+            RealtimeMeshComponent->SetMaterial(0, VertexColorMaterial);
+        }
+        else
+        {
+            UMaterialInterface* DefaultMat = GetCachedMaterial(TEXT("/Engine/EngineMaterials/DefaultMaterial"));
+            if (DefaultMat)
+            {
+                auto* DynMat = UMaterialInstanceDynamic::Create(DefaultMat, RealtimeMeshComponent);
+                if (DynMat)
+                {
+                    DynMat->SetScalarParameterValue(TEXT("UseVertexColor"), 1.0f);
+                    RealtimeMeshComponent->SetMaterial(0, DynMat);
+                }
+            }
+        }
+    }
+
+    RealtimeMesh::FRealtimeMeshStreamSet Streams;
+    if (PrebuiltStreams)
+    {
+        Streams = MoveTemp(*PrebuiltStreams);
+    }
+    else if (!JUSYNCBuildRealtimeMeshStreams(MeshData, Streams))
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("Failed to build compact RealtimeMesh streams for '%s'"), *MeshData.ElementName);
+        return false;
+    }
+
+    const FRealtimeMeshSectionGroupKey GroupKey = FRealtimeMeshSectionGroupKey::Create(0, TEXT("USDGroup"));
+    const FRealtimeMeshSectionKey SectionKey = FRealtimeMeshSectionKey::CreateForPolyGroup(GroupKey, 0);
+    RealtimeMesh->CreateSectionGroup(GroupKey, MoveTemp(Streams));
+    FRealtimeMeshSectionConfig SectionConfig(0);
+    SectionConfig.bIsVisible = true;
+    SectionConfig.bCastsShadow = true;
+    RealtimeMesh->UpdateSectionConfig(SectionKey, SectionConfig, false);
+
+    if (ExistingMaterial)
+    {
+        RealtimeMeshComponent->SetMaterial(0, ExistingMaterial);
+    }
+
+    UE_LOG(LogJUSYNC, Log, TEXT("CreateRealtimeMeshFromJUSYNC_WithCompact: '%s' (%d verts, %d tris)"),
+        *MeshData.ElementName, MeshData.Points.Num(), MeshData.Triangles.Num() / 3);
     return true;
 }
 
@@ -1734,13 +2367,13 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNCWithSplitting(
         }
         
         // Create section group
-        RealtimeMesh->CreateSectionGroup(GroupKey, Streams);
-        
+        RealtimeMesh->CreateSectionGroup(GroupKey, MoveTemp(Streams));
+
         // Configure section
         FRealtimeMeshSectionConfig SectionConfig(0);
         SectionConfig.bIsVisible = true;
         SectionConfig.bCastsShadow = true;
-        RealtimeMesh->UpdateSectionConfig(SectionKey, SectionConfig, true);
+        RealtimeMesh->UpdateSectionConfig(SectionKey, SectionConfig, false);
         
         UE_LOG(LogJUSYNC, Log, TEXT("  Created chunk %d: %d vertices, %d triangles"),
                ChunkIdx, VertexCount, TriangleCount);
@@ -2406,6 +3039,11 @@ AActor* UJUSYNCSubsystem::SpawnLidarPointCloudAtLocation(const FJUSYNCPointCloud
         Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
         Comp->ColorSource = ELidarPointCloudColorationMode::Data;
         Comp->PointSize = 1.0f;
+        Comp->SetPointShape(ELidarPointCloudSpriteShape::Square);
+        if (PCSpawner.IsValid())
+        {
+            PCSpawner->ApplyVisualSettingsToComponent(Comp);
+        }
         // Disable node-based streaming culling so all loaded clouds render at any camera distance
         Comp->MinDepth = 0;
         Comp->MaxDepth = -1;
@@ -2423,15 +3061,19 @@ AActor* UJUSYNCSubsystem::SpawnLidarPointCloudAtLocation(const FJUSYNCPointCloud
     // Copy gradient LUT for thread-safe use (same as spawner path)
     TArray<FColor> PCLUT = PCSpawner.IsValid() ? PCSpawner->GetGradientLUT() : TArray<FColor>();
     bool bUseGradient = PCLUT.Num() > 0 && !bHasColors && Widths.Num() > 0;
+    FJUSYNCPointCloudSpawner* PCSpawnerPtr = PCSpawner.Get();
 
     TWeakObjectPtr<ALidarPointCloudActor> WeakActor = SpawnedActor;
     TWeakObjectPtr<ULidarPointCloudComponent> WeakComp = Comp;
     FString ElementNameForLog = PointCloudData.ElementName;
 
-    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [PointCount, Positions, Colors, bHasColors, Widths, WeakActor, WeakComp, PCLUT, bUseGradient, ElementNameForLog]()
-    {
-        if (!WeakActor.IsValid() || !WeakComp.IsValid()) return;
+    // UObject creation must happen on the game thread. The point array is still built asynchronously.
+    ULidarPointCloud* LidarCloud = NewObject<ULidarPointCloud>(SpawnedActor);
+    LidarCloud->SetOptimizedForDynamicData(true);
+    SpawnedActor->SetActorHiddenInGame(true);
 
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [PointCount, Positions, Colors, bHasColors, Widths, WeakActor, WeakComp, PCLUT, bUseGradient, ElementNameForLog, LidarCloud, PCSpawnerPtr]()
+    {
         // Build LiDAR points on background thread
         TArray<FLidarPointCloudPoint> Points;
         Points.SetNum(PointCount);
@@ -2500,17 +3142,25 @@ AActor* UJUSYNCSubsystem::SpawnLidarPointCloudAtLocation(const FJUSYNCPointCloud
             }
         }
 
-        // Create and set point cloud data
-        ULidarPointCloud* LidarCloud = ULidarPointCloud::CreateFromData(Points, false);
-
-        // Marshal back to game thread for component assignment
+        // Marshal back to game thread for data insertion and component assignment
         FFunctionGraphTask::CreateAndDispatchWhenReady(
-            [WeakActor, WeakComp, LidarCloud]()
+            [WeakActor, WeakComp, LidarCloud, Points = MoveTemp(Points), PCSpawnerPtr]() mutable
             {
-                if (WeakComp.IsValid() && LidarCloud)
+                if (!WeakComp.IsValid() || !LidarCloud)
                 {
-                    LidarCloud->RefreshBounds();
-                    WeakComp->SetPointCloud(LidarCloud);
+                    return;
+                }
+
+                const bool bDataAccepted = LidarCloud->SetData(Points);
+                WeakComp->SetPointCloud(LidarCloud);
+
+                if (WeakActor.IsValid() && bDataAccepted)
+                {
+                    if (PCSpawnerPtr)
+                    {
+                        PCSpawnerPtr->RequestNormalCalculation(LidarCloud, WeakActor.Get(), static_cast<int32>(Points.Num()));
+                    }
+                    WeakActor->SetActorHiddenInGame(false);
                 }
             },
             TStatId(), nullptr, ENamedThreads::GameThread);
@@ -2840,7 +3490,7 @@ void UJUSYNCSubsystem::ApplyProcessedMeshToComponent(const FProcessedMeshData& P
     FRealtimeMeshSectionConfig SectionConfig(0);
     SectionConfig.bIsVisible = true;
     SectionConfig.bCastsShadow = true;
-    RealtimeMesh->UpdateSectionConfig(SectionKey, SectionConfig, true);
+    RealtimeMesh->UpdateSectionConfig(SectionKey, SectionConfig, false);
     
     RealtimeMeshComponent->MarkRenderStateDirty();
     
@@ -2989,6 +3639,11 @@ void UJUSYNCSubsystem::CreateMaterialFromTexture_Async_Return_Internal(
 
 AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(const FJUSYNCMeshData& MeshData, const FVector& SpawnLocation, const FRotator& SpawnRotation, UMaterialInterface* CustomMaterial)
 {
+    return SpawnRealtimeMeshAtLocation_WithStreams(MeshData, SpawnLocation, SpawnRotation, CustomMaterial, nullptr);
+}
+
+AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation_WithStreams(const FJUSYNCMeshData& MeshData, const FVector& SpawnLocation, const FRotator& SpawnRotation, UMaterialInterface* CustomMaterial, RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams)
+{
     if (!MeshData.IsValid())
     {
         UE_LOG(LogJUSYNC, Error, TEXT("Invalid mesh data for spawning"));
@@ -3051,7 +3706,7 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(const FJUSYNCMeshDa
     SpawnedActor->SetActorRotation(SpawnRotation);
 
     // Create the mesh using your existing function
-    bool bSuccess = Subsystem->CreateRealtimeMeshFromJUSYNC(MeshData, MeshComp);
+    bool bSuccess = Subsystem->CreateRealtimeMeshFromJUSYNC_WithStreams(MeshData, MeshComp, PrebuiltStreams);
     
     if (bSuccess)
     {
@@ -3070,6 +3725,68 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(const FJUSYNCMeshDa
     }
 }
 
+
+AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation_WithCompact(const FJUSYNCCompactMeshData& MeshData, const FVector& SpawnLocation, const FRotator& SpawnRotation, UMaterialInterface* CustomMaterial, RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams)
+{
+    if (!MeshData.IsValid())
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("Invalid compact mesh data for spawning"));
+        return nullptr;
+    }
+
+    UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
+    if (!Subsystem)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("No JUSYNC subsystem available for spawning"));
+        return nullptr;
+    }
+
+    UWorld* World = Subsystem->GetWorld();
+    if (!World)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("No valid world context for spawning"));
+        return nullptr;
+    }
+
+    FActorSpawnParameters SpawnParams;
+    SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+
+    static std::atomic<int32> GlobalSpawnCounter{0};
+    int32 SpawnIdx = GlobalSpawnCounter.fetch_add(1, std::memory_order_relaxed);
+    uint32 FilenameHash = GetTypeHash(MeshData.ElementName);
+    FString BaseActorName = FString::Printf(TEXT("JUSYNC_H%x_N%d"), FilenameHash, SpawnIdx);
+    FName UniqueActorName = MakeUniqueObjectName(World, AActor::StaticClass(), FName(*BaseActorName));
+    SpawnParams.Name = UniqueActorName;
+
+    AActor* SpawnedActor = World->SpawnActor<AActor>(SpawnParams);
+    if (!SpawnedActor)
+    {
+        UE_LOG(LogJUSYNC, Error, TEXT("Failed to spawn actor"));
+        return nullptr;
+    }
+
+    URealtimeMeshComponent* MeshComp = NewObject<URealtimeMeshComponent>(SpawnedActor);
+    SpawnedActor->SetRootComponent(MeshComp);
+    MeshComp->RegisterComponent();
+
+    if (CustomMaterial)
+    {
+        MeshComp->SetMaterial(0, CustomMaterial);
+    }
+
+    SpawnedActor->SetActorLocation(SpawnLocation);
+    SpawnedActor->SetActorRotation(SpawnRotation);
+
+    bool bSuccess = Subsystem->CreateRealtimeMeshFromJUSYNC_WithCompact(MeshData, MeshComp, PrebuiltStreams);
+    if (bSuccess)
+    {
+        return SpawnedActor;
+    }
+
+    SpawnedActor->Destroy();
+    UE_LOG(LogJUSYNC, Error, TEXT("Failed to create compact RealtimeMesh, destroying actor"));
+    return nullptr;
+}
 
 AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtActor(const FJUSYNCMeshData& MeshData, AActor* TargetActor, UMaterialInterface* CustomMaterial)
 {
@@ -3227,7 +3944,10 @@ bool UJUSYNCSubsystem::ConnectToBroker(const FString& BrokerEndpoint, int32 Time
         // only created lazily inside connectToBroker(). Before then, setNotificationCallback
         // would find nullptr client and return early.
         RegisterNotificationCallback_C(NotificationCallback_Static);
-        UE_LOG(LogJUSYNC, Log, TEXT(" Notification callback registered on live client"));
+        RegisterSceneUpdateCallback_C(JUSYNCSceneUpdateCallback_Static);
+        RegisterProtocolDiagnosticsCallback_C(JUSYNCProtocolDiagnosticsCallback_Static);
+        UE_LOG(LogJUSYNC, Log, TEXT(" Notification, scene-update, and protocol-diagnostics callbacks registered"));
+        UE_LOG(LogJUSYNC, Log, TEXT(" JUSYNC protocol version: %u"), GetProtocolVersion_C());
 
         return true;
     }

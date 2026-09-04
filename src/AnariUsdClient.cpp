@@ -1242,6 +1242,121 @@ void AnariUsdClient::setNotificationCallback(NotificationCallback callback) {
     MIDDLEWARE_LOG_INFO("Notification callback %s", notificationCallback ? "registered" : "cleared");
 }
 
+void AnariUsdClient::setSceneUpdateCallback(SceneUpdateCallback callback) {
+    std::lock_guard<std::mutex> lock(sceneUpdateCallbackMutex);
+    sceneUpdateCallback = std::move(callback);
+    MIDDLEWARE_LOG_INFO("Scene update callback %s", sceneUpdateCallback ? "registered" : "cleared");
+}
+
+void AnariUsdClient::setProtocolDiagnosticsCallback(ProtocolDiagnosticsCallback callback) {
+    std::lock_guard<std::mutex> lock(protocolDiagnosticsCallbackMutex);
+    protocolDiagnosticsCallback = std::move(callback);
+    MIDDLEWARE_LOG_INFO("Protocol diagnostics callback %s", protocolDiagnosticsCallback ? "registered" : "cleared");
+}
+
+void AnariUsdClient::emitProtocolDiagnostics(const std::string& event,
+                                             const std::string& message,
+                                             uint64_t value0,
+                                             uint64_t value1) const
+{
+    MIDDLEWARE_LOG_INFO("[PROTOCOL-DIAG] %s: %s (%llu, %llu)",
+                        event.c_str(),
+                        message.c_str(),
+                        static_cast<unsigned long long>(value0),
+                        static_cast<unsigned long long>(value1));
+
+    std::lock_guard<std::mutex> lock(protocolDiagnosticsCallbackMutex);
+    if (!protocolDiagnosticsCallback) {
+        return;
+    }
+
+    try {
+        protocolDiagnosticsCallback(event, message, value0, value1);
+    } catch (const std::exception& e) {
+        MIDDLEWARE_LOG_ERROR("Exception in protocol diagnostics callback: %s", e.what());
+    } catch (...) {
+        MIDDLEWARE_LOG_ERROR("Unknown exception in protocol diagnostics callback");
+    }
+}
+
+void AnariUsdClient::handleSceneUpdate(const zmq::message_t& data)
+{
+    if (data.size() < sizeof(ZmqSceneUpdate)) {
+        MIDDLEWARE_LOG_WARNING("Scene update message too small: %zu bytes", data.size());
+        emitProtocolDiagnostics("scene_update_invalid", "message too small", data.size(), 0);
+        return;
+    }
+
+    const ZmqSceneUpdate* update = reinterpret_cast<const ZmqSceneUpdate*>(data.data());
+
+    if (!MessageUtils::isValidMagic(update->magic)) {
+        MIDDLEWARE_LOG_WARNING("Invalid magic in scene update: 0x%08X", update->magic);
+        emitProtocolDiagnostics("scene_update_invalid_magic", update->getPrimPath(), update->magic, 0);
+        return;
+    }
+
+    const std::string messageType = MessageUtils::getMessageTypeName(update->message_type);
+    const std::string primPath = update->getPrimPath();
+    const std::string propertyName = update->getPropertyName();
+    const std::string stringValue = update->getStringValue();
+
+    MIDDLEWARE_LOG_INFO(
+        "Received %s from rank %d: prim='%s' property='%s' change=%d type=%d commit=%llu revision=%llu int=%lld float=%f vec=(%f,%f,%f,%f) string='%s' payload=%u",
+        messageType.c_str(),
+        update->source_rank,
+        primPath.c_str(),
+        propertyName.c_str(),
+        update->change_type,
+        update->value_type,
+        static_cast<unsigned long long>(update->commit_id),
+        static_cast<unsigned long long>(update->revision),
+        static_cast<long long>(update->int_value),
+        static_cast<double>(update->float_value),
+        static_cast<double>(update->vec4[0]),
+        static_cast<double>(update->vec4[1]),
+        static_cast<double>(update->vec4[2]),
+        static_cast<double>(update->vec4[3]),
+        stringValue.c_str(),
+        update->payload_size);
+
+    emitProtocolDiagnostics(
+        "scene_update_received",
+        primPath.empty() ? propertyName : primPath + " | " + propertyName,
+        update->commit_id,
+        update->revision);
+
+    std::lock_guard<std::mutex> lock(sceneUpdateCallbackMutex);
+    if (!sceneUpdateCallback) {
+        MIDDLEWARE_LOG_WARNING("Scene update callback is NULL - scene update will not reach client");
+        emitProtocolDiagnostics("scene_update_dropped", "callback not registered", update->commit_id, update->revision);
+        return;
+    }
+
+    try {
+        sceneUpdateCallback(
+            update->message_type,
+            update->source_rank,
+            update->timestamp,
+            update->commit_id,
+            update->revision,
+            primPath,
+            propertyName,
+            update->change_type,
+            update->value_type,
+            update->int_value,
+            update->float_value,
+            update->vec4,
+            stringValue,
+            update->payload_size);
+    } catch (const std::exception& e) {
+        MIDDLEWARE_LOG_ERROR("Exception in scene update callback: %s", e.what());
+        emitProtocolDiagnostics("scene_update_callback_error", e.what(), update->commit_id, update->revision);
+    } catch (...) {
+        MIDDLEWARE_LOG_ERROR("Unknown exception in scene update callback");
+        emitProtocolDiagnostics("scene_update_callback_error", "unknown exception", update->commit_id, update->revision);
+    }
+}
+
 void AnariUsdClient::handleNotification(const zmq::message_t& data) {
     if (data.size() < sizeof(ZmqFileNotification)) {
         MIDDLEWARE_LOG_WARNING("Notification message too small: %zu bytes", data.size());
@@ -1983,14 +2098,37 @@ void AnariUsdClient::dispatcherThread() {
 
 void AnariUsdClient::enqueueResponseFrame(zmq::message_t delimiter,
                                             zmq::message_t data) {
-    // Check if this is a notification message (NOTIFY_FILE_UPDATE=300 or NOTIFY_COMMIT_COMPLETE=301)
-    // Notifications have no request_id and would never be matched by waiting threads
+    // Check if this is a notification message (NOTIFY_FILE_UPDATE=300, NOTIFY_COMMIT_COMPLETE=301,
+    // NOTIFY_FILE_UPDATE_V2=302, NOTIFY_SCENE_UPDATE=303, NOTIFY_PROPERTY_UPDATE=304).
+    // Notifications have no request_id and would never be matched by waiting threads.
     if (data.size() >= 8) {
         uint32_t magic = *reinterpret_cast<const uint32_t*>(data.data());
         uint32_t msgType = *reinterpret_cast<const uint32_t*>(data.data() + 4);
+
+        if (magic == ANARI_USD_MAGIC && MessageUtils::isSceneUpdateType(msgType)) {
+            handleSceneUpdate(data);
+            return;
+        }
+
         if (magic == ANARI_USD_MAGIC && MessageUtils::isNotificationType(msgType)) {
             handleNotification(data);
             return; // Don't enqueue notification into response index
+        }
+
+        if (magic == ANARI_USD_MAGIC && !MessageUtils::isValidMessageType(msgType)) {
+            const uint32_t requestId = extractRequestId(static_cast<const uint8_t*>(data.data()), data.size());
+            MIDDLEWARE_LOG_WARNING(
+                "Unknown ANARI-USD message type %u (request_id=%u, size=%zu) - %s",
+                msgType,
+                requestId,
+                data.size(),
+                requestId == 0 ? "dropping push message" : "enqueueing as unmatched response");
+
+            emitProtocolDiagnostics("unknown_message_type", MessageUtils::getMessageTypeName(msgType), msgType, data.size());
+
+            if (requestId == 0) {
+                return;
+            }
         }
     }
 

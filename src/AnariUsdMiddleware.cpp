@@ -1414,4 +1414,27 @@ void AnariUsdMiddleware::setNotificationCallback(NotificationCallback cb) {
     pImpl->anariUsdClient->setNotificationCallback(std::move(cb));
 }
 
+void AnariUsdMiddleware::setSceneUpdateCallback(SceneUpdateCallback cb) {
+    if (!pImpl || !pImpl->anariUsdClient) {
+        MIDDLEWARE_LOG_ERROR("Cannot set scene update callback: middleware not initialized");
+        return;
+    }
+    pImpl->anariUsdClient->setSceneUpdateCallback(std::move(cb));
+}
+
+void AnariUsdMiddleware::setProtocolDiagnosticsCallback(ProtocolDiagnosticsCallback cb) {
+    if (!pImpl || !pImpl->anariUsdClient) {
+        MIDDLEWARE_LOG_ERROR("Cannot set protocol diagnostics callback: middleware not initialized");
+        return;
+    }
+    pImpl->anariUsdClient->setProtocolDiagnosticsCallback(std::move(cb));
+}
+
+uint32_t AnariUsdMiddleware::getProtocolVersion() const {
+    if (!pImpl || !pImpl->anariUsdClient) {
+        return ANARI_USD_PROTOCOL_VERSION;
+    }
+    return pImpl->anariUsdClient->getProtocolVersion();
+}
+
 } // namespace anari_usd_middleware

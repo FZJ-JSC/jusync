@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/Engine.h"
+#include "LidarPointCloudShared.h"
 #include "JUSYNCTypes.generated.h"
 
 // Forward declarations
@@ -193,6 +194,12 @@ struct JUSYNC_API FJUSYNCPointCloudData
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
 	bool bHasNormals = false;
 
+	// Optional LiDAR-ready point buffer. When bHasLidarPoints is true, the
+	// spawner can move this array directly into ULidarPointCloud without
+	// rebuilding it from Positions/Colors/Widths.
+	TArray64<FLidarPointCloudPoint> LidarPoints;
+	bool bHasLidarPoints = false;
+
 	FJUSYNCPointCloudData()
 	{
 		ElementName = TEXT("");
@@ -203,15 +210,61 @@ struct JUSYNC_API FJUSYNCPointCloudData
 
 	bool IsValid() const
 	{
-		return !ElementName.IsEmpty() && PointCount > 0 && Positions.Num() > 0;
+		return !ElementName.IsEmpty() && PointCount > 0 &&
+			((bHasLidarPoints && LidarPoints.Num() > 0) || Positions.Num() > 0);
 	}
 
 	bool HasColors() const { return bHasColors && Colors.Num() > 0; }
+	bool HasBakedColors() const { return bHasColors && (Colors.Num() > 0 || (bHasLidarPoints && LidarPoints.Num() > 0)); }
 	bool HasNormals() const { return bHasNormals; }
 	bool HasWidths() const { return Widths.Num() > 0; }
+	bool HasLidarPoints() const { return bHasLidarPoints && LidarPoints.Num() > 0; }
 
 	int32 GetPointCount() const { return PointCount; }
 };
+
+struct JUSYNC_API FJUSYNCCompactMeshData
+{
+	FString ElementName;
+	FString TypeName;
+	TArray<FVector3f> Points;
+	TArray<FVector3f> Normals;
+	TArray<FVector2f> UVs;
+	TArray<FColor> VertexColors;
+	TArray<int32> Triangles;
+	uint64 LUTVersion = 0;
+	bool bHasBakedColors = false;
+
+	FJUSYNCCompactMeshData() = default;
+
+	bool IsValid() const
+	{
+		return !ElementName.IsEmpty() &&
+			Points.Num() > 0 &&
+			Triangles.Num() > 0 &&
+			(Triangles.Num() % 3 == 0);
+	}
+
+	int32 GetVertexCount() const { return Points.Num(); }
+	int32 GetTriangleCount() const { return Triangles.Num() / 3; }
+	bool HasNormals() const { return Normals.Num() == Points.Num() && Normals.Num() > 0; }
+	bool HasUVs() const { return UVs.Num() == Points.Num() && UVs.Num() > 0; }
+	bool HasVertexColors() const { return VertexColors.Num() == Points.Num() && VertexColors.Num() > 0; }
+
+	int64 EstimateBytes() const
+	{
+		int64 Bytes = 128;
+		Bytes += static_cast<int64>(Points.Num()) * sizeof(FVector3f);
+		Bytes += static_cast<int64>(Normals.Num()) * sizeof(FVector3f);
+		Bytes += static_cast<int64>(UVs.Num()) * sizeof(FVector2f);
+		Bytes += static_cast<int64>(VertexColors.Num()) * sizeof(FColor);
+		Bytes += static_cast<int64>(Triangles.Num()) * sizeof(int32);
+		return Bytes;
+	}
+};
+
+using FJUSYNCCompactMeshRef = TSharedPtr<FJUSYNCCompactMeshData, ESPMode::ThreadSafe>;
+using FJUSYNCPointCloudRef = TSharedPtr<FJUSYNCPointCloudData, ESPMode::ThreadSafe>;
 
 USTRUCT(BlueprintType)
 struct JUSYNC_API FJUSYNCTextureData
@@ -366,6 +419,113 @@ struct JUSYNC_API FJUSYNCNotification
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCNotificationReceived, const FJUSYNCNotification&, Notification);
+
+// Typed scene / property update protocol events (NOTIFY_SCENE_UPDATE=303, NOTIFY_PROPERTY_UPDATE=304)
+UENUM(BlueprintType)
+enum class EJUSYNCSceneChangeType : uint8
+{
+    None         UMETA(DisplayName = "None"),
+    Created      UMETA(DisplayName = "Created"),
+    Removed      UMETA(DisplayName = "Removed"),
+    Visibility   UMETA(DisplayName = "Visibility"),
+    Transform    UMETA(DisplayName = "Transform"),
+    Material     UMETA(DisplayName = "Material"),
+    Attribute    UMETA(DisplayName = "Attribute"),
+    Commit       UMETA(DisplayName = "Commit"),
+    Property     UMETA(DisplayName = "Property")
+};
+
+UENUM(BlueprintType)
+enum class EJUSYNCPropertyValueType : uint8
+{
+    None     UMETA(DisplayName = "None"),
+    Int      UMETA(DisplayName = "Int"),
+    Bool     UMETA(DisplayName = "Bool"),
+    Float    UMETA(DisplayName = "Float"),
+    Float2   UMETA(DisplayName = "Float2"),
+    Float3   UMETA(DisplayName = "Float3"),
+    Float4   UMETA(DisplayName = "Float4"),
+    String   UMETA(DisplayName = "String"),
+    Path     UMETA(DisplayName = "Path"),
+    ArrayRef UMETA(DisplayName = "ArrayRef")
+};
+
+USTRUCT(BlueprintType)
+struct JUSYNC_API FJUSYNCSceneUpdate
+{
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|SceneUpdate")
+    int32 MessageType; // 303 = scene update, 304 = property update
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|SceneUpdate")
+    int32 SourceRank;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|SceneUpdate")
+    int64 Timestamp;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|SceneUpdate")
+    int64 CommitId;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|SceneUpdate")
+    int64 Revision;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|SceneUpdate")
+    FString PrimPath;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|SceneUpdate")
+    FString PropertyName;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|SceneUpdate")
+    EJUSYNCSceneChangeType ChangeType;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|SceneUpdate")
+    EJUSYNCPropertyValueType ValueType;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|SceneUpdate")
+    int64 IntValue;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|SceneUpdate")
+    float FloatValue;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|SceneUpdate")
+    FVector4 Vec4;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|SceneUpdate")
+    FString StringValue;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|SceneUpdate")
+    int32 PayloadSize;
+
+    FJUSYNCSceneUpdate()
+        : MessageType(303), SourceRank(-1), Timestamp(0), CommitId(0), Revision(0),
+          ChangeType(EJUSYNCSceneChangeType::None), ValueType(EJUSYNCPropertyValueType::None),
+          IntValue(0), FloatValue(0.0f), Vec4(FVector4(0.0, 0.0, 0.0, 0.0)), PayloadSize(0) {}
+};
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCSceneUpdateReceived, const FJUSYNCSceneUpdate&, Update);
+
+USTRUCT(BlueprintType)
+struct JUSYNC_API FJUSYNCProtocolDiagnostics
+{
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Protocol")
+    FString Event;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Protocol")
+    FString Message;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Protocol")
+    int64 Value0;
+
+    UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Protocol")
+    int64 Value1;
+
+    FJUSYNCProtocolDiagnostics() : Value0(0), Value1(0) {}
+};
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCProtocolDiagnosticsReceived, const FJUSYNCProtocolDiagnostics&, Diagnostics);
 
 // ========== BENCHMARKING STRUCTURES ==========
 

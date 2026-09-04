@@ -84,6 +84,14 @@ public:
     UPROPERTY(BlueprintAssignable, Category = "JUSYNC Events")
     FJUSYNCNotificationReceived OnNotificationReceived;
 
+    // Typed scene / property update events from broker
+    UPROPERTY(BlueprintAssignable, Category = "JUSYNC Events")
+    FJUSYNCSceneUpdateReceived OnSceneUpdateReceived;
+
+    // Protocol diagnostics / live-update health events
+    UPROPERTY(BlueprintAssignable, Category = "JUSYNC Events")
+    FJUSYNCProtocolDiagnosticsReceived OnProtocolDiagnosticsReceived;
+
     // USD Processing (Legacy - use JUSYNCBlueprintLibrary versions for preview support)
     UFUNCTION(BlueprintCallable, Category = "JUSYNC USD|Legacy", DisplayName = "Load USD From Buffer (Legacy)")
     bool LoadUSDFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCMeshData>& OutMeshData);
@@ -98,6 +106,8 @@ public:
      * Uses LoadUSDFullFromPointer_C internally.
      */
     bool LoadUSDFullFromBufferNoCopy(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCMeshData>& OutMeshData, TArray<FJUSYNCPointCloudData>& OutPointCloudData);
+
+    bool LoadUSDFullCompactFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCCompactMeshRef>& OutMeshes, TArray<FJUSYNCPointCloudRef>& OutPointCloudData);
 
     // Texture Processing
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Texture")
@@ -124,6 +134,37 @@ public:
     bool CreateRealtimeMeshFromJUSYNC(
         const FJUSYNCMeshData& MeshData,
         URealtimeMeshComponent* RealtimeMeshComponent
+    );
+
+    bool CreateRealtimeMeshFromJUSYNC_WithStreams(
+        const FJUSYNCMeshData& MeshData,
+        URealtimeMeshComponent* RealtimeMeshComponent,
+        RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams
+    );
+
+    /**
+     * In-place RealtimeMesh update. If the component already owns a
+     * URealtimeMeshSimple, the existing USDGroup section group is updated instead
+     * of destroying/recreating the actor. If no mesh exists yet, this creates it.
+     */
+    bool UpdateRealtimeMeshFromJUSYNC(
+        const FJUSYNCMeshData& MeshData,
+        URealtimeMeshComponent* RealtimeMeshComponent,
+        UMaterialInterface* MaterialToApply,
+        RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams = nullptr
+    );
+
+    bool UpdateRealtimeMeshFromJUSYNC_WithCompact(
+        const FJUSYNCCompactMeshData& MeshData,
+        URealtimeMeshComponent* RealtimeMeshComponent,
+        UMaterialInterface* MaterialToApply,
+        RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams = nullptr
+    );
+
+    bool CreateRealtimeMeshFromJUSYNC_WithCompact(
+        const FJUSYNCCompactMeshData& MeshData,
+        URealtimeMeshComponent* RealtimeMeshComponent,
+        RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams = nullptr
     );
 
 

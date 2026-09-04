@@ -189,6 +189,32 @@ public:
                                                      bool hasOldData)>;     // true if hashPrev128 is valid
     void setNotificationCallback(NotificationCallback cb);
 
+    /* Typed scene / property update callback */
+    using SceneUpdateCallback = std::function<void(uint32_t messageType,
+                                                    int32_t sourceRank,
+                                                    uint64_t timestamp,
+                                                    uint64_t commitId,
+                                                    uint64_t revision,
+                                                    const std::string& primPath,
+                                                    const std::string& propertyName,
+                                                    int32_t changeType,
+                                                    int32_t valueType,
+                                                    int64_t intValue,
+                                                    float floatValue,
+                                                    const float* vec4,
+                                                    const std::string& stringValue,
+                                                    uint32_t payloadSize)>;
+    void setSceneUpdateCallback(SceneUpdateCallback cb);
+
+    /* Protocol diagnostics callback */
+    using ProtocolDiagnosticsCallback = std::function<void(const std::string& event,
+                                                            const std::string& message,
+                                                            uint64_t value0,
+                                                            uint64_t value1)>;
+    void setProtocolDiagnosticsCallback(ProtocolDiagnosticsCallback cb);
+
+    uint32_t getProtocolVersion() const;
+
     /* receiver thread */
     bool startReceiving();
     void stopReceiving();

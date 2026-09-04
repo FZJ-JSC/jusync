@@ -194,6 +194,19 @@ typedef struct {
 typedef void (*FileReceivedCallback_C)(const CFileData* file_data);
 
 /**
+ * Zero-copy file reception callback.
+ *
+ * The data pointer is valid only for the duration of the callback. Callers
+ * that need to retain the payload must copy it inside the callback.
+ */
+typedef void (*FileReceivedSpanCallback_C)(
+    const char* filename,
+    const unsigned char* data,
+    size_t data_size,
+    const char* hash,
+    const char* file_type);
+
+/**
  * Callback function type for message reception notifications
  * Called when a text message is received via ZeroMQ
  *
@@ -407,6 +420,39 @@ typedef struct {
     unsigned char* vertex_colors8; // 4 bytes per vertex (nullable)
 } CMeshDataFill;
 
+/**
+ * Compact in-situ mesh fill target (FillUSDFullCompact_C only).
+ *
+ * This writes the same transformed geometry as CMeshDataFill, but keeps
+ * positions/normals/UVs as 32-bit floats to avoid the UE double-precision
+ * intermediate when the caller can consume compact mesh buffers directly.
+ */
+typedef struct {
+    float* points;             // 3 floats per vertex
+    int32_t* indices;          // 1 int32 per index
+    float* normals;            // 3 floats per normal (nullable)
+    float* uvs;                // 2 floats per UV pair (nullable)
+    unsigned char* vertex_colors8; // 4 bytes per vertex (nullable)
+} CMeshDataFillCompact;
+
+/**
+ * Packed point layout used by the optional direct LiDAR fill path.
+ *
+ * This intentionally mirrors the UE FLidarPointCloudPoint layout:
+ *   float location[3];
+ *   unsigned char color[4];
+ *   unsigned char normal[3]; // 127,127,127 == invalid/reset normal
+ *   unsigned char flags;     // bit 0 == bVisible
+ */
+#pragma pack(push, 1)
+typedef struct {
+    float location[3];
+    unsigned char color[4];
+    unsigned char normal[3];
+    unsigned char flags;
+} CPointCloudLidarPoint_v1;
+#pragma pack(pop)
+
 /** In-situ point-cloud fill target (FillUSDFull_C only). */
 typedef struct {
     double* positions;         // 3 doubles per point
@@ -415,6 +461,15 @@ typedef struct {
     // Filled by FillUSDFull_C (USD-space, origin-inclusive):
     float bounding_box_min[3];
     float bounding_box_max[3];
+
+    // Optional direct LiDAR point fill.
+    // If lidar_point_version == 1, lidar_points must point at point_count
+    // CPointCloudLidarPoint_v1 elements and lidar_point_stride must equal
+    // sizeof(CPointCloudLidarPoint_v1). When set, FillUSDFull_C writes
+    // location/color directly into this buffer.
+    void* lidar_points;
+    int32_t lidar_point_stride;
+    uint32_t lidar_point_version;
 } CPointCloudDataFill;
 
 /**
@@ -455,6 +510,20 @@ ANARI_USD_MIDDLEWARE_C_API int QueryUSDFullLayout_C(
 ANARI_USD_MIDDLEWARE_C_API int FillUSDFull_C(
     void* handle,
     CMeshDataFill* meshes,
+    size_t mesh_count,
+    CPointCloudDataFill* clouds,
+    size_t cloud_count);
+
+/**
+ * Write parsed geometry into caller-provided compact buffers.
+ *
+ * Mesh fills use 32-bit float positions/normals/UVs. Point-cloud fills use the
+ * same CPointCloudDataFill contract as FillUSDFull_C, including the optional
+ * direct LiDAR point path.
+ */
+ANARI_USD_MIDDLEWARE_C_API int FillUSDFullCompact_C(
+    void* handle,
+    CMeshDataFillCompact* meshes,
     size_t mesh_count,
     CPointCloudDataFill* clouds,
     size_t cloud_count);
@@ -703,6 +772,14 @@ ANARI_USD_MIDDLEWARE_C_API void FreeFrameFiles_C(CFileData* files, size_t count)
 ANARI_USD_MIDDLEWARE_C_API void RegisterUpdateCallback_C(FileReceivedCallback_C callback);
 
 /**
+ * Register a zero-copy file reception callback.
+ *
+ * If both this and RegisterUpdateCallback_C are set, this span callback is
+ * preferred and the legacy CFileData callback is not invoked.
+ */
+ANARI_USD_MIDDLEWARE_C_API void RegisterUpdateCallbackSpan_C(FileReceivedSpanCallback_C callback);
+
+/**
  * Register callback function for message reception notifications
  * Only one message callback can be registered at a time
  * Subsequent calls will replace the previous callback
@@ -759,6 +836,72 @@ typedef void (*NotificationCallback_C)(uint32_t message_type,
  * @param callback Function pointer to call on notifications (NULL to unregister)
  */
 ANARI_USD_MIDDLEWARE_C_API void RegisterNotificationCallback_C(NotificationCallback_C callback);
+
+// ============================================================================
+// SCENE / PROPERTY UPDATE CALLBACKS (TYPED LIVE UPDATES)
+// ============================================================================
+
+typedef enum {
+    CSceneChange_None = 0,
+    CSceneChange_Created = 1,
+    CSceneChange_Removed = 2,
+    CSceneChange_Visibility = 3,
+    CSceneChange_Transform = 4,
+    CSceneChange_Material = 5,
+    CSceneChange_Attribute = 6,
+    CSceneChange_Commit = 7,
+    CSceneChange_Property = 8
+} CSceneChangeType;
+
+typedef enum {
+    CPropertyValue_None = 0,
+    CPropertyValue_Int = 1,
+    CPropertyValue_Bool = 2,
+    CPropertyValue_Float = 3,
+    CPropertyValue_Float2 = 4,
+    CPropertyValue_Float3 = 5,
+    CPropertyValue_Float4 = 6,
+    CPropertyValue_String = 7,
+    CPropertyValue_Path = 8,
+    CPropertyValue_ArrayRef = 9
+} CPropertyValueType;
+
+/**
+ * Callback for typed scene / property updates.
+ *
+ * message_type is 303 (NOTIFY_SCENE_UPDATE) or 304 (NOTIFY_PROPERTY_UPDATE).
+ * The callback is invoked from the ZMQ dispatcher thread. Keep processing minimal.
+ */
+typedef void (*SceneUpdateCallback_C)(
+    uint32_t message_type,
+    int32_t source_rank,
+    uint64_t timestamp,
+    uint64_t commit_id,
+    uint64_t revision,
+    const char* prim_path,
+    const char* property_name,
+    int32_t change_type,
+    int32_t value_type,
+    int64_t int_value,
+    float float_value,
+    const float* vec4,
+    const char* string_value,
+    uint32_t payload_size);
+
+ANARI_USD_MIDDLEWARE_C_API void RegisterSceneUpdateCallback_C(SceneUpdateCallback_C callback);
+
+/**
+ * Callback for protocol diagnostics / debug events.
+ */
+typedef void (*ProtocolDiagnosticsCallback_C)(
+    const char* event,
+    const char* message,
+    uint64_t value0,
+    uint64_t value1);
+
+ANARI_USD_MIDDLEWARE_C_API void RegisterProtocolDiagnosticsCallback_C(ProtocolDiagnosticsCallback_C callback);
+
+ANARI_USD_MIDDLEWARE_C_API uint32_t GetProtocolVersion_C(void);
 
 // ============================================================================
 // UTILITY AND DEBUG FUNCTIONS

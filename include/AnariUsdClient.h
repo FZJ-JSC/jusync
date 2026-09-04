@@ -63,15 +63,37 @@ public:
     
     // Notification callback types (for live update support, V2-aware)
     using NotificationCallback = std::function<void(uint32_t messageType,
-                                                     int32_t sourceRank,
-                                                     const std::string& filename,
-                                                     uint64_t fileSize,
-                                                     uint64_t timestamp,
-                                                     uint64_t hashLo,
-                                                     uint64_t hashHi,
-                                                     uint64_t hashPrevLo,
-                                                     uint64_t hashPrevHi,
-                                                     bool hasOldData)>;
+                                                      int32_t sourceRank,
+                                                      const std::string& filename,
+                                                      uint64_t fileSize,
+                                                      uint64_t timestamp,
+                                                      uint64_t hashLo,
+                                                      uint64_t hashHi,
+                                                      uint64_t hashPrevLo,
+                                                      uint64_t hashPrevHi,
+                                                      bool hasOldData)>;
+
+    // Typed scene / property update callback (NOTIFY_SCENE_UPDATE / NOTIFY_PROPERTY_UPDATE)
+    using SceneUpdateCallback = std::function<void(uint32_t messageType,
+                                                    int32_t sourceRank,
+                                                    uint64_t timestamp,
+                                                    uint64_t commitId,
+                                                    uint64_t revision,
+                                                    const std::string& primPath,
+                                                    const std::string& propertyName,
+                                                    int32_t changeType,
+                                                    int32_t valueType,
+                                                    int64_t intValue,
+                                                    float floatValue,
+                                                    const float* vec4,
+                                                    const std::string& stringValue,
+                                                    uint32_t payloadSize)>;
+
+    // Lightweight protocol diagnostics callback
+    using ProtocolDiagnosticsCallback = std::function<void(const std::string& event,
+                                                            const std::string& message,
+                                                            uint64_t value0,
+                                                            uint64_t value1)>;
 
     // Worker status callback types
     using WorkerStatusCallback = std::function<void(int32_t rank,
@@ -184,6 +206,9 @@ public:
 
     // Notification callbacks (live update support)
     void setNotificationCallback(NotificationCallback callback);
+    void setSceneUpdateCallback(SceneUpdateCallback callback);
+    void setProtocolDiagnosticsCallback(ProtocolDiagnosticsCallback callback);
+    uint32_t getProtocolVersion() const { return ANARI_USD_PROTOCOL_VERSION; }
 
     // Parallel download support
     zmq::socket_t* getSocket() { return zmqSocket.get(); }
@@ -316,6 +341,14 @@ private:
     std::mutex notificationCallbackMutex;
     NotificationCallback notificationCallback;
 
+    // Typed scene/property update callback
+    std::mutex sceneUpdateCallbackMutex;
+    SceneUpdateCallback sceneUpdateCallback;
+
+    // Protocol diagnostics callback
+    mutable std::mutex protocolDiagnosticsCallbackMutex;
+    ProtocolDiagnosticsCallback protocolDiagnosticsCallback;
+
     // Default chunk size for file requests
     // Larger chunks = fewer ZMQ round-trips through the (single-loop) broker:
     // a 76MB file is ~2-3 messages instead of 19. The broker/worker honor the
@@ -351,6 +384,15 @@ private:
 
     // Handle notification message (called from dispatcher thread)
     void handleNotification(const zmq::message_t& data);
+
+    // Handle typed scene/property update messages (called from dispatcher thread)
+    void handleSceneUpdate(const zmq::message_t& data);
+
+    // Emit diagnostics through ProtocolDiagnosticsCallback if registered.
+    void emitProtocolDiagnostics(const std::string& event,
+                                 const std::string& message,
+                                 uint64_t value0 = 0,
+                                 uint64_t value1 = 0) const;
 
     // Async file download frame handler — called from dispatcher thread.
     // Returns true if frame was consumed by an async download, false to forward to blocking queue.
