@@ -1,148 +1,201 @@
-name: USD Middleware CI/CD
+name: USD Middleware CI
 
 on:
   push:
   pull_request:
-    branches: [ main ] 
+  workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  # Job 1: Build the Docker image ONCE and save it as an artifact for all jobs
-  build-docker:
-    name: "🔨 Build Docker Image"
+  build:
+    name: Build & Smoke Tests
     runs-on: ubuntu-latest
-    outputs:
-      image-tag: ${{ steps.set-tag.outputs.IMAGE_TAG }}
+    timeout-minutes: 45
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - id: set-tag
-        run: echo "IMAGE_TAG=jusync-middleware:${{ github.sha }}" >> $GITHUB_ENV
-      - name: Build Docker image (fast, single build for all jobs)
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        shell: bash
         run: |
-          docker build -t jusync-middleware:${{ github.sha }} .
-      - name: Save Docker image as artifact (optional, for reuse)
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libssl-dev \
+            libzstd-dev
+
+      - name: Configure CMake
+        shell: bash
         run: |
-          docker save jusync-middleware:${{ github.sha }} | gzip > image.tar.gz
-      - name: Upload Docker image
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTS=ON \
+            -DENABLE_CUDA=OFF \
+            -DBUILD_JUSYNC_Receiver_GUI=OFF \
+            -DENABLE_ZSTD=ON \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DTINYUSDZ_BUILD_TESTS=OFF \
+            -DTINYUSDZ_BUILD_EXAMPLES=OFF \
+            -DTINYUSDZ_BUILD_BENCHMARKS=OFF \
+            -DGLM_BUILD_TESTS=OFF
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --parallel
+
+      - name: Run smoke tests
+        shell: bash
+        run: ctest --test-dir build -R '^(build_verification|binary_static_check)$' --output-on-failure
+
+      - name: Upload test payload
         uses: actions/upload-artifact@v4
         with:
-          name: jusync-middleware-image
-          path: image.tar.gz
+          name: jusync-test-payload
+          path: |
+            build/usd_validation_tool
+            build/libanari_usd_middleware.so
+            build/compile_commands.json
+          retention-days: 1
 
-  # Job 2: Static Analysis (clang-tidy)
   static-analysis:
-    name: "📝 Static Analysis"
+    name: Static Analysis
+    needs: build
     runs-on: ubuntu-latest
-    needs: build-docker
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Download Docker image
-        uses: actions/download-artifact@v4
         with:
-          name: jusync-middleware-image
-      - name: Load Docker image
-        run: docker load -i image.tar.gz
-      - name: Run clang-tidy on sources
-        run: |
-          docker run --rm jusync-middleware:${{ github.sha }} bash -c \
-            "find . \\( -path './external' -o -path './external/*' -o -path './build*' -o -path './bin' \\) -prune -o -type f \\( -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.hpp' \\) -print0 | xargs -0 clang-tidy-14 -- -I./include -std=c++17 || true"
+          submodules: recursive
 
-  # Job 3: Build Verification (binary presence)
-  build-check:
-    name: "🔍 Build & Artifact Check"
-    runs-on: ubuntu-latest
-    needs: build-docker
-    steps:
-      - name: Download Docker image
-        uses: actions/download-artifact@v4
-        with:
-          name: jusync-middleware-image
-      - name: Load Docker image
-        run: docker load -i image.tar.gz
-      - name: Verify build artifacts
+      - name: Install clang-tidy
+        shell: bash
         run: |
-          docker run --rm jusync-middleware:${{ github.sha }} ls -la /workspace/build_test/
-          docker run --rm jusync-middleware:${{ github.sha }} test -f /workspace/build_test/usd_validation_tool
-          docker run --rm jusync-middleware:${{ github.sha }} test -f /workspace/build_test/libanari_usd_middleware.so
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-tidy
 
-  # Job 4: All validation/test jobs use the same built image
-  usd-basic-tests:
-    name: "📦 USD Basic Processing"
-    runs-on: ubuntu-latest
-    needs: build-check
-    steps:
-      - name: Download Docker image
+      - name: Download test payload
         uses: actions/download-artifact@v4
         with:
-          name: jusync-middleware-image
-      - name: Load Docker image
-        run: docker load -i image.tar.gz
-      - name: Test basic USD file loading
-        run: |
-          docker run --rm jusync-middleware:${{ github.sha }} /workspace/build_test/usd_validation_tool --mode=usd-basic
+          name: jusync-test-payload
+          path: .
 
-  collision-tests:
-    name: "⚔️ Collision Generation"
-    runs-on: ubuntu-latest
-    needs: build-check
-    strategy:
-      matrix:
-        collision-type: [simple, complex, convex]
-      fail-fast: false
-    steps:
-      - name: Download Docker image
-        uses: actions/download-artifact@v4
-        with:
-          name: jusync-middleware-image
-      - name: Load Docker image
-        run: docker load -i image.tar.gz
-      - name: Test collision type - ${{ matrix.collision-type }}
+      - name: Run clang-tidy
+        id: clang-tidy
+        continue-on-error: true
+        shell: bash
         run: |
-          docker run --rm jusync-middleware:${{ github.sha }} /workspace/build_test/usd_validation_tool --mode=collision --type=${{ matrix.collision-type }}
+          set -o pipefail
+          clang-tidy -p build \
+            --exclude='external/|build/' \
+            --header-filter='^(.*workspace.*)(/src|/include|/tests)/' \
+            --checks='-*,bugprone-*,clang-analyzer-*' \
+            --use-color \
+            | tee clang-tidy.log
+
+      - name: Upload clang-tidy log
+        uses: actions/upload-artifact@v4
+        with:
+          name: clang-tidy
+          path: clang-tidy.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  usd-basic:
+    name: Test USD Basic
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: ./.github/actions/run-ctest
+        with:
+          test-regex: '^usd_basic_processing$'
+          artifact-name: usd-basic
+
+  collision-simple:
+    name: Test Collision Simple
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: ./.github/actions/run-ctest
+        with:
+          test-regex: '^collision_simple$'
+          artifact-name: collision-simple
+
+  collision-complex:
+    name: Test Collision Complex
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: ./.github/actions/run-ctest
+        with:
+          test-regex: '^collision_complex$'
+          artifact-name: collision-complex
+
+  collision-convex:
+    name: Test Collision Convex
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: ./.github/actions/run-ctest
+        with:
+          test-regex: '^collision_convex$'
+          artifact-name: collision-convex
 
   error-handling:
-    name: "🔒 Error Handling"
+    name: Test Error Handling
+    needs: build
     runs-on: ubuntu-latest
-    needs: build-check
+    timeout-minutes: 20
     steps:
-      - name: Download Docker image
-        uses: actions/download-artifact@v4
+      - uses: ./.github/actions/run-ctest
         with:
-          name: jusync-middleware-image
-      - name: Load Docker image
-        run: docker load -i image.tar.gz
-      - name: Test error scenarios
-        run: |
-          docker run --rm jusync-middleware:${{ github.sha }} /workspace/build_test/usd_validation_tool --mode=error-handling
+          test-regex: '^error_handling_tests$'
+          artifact-name: error-handling
 
-  performance-tests:
-    name: "🚀 Performance Benchmarks"
+  performance:
+    name: Test Performance
+    needs: build
     runs-on: ubuntu-latest
-    needs: [usd-basic-tests, collision-tests]
+    timeout-minutes: 30
     steps:
-      - name: Download Docker image
-        uses: actions/download-artifact@v4
+      - uses: ./.github/actions/run-ctest
         with:
-          name: jusync-middleware-image
-      - name: Load Docker image
-        run: docker load -i image.tar.gz
-      - name: Run performance benchmarks
-        run: |
-          docker run --rm jusync-middleware:${{ github.sha }} /workspace/build_test/usd_validation_tool --mode=performance
+          test-regex: '^performance_benchmarks$'
+          artifact-name: performance
 
-  integration-tests:
-    name: "🔗 Integration Tests"
+  integration:
+    name: Test Integration
+    needs: build
     runs-on: ubuntu-latest
-    needs: [usd-basic-tests, collision-tests, error-handling]
+    timeout-minutes: 30
     steps:
-      - name: Download Docker image
-        uses: actions/download-artifact@v4
+      - uses: ./.github/actions/run-ctest
         with:
-          name: jusync-middleware-image
-      - name: Load Docker image
-        run: docker load -i image.tar.gz
-      - name: Run full integration suite
-        run: |
-          docker run --rm jusync-middleware:${{ github.sha }} /workspace/build_test/usd_validation_tool --mode=integration
+          test-regex: '^integration_suite$'
+          artifact-name: integration
+
+  usd-files:
+    name: Test USD Files
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: ./.github/actions/run-ctest
+        with:
+          test-regex: '^usd_file_.*$'
+          artifact-name: usd-files

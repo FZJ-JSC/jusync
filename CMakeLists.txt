@@ -382,89 +382,86 @@ if(BUILD_TESTS)
             get_filename_component(USD_FILENAME ${USD_FILE} NAME)
             configure_file(${USD_FILE} ${CMAKE_BINARY_DIR}/test_data/usd_samples/${USD_FILENAME} COPYONLY)
         endforeach()
-        message(STATUS "Copied ${CMAKE_CURRENT_LIST_LENGTH} USD test files")
+        list(LENGTH USD_TEST_FILES USD_TEST_FILE_COUNT)
+        message(STATUS "Copied ${USD_TEST_FILE_COUNT} USD test files")
     endif()
 
     # Enable CTest integration with granular tests
     enable_testing()
 
-    # Test Categories - These will show up as individual jobs in GitHub Actions
+    # Test Categories - These are run as independent CI checks.
     add_test(NAME "build_verification"
-             COMMAND ${CMAKE_COMMAND} -E echo "Build verification test"
-             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+              COMMAND ${CMAKE_COMMAND} -E echo "Build verification test"
+              WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-    add_test(NAME "static_analysis"
-             COMMAND usd_validation_tool --mode=static-check
-             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    add_test(NAME "binary_static_check"
+              COMMAND usd_validation_tool --mode=static-check
+              WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME "usd_basic_processing"
-             COMMAND usd_validation_tool --mode=usd-basic
-             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+              COMMAND usd_validation_tool --mode=usd-basic
+              WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     # Collision tests for different complexity levels
     add_test(NAME "collision_simple"
-             COMMAND usd_validation_tool --mode=collision --type=simple
-             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+              COMMAND usd_validation_tool --mode=collision --type=simple
+              WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME "collision_complex"
-             COMMAND usd_validation_tool --mode=collision --type=complex
-             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+              COMMAND usd_validation_tool --mode=collision --type=complex
+              WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME "collision_convex"
-             COMMAND usd_validation_tool --mode=collision --type=convex
-             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+              COMMAND usd_validation_tool --mode=collision --type=convex
+              WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME "error_handling_tests"
-             COMMAND usd_validation_tool --mode=error-handling
-             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+              COMMAND usd_validation_tool --mode=error-handling
+              WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME "performance_benchmarks"
-             COMMAND usd_validation_tool --mode=performance
-             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+              COMMAND usd_validation_tool --mode=performance
+              WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME "integration_suite"
-             COMMAND usd_validation_tool --mode=integration
-             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+              COMMAND usd_validation_tool --mode=integration
+              WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     # Set test properties
     set_tests_properties(
-        build_verification static_analysis usd_basic_processing
+        build_verification binary_static_check usd_basic_processing
         collision_simple collision_complex collision_convex
         error_handling_tests performance_benchmarks integration_suite
         PROPERTIES TIMEOUT 300
     )
 
-    # Test dependencies - later tests depend on earlier ones
-    set_tests_properties(static_analysis PROPERTIES DEPENDS build_verification)
-    set_tests_properties(usd_basic_processing PROPERTIES DEPENDS static_analysis)
-    set_tests_properties(collision_simple PROPERTIES DEPENDS usd_basic_processing)
-    set_tests_properties(collision_complex PROPERTIES DEPENDS usd_basic_processing)
-    set_tests_properties(collision_convex PROPERTIES DEPENDS usd_basic_processing)
-    set_tests_properties(error_handling_tests PROPERTIES DEPENDS usd_basic_processing)
-    set_tests_properties(performance_benchmarks PROPERTIES DEPENDS "collision_simple;collision_complex;collision_convex")
-    set_tests_properties(integration_suite PROPERTIES DEPENDS "usd_basic_processing;collision_simple;error_handling_tests")
+    set_tests_properties(build_verification binary_static_check PROPERTIES LABELS "build")
+    set_tests_properties(usd_basic_processing PROPERTIES LABELS "basic")
+    set_tests_properties(collision_simple collision_complex collision_convex PROPERTIES LABELS "collision")
+    set_tests_properties(error_handling_tests PROPERTIES LABELS "error")
+    set_tests_properties(performance_benchmarks PROPERTIES LABELS "performance")
+    set_tests_properties(integration_suite PROPERTIES LABELS "integration")
 
-    # Legacy individual file tests (if USD files exist)
+    # Individual file tests (if USD files exist)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/usd_samples")
         file(GLOB USD_TEST_FILES "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/usd_samples/*.usda")
 
         foreach(USD_FILE ${USD_TEST_FILES})
             get_filename_component(TEST_NAME ${USD_FILE} NAME_WE)
 
-            # Individual file tests (these run in parallel)
             add_test(NAME "usd_file_${TEST_NAME}"
-                     COMMAND usd_validation_tool ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/usd_samples/${TEST_NAME}.usda
+                     COMMAND usd_validation_tool --mode=usd-basic ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/usd_samples/${TEST_NAME}.usda
                      WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
             set_tests_properties("usd_file_${TEST_NAME}" PROPERTIES
                 TIMEOUT 120
-                DEPENDS usd_basic_processing)
+                LABELS "file")
         endforeach()
     endif()
 
     # Custom targets for local testing
     add_custom_target(test_quick
-        COMMAND ctest -R "build_verification|static_analysis|usd_basic_processing" --output-on-failure
+        COMMAND ctest -R "build_verification|binary_static_check|usd_basic_processing" --output-on-failure
         DEPENDS usd_validation_tool
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Running quick validation tests"
@@ -590,7 +587,7 @@ message(STATUS "  Local test targets: test_quick, test_collision, test_full, tes
 message(STATUS "")
 message(STATUS "Test Categories Available:")
 message(STATUS "  • build_verification: Build and compilation checks")
-message(STATUS "  • static_analysis: Code quality and static analysis")
+message(STATUS "  • binary_static_check: Binary/linking validation")
 message(STATUS "  • usd_basic_processing: Basic USD file loading")
 message(STATUS "  • collision_simple: Simple collision generation")
 message(STATUS "  • collision_complex: Complex collision generation")

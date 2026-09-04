@@ -138,6 +138,8 @@ private:
     };
 
 public:
+    std::string explicitFile;
+
     // Static checks for GitHub Actions
     int runStaticChecks() {
         std::cout << "🔍 Running static checks..." << std::endl;
@@ -165,20 +167,29 @@ public:
     int runUSDBasicTests(const std::string& testDataPath) {
         std::cout << "📦 Testing basic USD processing..." << std::endl;
 
-        if (!fs::exists(testDataPath)) {
-            createMinimalUSDTest(testDataPath);
+        std::vector<std::string> usdFiles;
+        if (!explicitFile.empty()) {
+            if (!fs::exists(explicitFile)) {
+                std::cerr << "❌ Explicit USD file not found: " << explicitFile << std::endl;
+                return 1;
+            }
+            usdFiles.push_back(explicitFile);
+        } else {
+            if (!fs::exists(testDataPath)) {
+                createMinimalUSDTest(testDataPath);
+            }
+
+            usdFiles = findUSDFiles(testDataPath);
+            if (usdFiles.empty()) {
+                std::cout << "⚠️ No USD files found, creating minimal test" << std::endl;
+                createMinimalUSDTest(testDataPath);
+                usdFiles = findUSDFiles(testDataPath);
+            }
         }
 
         if (!InitializeMiddleware_C(nullptr)) {
             std::cerr << "❌ Failed to initialize middleware" << std::endl;
             return 1;
-        }
-
-        auto usdFiles = findUSDFiles(testDataPath);
-        if (usdFiles.empty()) {
-            std::cout << "⚠️ No USD files found, creating minimal test" << std::endl;
-            createMinimalUSDTest(testDataPath);
-            usdFiles = findUSDFiles(testDataPath);
         }
 
         std::cout << "📁 Found " << usdFiles.size() << " USD files" << std::endl;
@@ -199,15 +210,23 @@ public:
     int runCollisionTests(const std::string& testDataPath, const std::string& collisionType) {
         std::cout << "⚔️ Testing collision generation (" << collisionType << ")..." << std::endl;
 
-        if (!InitializeMiddleware_C(nullptr)) {
-            std::cerr << "❌ Failed to initialize middleware" << std::endl;
-            return 1;
+        std::vector<std::string> usdFiles;
+        if (!explicitFile.empty()) {
+            if (!fs::exists(explicitFile)) {
+                std::cerr << "❌ Explicit USD file not found: " << explicitFile << std::endl;
+                return 1;
+            }
+            usdFiles.push_back(explicitFile);
+        } else {
+            usdFiles = findUSDFiles(testDataPath);
+            if (usdFiles.empty()) {
+                std::cout << "⚠️ No USD files found" << std::endl;
+                return 1;
+            }
         }
 
-        auto usdFiles = findUSDFiles(testDataPath);
-        if (usdFiles.empty()) {
-            std::cout << "⚠️ No USD files found" << std::endl;
-            ShutdownMiddleware_C();
+        if (!InitializeMiddleware_C(nullptr)) {
+            std::cerr << "❌ Failed to initialize middleware" << std::endl;
             return 1;
         }
 
@@ -278,15 +297,23 @@ public:
     int runPerformanceTests(const std::string& testDataPath) {
         std::cout << "🚀 Running performance benchmarks..." << std::endl;
 
-        if (!InitializeMiddleware_C(nullptr)) {
-            std::cerr << "❌ Failed to initialize middleware" << std::endl;
-            return 1;
+        std::vector<std::string> usdFiles;
+        if (!explicitFile.empty()) {
+            if (!fs::exists(explicitFile)) {
+                std::cerr << "❌ Explicit USD file not found: " << explicitFile << std::endl;
+                return 1;
+            }
+            usdFiles.push_back(explicitFile);
+        } else {
+            usdFiles = findUSDFiles(testDataPath);
+            if (usdFiles.empty()) {
+                std::cout << "⚠️ No USD files found" << std::endl;
+                return 1;
+            }
         }
 
-        auto usdFiles = findUSDFiles(testDataPath);
-        if (usdFiles.empty()) {
-            std::cout << "⚠️ No USD files found" << std::endl;
-            ShutdownMiddleware_C();
+        if (!InitializeMiddleware_C(nullptr)) {
+            std::cerr << "❌ Failed to initialize middleware" << std::endl;
             return 1;
         }
 
@@ -330,16 +357,20 @@ public:
         return result;
     }
 
-    void printResults() {
-        results.printSummary();
+    void printResults(bool bPrintGuide = false) {
+        if (results.totalFiles > 0) {
+            results.printSummary();
+        }
 
-        std::cout << "\n💡 COLLISION COMPLEXITY GUIDE:" << std::endl;
-        std::cout << "   • SIMPLE: Fast bounding box collision" << std::endl;
-        std::cout << "   • COMPLEX: Full mesh collision (most accurate)" << std::endl;
-        std::cout << "   • SIMPLIFIED: Reduced triangle count for performance" << std::endl;
-        std::cout << "   • CONVEX_HULL: Convex hull approximation" << std::endl;
-        std::cout << "   • CONVEX_DECOMP: Advanced concave shape handling" << std::endl;
-        std::cout << "\n🎯 Ready for Unreal Engine integration!" << std::endl;
+        if (bPrintGuide) {
+            std::cout << "\n💡 COLLISION COMPLEXITY GUIDE:" << std::endl;
+            std::cout << "   • SIMPLE: Fast bounding box collision" << std::endl;
+            std::cout << "   • COMPLEX: Full mesh collision (most accurate)" << std::endl;
+            std::cout << "   • SIMPLIFIED: Reduced triangle count for performance" << std::endl;
+            std::cout << "   • CONVEX_HULL: Convex hull approximation" << std::endl;
+            std::cout << "   • CONVEX_DECOMP: Advanced concave shape handling" << std::endl;
+            std::cout << "\n🎯 Ready for Unreal Engine integration!" << std::endl;
+        }
     }
 
     int getFailureCount() const {
@@ -497,9 +528,10 @@ private:
 };
 
 // Parse command line arguments
-TestMode parseMode(int argc, char* argv[], std::string& collisionType) {
+TestMode parseMode(int argc, char* argv[], std::string& collisionType, std::string& explicitFile) {
     TestMode mode = FULL;
     collisionType = "simple";
+    explicitFile.clear();
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -510,6 +542,7 @@ TestMode parseMode(int argc, char* argv[], std::string& collisionType) {
         else if (arg == "--mode=performance") mode = PERFORMANCE;
         else if (arg == "--mode=integration") mode = INTEGRATION;
         else if (arg.substr(0, 7) == "--type=") collisionType = arg.substr(7);
+        else if (arg.substr(0, 2) != "--") explicitFile = arg;
     }
 
     return mode;
@@ -544,15 +577,20 @@ fs::path findTestDataDir(int argc, char* argv[]) {
 
 int main(int argc, char* argv[]) {
     std::string collisionType;
-    TestMode mode = parseMode(argc, argv, collisionType);
+    std::string explicitFile;
+    TestMode mode = parseMode(argc, argv, collisionType, explicitFile);
     fs::path test_data_dir = findTestDataDir(argc, argv);
 
     std::cout << "🚀 USD Middleware Test Runner" << std::endl;
     std::cout << "Mode: " << mode << std::endl;
     std::cout << "Test Data Dir: " << test_data_dir << std::endl;
+    if (!explicitFile.empty()) {
+        std::cout << "Explicit File: " << explicitFile << std::endl;
+    }
     std::cout << std::string(60, '-') << std::endl;
 
     USDValidator validator;
+    validator.explicitFile = explicitFile;
     int result = 0;
 
     switch (mode) {
@@ -591,8 +629,8 @@ int main(int argc, char* argv[]) {
             break;
     }
 
-    if (mode == FULL) {
-        validator.printResults();
+    if (mode != STATIC_CHECK) {
+        validator.printResults(mode == FULL);
     }
 
     if (result == 0) {

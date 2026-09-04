@@ -1,0 +1,67 @@
+name: Run CTest Suite
+description: Downloads the CI test payload, reconfigures CMake, and runs one independent CTest group.
+inputs:
+  test-regex:
+    description: CTest -R regex for the tests to run.
+    required: true
+  artifact-name:
+    description: Artifact name prefix for the CTest log.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          build-essential \
+          cmake \
+          ninja-build \
+          pkg-config \
+          libssl-dev \
+          libzstd-dev
+
+    - name: Download test payload
+      uses: actions/download-artifact@v4
+      with:
+        name: jusync-test-payload
+        path: .
+
+    - name: Reconfigure CMake
+      shell: bash
+      run: |
+        cmake -S . -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DBUILD_TESTS=ON \
+          -DENABLE_CUDA=OFF \
+          -DBUILD_JUSYNC_Receiver_GUI=OFF \
+          -DENABLE_ZSTD=ON \
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+          -DTINYUSDZ_BUILD_TESTS=OFF \
+          -DTINYUSDZ_BUILD_EXAMPLES=OFF \
+          -DTINYUSDZ_BUILD_BENCHMARKS=OFF \
+          -DGLM_BUILD_TESTS=OFF
+
+    - name: Run CTest
+      shell: bash
+      run: |
+        set -o pipefail
+        ctest --test-dir build \
+          -R "${{ inputs.test-regex }}" \
+          --output-on-failure \
+          --parallel 2 \
+          | tee "ctest-${{ inputs.artifact-name }}.log"
+
+    - name: Upload CTest log
+      uses: actions/upload-artifact@v4
+      with:
+        name: ctest-${{ inputs.artifact-name }}
+        path: ctest-*.log
+        if-no-files-found: ignore
+        retention-days: 14
