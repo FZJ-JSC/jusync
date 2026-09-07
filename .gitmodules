@@ -5,6 +5,7 @@
 [submodule "external/tinyusdz"]
 	path = external/tinyusdz
 	url = https://github.com/lighttransport/tinyusdz.git
+	branch = dev
 
 [submodule "external/stb"]
 	path = external/stb

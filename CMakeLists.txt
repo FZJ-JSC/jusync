@@ -59,6 +59,12 @@ endif()
 # Build ZMQ as static library from bundled source
 message(STATUS "Building ZeroMQ as static library from source...")
 
+# The upstream ZeroMQ submodule still declares a very old cmake_minimum_required().
+# Modern CMake can configure it without editing the submodule by raising the
+# policy-version minimum for the compatibility check only.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING
+    "Minimum CMake policy version for legacy bundled dependencies" FORCE)
+
 # Configure ZMQ build options for static linking
 set(BUILD_STATIC ON CACHE BOOL "Build static library" FORCE)
 set(BUILD_SHARED OFF CACHE BOOL "Build shared library" FORCE)
@@ -214,26 +220,23 @@ target_include_directories(${PROJECT_NAME}
         ${CMAKE_CURRENT_SOURCE_DIR}/external/cppzmq
 )
 
-# tinyusdz is compiled with per-file -Werror when pulled in via add_subdirectory()
-# (TINYUSDZ_DEFAULT_NO_WERROR=OFF). On GCC 14+ that turns the dependency's own
-# dangling-pointer/dangling-reference diagnostics (e.g. tydra/scene-access.cc)
-# into hard errors and breaks a clean build. Keep building tinyusdz; just don't
-# treat its third-party warnings as errors. (Mirrors the GCC>=15 -fpermissive
-# workaround below.) Forced (not just if-undefined) so a stale cache value cannot
-# survive a reconfigure.
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU"
-   AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 14)
-    set(TINYUSDZ_NO_WERROR ON CACHE BOOL
-        "Don't set -Werror for the bundled tinyusdz on GCC >= 14" FORCE)
+# The bundled LightUSD/TinyUSDZ submodule is used from the upstream `dev` branch.
+# It is compiled with per-file -Werror when pulled in via add_subdirectory()
+# (LIGHTUSD_DEFAULT_NO_WERROR=OFF). On GCC that can turn the dependency's own
+# warnings into hard errors. Keep building the upstream sources; just do not
+# treat third-party warnings as errors.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+    set(LIGHTUSD_NO_WERROR ON CACHE BOOL
+        "Don't set -Werror for the bundled LightUSD on GCC" FORCE)
 endif()
 
 # Add external dependencies
 add_subdirectory(external/tinyusdz external/tinyusdz_build)
 add_subdirectory(external/glm external/glm_build)
 
-# Workaround tinyusdz macro strictness on GCC >= 15 (template-dependent lookup in is_array)
+# Workaround upstream LightUSD macro strictness on newer GCC if needed.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
-    target_compile_options(tinyusdz_static PRIVATE -fpermissive)
+    target_compile_options(lightusd_static PRIVATE -fpermissive)
 endif()
 
 # TBB - required for parallel processing (parallel_for, task_arena)
@@ -252,7 +255,7 @@ target_link_libraries(${PROJECT_NAME}
         ${ZMQ_STATIC_TARGET}  # Static ZMQ library instead of ${ZMQ_LIBRARY}
         OpenSSL::SSL
         OpenSSL::Crypto
-        tinyusdz::tinyusdz_static
+        lightusd::lightusd_static
         glm::glm
         ${TBB_LIB}
 )

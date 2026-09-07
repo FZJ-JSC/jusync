@@ -41,8 +41,10 @@
 #include <zstd.h>
 #endif
 
-// Include TinyUSDZ with error handling
-#include "tinyusdz.hh"
+// Include TinyUSDZ (LightUSD dev) with error handling
+#include "lightusd.hh"
+#include "usdGeom.hh"   // GeomMesh, GeomPoints, GPrim, GeomPrimvar
+#include "xform.hh"     // Xformable, XformOp
 
 // STB Image with safety wrappers
 #define STB_IMAGE_IMPLEMENTATION
@@ -51,6 +53,92 @@
 #include <io-util.hh>
 
 #include "stb_image.h"
+
+namespace {
+
+template <typename T>
+const std::vector<T>* JusyncGetStaticVector(
+    const lightusd::TypedAttribute<lightusd::Animatable<std::vector<T>>>& attr)
+{
+    if (attr.is_blocked() || attr.is_connection()) {
+        return nullptr;
+    }
+    const auto& opt = attr.get_value_ref();
+    if (!opt) {
+        return nullptr;
+    }
+    const auto& anim = opt.value();
+    if (anim.is_blocked() || !anim.has_default()) {
+        return nullptr;
+    }
+    return &anim.get_scalar_ref();
+}
+
+template <typename T>
+bool JusyncGetVectorAtTime(
+    const lightusd::TypedAttribute<lightusd::Animatable<std::vector<T>>>& attr,
+    double time,
+    std::vector<T>& out)
+{
+    if (attr.is_blocked() || attr.is_connection()) {
+        return false;
+    }
+    const auto& opt = attr.get_value_ref();
+    if (!opt) {
+        return false;
+    }
+    const auto& anim = opt.value();
+    return anim.get(time, &out);
+}
+
+const lightusd::Attribute* JusyncFindPrimvarAttribute(
+    const lightusd::GPrim& prim,
+    const std::string& name)
+{
+    const std::string key =
+        (name.rfind("primvars:", 0) == 0) ? name : ("primvars:" + name);
+    auto it = prim.props.find(key);
+    if (it == prim.props.end()) {
+        return nullptr;
+    }
+    return it->second.get_attribute_or_null();
+}
+
+template <typename T>
+const std::vector<T>* JusyncGetAttributeVector(const lightusd::Attribute& attr)
+{
+    if (attr.is_blocked() || attr.is_connection() ||
+        attr.has_timesamples() || !attr.has_value()) {
+        return nullptr;
+    }
+    return attr.get_var().value_raw().as<std::vector<T>>();
+}
+
+const std::vector<lightusd::value::normal3f>* JusyncGetMeshNormalsZeroCopy(
+    const lightusd::GeomMesh& mesh)
+{
+    if (mesh.has_primvar("normals")) {
+        auto it = mesh.props.find("primvars:normals");
+        if (it != mesh.props.end() && it->second.is_attribute()) {
+            const bool indexed =
+                mesh.props.find("primvars:normals:indices") != mesh.props.end();
+            if (!indexed) {
+                if (const auto* attr = it->second.get_attribute_or_null()) {
+                    return JusyncGetAttributeVector<lightusd::value::normal3f>(*attr);
+                }
+            }
+        }
+    }
+
+    const bool indexed = mesh.props.find("normals:indices") != mesh.props.end();
+    if (!indexed) {
+        return JusyncGetStaticVector<lightusd::value::normal3f>(mesh.normals);
+    }
+
+    return nullptr;
+}
+
+} // namespace
 
 namespace anari_usd_middleware {
 
@@ -306,7 +394,7 @@ public:
      * @param outPoints Output transformed points
      */
     void transformVerticesWithGpu(
-        const std::vector<tinyusdz::value::point3f>& points,
+        const std::vector<lightusd::value::point3f>& points,
         const glm::mat4& transform,
         std::vector<glm::vec3>& outPoints)
     {
@@ -359,7 +447,7 @@ public:
         if (!gpuSuccess) {
             const float* m = &transform[0][0];
             
-            auto transformVertex = [m](const tinyusdz::value::point3f& pt) -> glm::vec3 {
+            auto transformVertex = [m](const lightusd::value::point3f& pt) -> glm::vec3 {
                 const float x = static_cast<float>(pt.x);
                 const float y = static_cast<float>(pt.y);
                 const float z = static_cast<float>(pt.z);
@@ -412,7 +500,7 @@ public:
      * @param outNormals Output transformed normals
      */
     void transformNormalsWithGpu(
-        const std::vector<tinyusdz::value::normal3f>& normals,
+        const std::vector<lightusd::value::normal3f>& normals,
         const glm::mat3& normalMatrix,
         std::vector<glm::vec3>& outNormals)
     {
@@ -453,7 +541,7 @@ public:
 
         // CPU fallback
         if (!gpuSuccess) {
-            auto transformNormal = [normalMatrix](const tinyusdz::value::normal3f& nrm) -> glm::vec3 {
+            auto transformNormal = [normalMatrix](const lightusd::value::normal3f& nrm) -> glm::vec3 {
                 // Fast NaN/Inf check
                 const int32_t* ix = reinterpret_cast<const int32_t*>(&nrm.x);
                 const int32_t* iy = reinterpret_cast<const int32_t*>(&nrm.y);
@@ -496,7 +584,7 @@ public:
      * @param outUVs Output processed UVs
      */
     void processUVsWithGpu(
-        const std::vector<tinyusdz::value::texcoord2f>& uvs,
+        const std::vector<lightusd::value::texcoord2f>& uvs,
         std::vector<glm::vec2>& outUVs)
     {
         if (uvs.empty()) {
@@ -536,7 +624,7 @@ public:
             std::transform(PAR_POLICY
                           uvs.begin(), uvs.end(),
                           outUVs.begin(),
-                          [](const tinyusdz::value::texcoord2f& uv) {
+                          [](const lightusd::value::texcoord2f& uv) {
                               return glm::vec2(uv.s, uv.t);
                           });
 
@@ -1139,15 +1227,15 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
         }
 
         // Load USD stage with enhanced options
-        tinyusdz::Stage stage;
+        lightusd::Stage stage;
         std::string warnings, errors;
-        tinyusdz::USDLoadOptions options;
+        lightusd::USDLoadOptions options;
         options.load_payloads = true;
         options.load_references = true;
         options.load_sublayers = true;
         options.max_memory_limit_in_mb = static_cast<int>(memoryLimitMB.load());
 
-        bool loadResult = tinyusdz::LoadUSDFromMemory(
+        bool loadResult = lightusd::LoadUSDFromMemory(
             parsePtr,
             parseSize,
             fileName.c_str(),
@@ -1188,7 +1276,7 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
                 return false;
             }
 
-            if (!ProcessPrim(const_cast<tinyusdz::Prim*>(&rootPrim), outMeshData, outPointCloudData, identity, 0)) {
+            if (!ProcessPrim(const_cast<lightusd::Prim*>(&rootPrim), outMeshData, outPointCloudData, identity, 0)) {
                 MIDDLEWARE_LOG_WARNING("Failed to process root prim: %s", rootPrim.element_name().c_str());
             }
         }
@@ -1430,7 +1518,7 @@ bool UsdProcessor::ProcessPrim(void* prim,
     }
 
     try {
-        const tinyusdz::Prim& usdPrim = *static_cast<const tinyusdz::Prim*>(prim);
+        const lightusd::Prim& usdPrim = *static_cast<const lightusd::Prim*>(prim);
 
         MIDDLEWARE_LOG_DEBUG("Processing prim: %s (type: %s, depth: %d)",
                            usdPrim.element_name().c_str(),
@@ -1454,7 +1542,7 @@ bool UsdProcessor::ProcessPrim(void* prim,
         }
 
         // Check for point cloud primitive FIRST (def Points)
-        const tinyusdz::GeomPoints* pts = usdPrim.as<tinyusdz::GeomPoints>();
+        const lightusd::GeomPoints* pts = usdPrim.as<lightusd::GeomPoints>();
         if (pts) {
             MIDDLEWARE_LOG_INFO("Found point cloud primitive: %s", usdPrim.element_name().c_str());
 
@@ -1462,7 +1550,7 @@ bool UsdProcessor::ProcessPrim(void* prim,
             pointData.elementName = usdPrim.element_name();
             pointData.typeName = usdPrim.prim_type_name();
 
-            if (ExtractPointCloudData(const_cast<tinyusdz::GeomPoints*>(pts), pointData, worldTransform)) {
+            if (ExtractPointCloudData(const_cast<lightusd::GeomPoints*>(pts), pointData, worldTransform)) {
                 if (pointData.isValid()) {
                     MIDDLEWARE_LOG_INFO("Extracted point cloud: %s (%zu positions, %zu colors)",
                         pointData.elementName.c_str(), pointData.positions.size(), pointData.vertex_colors.size());
@@ -1475,7 +1563,7 @@ bool UsdProcessor::ProcessPrim(void* prim,
 
         // Check if this is a mesh primitive (skip if already handled as point cloud)
         if (!pts) {
-            const tinyusdz::GeomMesh* mesh = usdPrim.as<tinyusdz::GeomMesh>();
+            const lightusd::GeomMesh* mesh = usdPrim.as<lightusd::GeomMesh>();
             if (mesh) {
                 MIDDLEWARE_LOG_DEBUG("Found mesh primitive: %s", usdPrim.element_name().c_str());
 
@@ -1490,7 +1578,7 @@ bool UsdProcessor::ProcessPrim(void* prim,
                 meshData.elementName = usdPrim.element_name();
                 meshData.typeName = usdPrim.prim_type_name();
 
-                if (ExtractMeshData(const_cast<tinyusdz::GeomMesh*>(mesh), meshData, worldTransform)) {
+                if (ExtractMeshData(const_cast<lightusd::GeomMesh*>(mesh), meshData, worldTransform)) {
                     if (meshData.isValid()) {
                         meshDataArray.push_back(std::move(meshData));
                         stats.meshesExtracted.fetch_add(1);
@@ -1529,7 +1617,7 @@ bool UsdProcessor::ProcessPrim(void* prim,
                     futures.push_back(std::async(std::launch::async, [&, i]() {
                         std::vector<MeshData> localMeshData;
                         std::vector<PointCloudData> localPCData;
-                        bool result = ProcessPrim(const_cast<tinyusdz::Prim*>(&children[i]),
+                        bool result = ProcessPrim(const_cast<lightusd::Prim*>(&children[i]),
                                                  localMeshData, &localPCData, worldTransform, depth + 1);
                         if (!result) {
                             MIDDLEWARE_LOG_WARNING("Failed to process child prim: %s",
@@ -1568,7 +1656,7 @@ bool UsdProcessor::ProcessPrim(void* prim,
             } else {
                 // Sequential processing for small numbers
                 for (const auto& child : children) {
-                    if (!ProcessPrim(const_cast<tinyusdz::Prim*>(&child),
+                    if (!ProcessPrim(const_cast<lightusd::Prim*>(&child),
                                     meshDataArray, outPointCloudData, worldTransform, depth + 1)) {
                         MIDDLEWARE_LOG_WARNING("Failed to process child prim: %s",
                                              child.element_name().c_str());
@@ -1578,7 +1666,7 @@ bool UsdProcessor::ProcessPrim(void* prim,
         } else {
             // Sequential processing for small numbers or deep recursion
             for (const auto& child : children) {
-                if (!ProcessPrim(const_cast<tinyusdz::Prim*>(&child),
+                if (!ProcessPrim(const_cast<lightusd::Prim*>(&child),
                                 meshDataArray, outPointCloudData, worldTransform, depth + 1)) {
                     MIDDLEWARE_LOG_WARNING("Failed to process child prim: %s",
                                          child.element_name().c_str());
@@ -1605,7 +1693,7 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
     }
 
     try {
-        tinyusdz::GeomMesh* geomMesh = static_cast<tinyusdz::GeomMesh*>(mesh);
+        lightusd::GeomMesh* geomMesh = static_cast<lightusd::GeomMesh*>(mesh);
                 // NEW: Extract subdivision scheme
         // NEW: Extract subdivision scheme
         std::string subdivScheme = "none";
@@ -1613,11 +1701,11 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             // TinyUSDZ returns the value directly, not via pointer
             auto subdivValue = geomMesh->subdivisionScheme.get_value();
             // Convert SubdivisionScheme enum to string
-            if (subdivValue == tinyusdz::GeomMesh::SubdivisionScheme::CatmullClark) {
+            if (subdivValue == lightusd::GeomMesh::SubdivisionScheme::CatmullClark) {
                 subdivScheme = "catmullClark";
-            } else if (subdivValue == tinyusdz::GeomMesh::SubdivisionScheme::Loop) {
+            } else if (subdivValue == lightusd::GeomMesh::SubdivisionScheme::Loop) {
                 subdivScheme = "loop";
-            } else if (subdivValue == tinyusdz::GeomMesh::SubdivisionScheme::Bilinear) {
+            } else if (subdivValue == lightusd::GeomMesh::SubdivisionScheme::Bilinear) {
                 subdivScheme = "bilinear";
             } else {
                 subdivScheme = "none";
@@ -1642,10 +1730,11 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
 
         // Extract points with validation.
         // Zero-copy fast path: a static (non-timesampled) `points` attribute is
-        // read straight from tinyusdz's internal storage; only timesampled or
+        // read straight from LightUSD's internal storage; only timesampled or
         // connected attributes fall back to the by-value copy.
-        const std::vector<tinyusdz::value::point3f>* pointsPtr = geomMesh->get_points_ptr();
-        std::vector<tinyusdz::value::point3f> pointsCopy;
+        std::vector<lightusd::value::point3f> pointsCopy;
+        const std::vector<lightusd::value::point3f>* pointsPtr =
+            JusyncGetStaticVector<lightusd::value::point3f>(geomMesh->points);
         if (!pointsPtr) {
             pointsCopy = geomMesh->get_points();
             pointsPtr = &pointsCopy;
@@ -1675,7 +1764,7 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             const int32_t* i = reinterpret_cast<const int32_t*>(&v);
             return (*i & 0x7F800000) != 0x7F800000;
         };
-        auto point3fFinite = [isFiniteFloat](const tinyusdz::value::point3f& p) -> bool {
+        auto point3fFinite = [isFiniteFloat](const lightusd::value::point3f& p) -> bool {
             return isFiniteFloat(p.x) && isFiniteFloat(p.y) && isFiniteFloat(p.z);
         };
 
@@ -1699,12 +1788,12 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         if (identityTransform) {
             outMeshData.points.resize(points.size());
             std::memcpy(outMeshData.points.data(), points.data(),
-                        points.size() * sizeof(tinyusdz::value::point3f));
+                        points.size() * sizeof(lightusd::value::point3f));
             const size_t n = points.size();
             const auto* src = points.data();
             nonFiniteCount = std::count_if(PAR_POLICY
                 src, src + n,
-                [point3fFinite](const tinyusdz::value::point3f& p) { return !point3fFinite(p); });
+                [point3fFinite](const lightusd::value::point3f& p) { return !point3fFinite(p); });
             if (nonFiniteCount > 0) {
                 auto* dst = outMeshData.points.data();
                 for (size_t i = 0; i < n; ++i) {
@@ -1729,7 +1818,7 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             const float* m = &worldTransform[0][0];
 
             // Helper lambda for vertex transformation
-            auto transformVertex = [m, &nonFiniteCount](const tinyusdz::value::point3f& pt) -> glm::vec3 {
+            auto transformVertex = [m, &nonFiniteCount](const lightusd::value::point3f& pt) -> glm::vec3 {
                 const float x = static_cast<float>(pt.x);
                 const float y = static_cast<float>(pt.y);
                 const float z = static_cast<float>(pt.z);
@@ -1797,16 +1886,18 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         }
 
         // Extract and triangulate faces (zero-copy fast path, copy fallback)
-        const std::vector<int32_t>* fvcPtr = geomMesh->get_faceVertexCounts_ptr();
         std::vector<int32_t> fvcCopy;
+        const std::vector<int32_t>* fvcPtr =
+            JusyncGetStaticVector<int32_t>(geomMesh->faceVertexCounts);
         if (!fvcPtr) {
             fvcCopy = geomMesh->get_faceVertexCounts();
             fvcPtr = &fvcCopy;
         }
         const auto& faceVertexCounts = *fvcPtr;
 
-        const std::vector<int32_t>* fviPtr = geomMesh->get_faceVertexIndices_ptr();
         std::vector<int32_t> fviCopy;
+        const std::vector<int32_t>* fviPtr =
+            JusyncGetStaticVector<int32_t>(geomMesh->faceVertexIndices);
         if (!fviPtr) {
             fviCopy = geomMesh->get_faceVertexIndices();
             fviPtr = &fviCopy;
@@ -1868,8 +1959,9 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         }
 
         // Extract normals (zero-copy fast path, copy fallback)
-        const std::vector<tinyusdz::value::normal3f>* normalsPtr = geomMesh->get_normals_ptr();
-        std::vector<tinyusdz::value::normal3f> normalsCopy;
+        std::vector<lightusd::value::normal3f> normalsCopy;
+        const std::vector<lightusd::value::normal3f>* normalsPtr =
+            JusyncGetMeshNormalsZeroCopy(*geomMesh);
         if (!normalsPtr) {
             normalsCopy = geomMesh->get_normals();
             normalsPtr = &normalsCopy;
@@ -1887,7 +1979,7 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
                 glm::mat3 normalMatrix = glm::mat3(worldTransform);
 
                 // Helper lambda for normal transformation
-                auto transformNormal = [normalMatrix](const tinyusdz::value::normal3f& nrm) -> glm::vec3 {
+                auto transformNormal = [normalMatrix](const lightusd::value::normal3f& nrm) -> glm::vec3 {
                     // Fast NaN/Inf check
                     const int32_t* ix = reinterpret_cast<const int32_t*>(&nrm.x);
                     const int32_t* iy = reinterpret_cast<const int32_t*>(&nrm.y);
@@ -1972,7 +2064,7 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
     }
 }
 
-    void UsdProcessor::extractVertexColors(tinyusdz::GeomMesh* mesh, MeshData& meshData) {
+    void UsdProcessor::extractVertexColors(lightusd::GeomMesh* mesh, MeshData& meshData) {
     if (!mesh) return;
 
     try {
@@ -1982,10 +2074,9 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         //
         // Zero-copy fast path: locate the primvar's Attribute directly in the
         // prim's property storage and read the typed array in place. The
-        // non-strict as_ptr() also matches raw float3[]/float4[] payloads (the
-        // old code probed those types separately). Bare names only: both
-        // find_attr_ptr() and the legacy get_primvar() prepend "primvars:"
-        // themselves.
+        // non-strict Value::as<> also matches raw float3[]/float4[] payloads
+        // (the old code probed those types separately). Bare names only: the
+        // helper prepends "primvars:" itself.
         const std::vector<std::string> colorNames = {
             "color", "displayColor", "Cd"  // Common in Houdini/Maya
         };
@@ -1995,20 +2086,20 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         };
 
         bool foundColors = false;
-        const tinyusdz::Attribute* colorAttr = nullptr;
+        const lightusd::Attribute* colorAttr = nullptr;
         int colorType = -1;  // 0 = color4f[], 1 = color3f[]
 
         // 1) Try the (name, type) cached from a previous mesh in this file
         if (!pImpl->colorCacheName.empty()) {
-            if (const tinyusdz::Attribute* a = mesh->find_attr_ptr(pImpl->colorCacheName)) {
+            if (const lightusd::Attribute* a = JusyncFindPrimvarAttribute(*mesh, pImpl->colorCacheName)) {
                 if (!a->is_blocked() && !a->is_connection() &&
                     !isIndexedPrimvar(pImpl->colorCacheName)) {
                     if (pImpl->colorCacheType == 0) {
-                        if (a->get_var().as_ptr<std::vector<tinyusdz::value::color4f>>()) {
+                        if (JusyncGetAttributeVector<lightusd::value::color4f>(*a)) {
                             colorAttr = a; colorType = 0;
                         }
                     } else if (pImpl->colorCacheType == 1) {
-                        if (a->get_var().as_ptr<std::vector<tinyusdz::value::color3f>>()) {
+                        if (JusyncGetAttributeVector<lightusd::value::color3f>(*a)) {
                             colorAttr = a; colorType = 1;
                         }
                     }
@@ -2019,16 +2110,16 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         // 2) Otherwise probe the known names
         if (!colorAttr) {
             for (const auto& name : colorNames) {
-                const tinyusdz::Attribute* a = mesh->find_attr_ptr(name);
+                const lightusd::Attribute* a = JusyncFindPrimvarAttribute(*mesh, name);
                 if (!a || a->is_blocked() || a->is_connection() || isIndexedPrimvar(name)) {
                     continue;
                 }
-                if (a->get_var().as_ptr<std::vector<tinyusdz::value::color4f>>()) {
+                if (JusyncGetAttributeVector<lightusd::value::color4f>(*a)) {
                     colorAttr = a; colorType = 0;
                     pImpl->colorCacheName = name; pImpl->colorCacheType = 0;
                     break;
                 }
-                if (a->get_var().as_ptr<std::vector<tinyusdz::value::color3f>>()) {
+                if (JusyncGetAttributeVector<lightusd::value::color3f>(*a)) {
                     colorAttr = a; colorType = 1;
                     pImpl->colorCacheName = name; pImpl->colorCacheType = 1;
                     break;
@@ -2038,7 +2129,7 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
 
         if (colorAttr) {
             if (colorType == 0) {
-                const auto* src = colorAttr->get_var().as_ptr<std::vector<tinyusdz::value::color4f>>();
+                const auto* src = JusyncGetAttributeVector<lightusd::value::color4f>(*colorAttr);
                 MIDDLEWARE_LOG_DEBUG("Found %zu RGBA vertex colors (zero-copy)", src->size());
                 meshData.vertex_colors.resize(src->size());
                 for (size_t i = 0; i < src->size(); ++i) {
@@ -2057,7 +2148,7 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
                     }
                 }
             } else {
-                const auto* src = colorAttr->get_var().as_ptr<std::vector<tinyusdz::value::color3f>>();
+                const auto* src = JusyncGetAttributeVector<lightusd::value::color3f>(*colorAttr);
                 MIDDLEWARE_LOG_DEBUG("Found %zu RGB vertex colors (zero-copy)", src->size());
                 meshData.vertex_colors.resize(src->size());
                 for (size_t i = 0; i < src->size(); ++i) {
@@ -2079,7 +2170,7 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         } else {
             // 3) Legacy fallback (indexed/timesampled/unusual types): the
             //    old GeomPrimvar copy path, kept for exact behavior parity.
-            tinyusdz::GeomPrimvar colorPrimvar;
+            lightusd::GeomPrimvar colorPrimvar;
             std::string primvarErr;
             const std::vector<std::string> legacyNames = {
                 "primvars:color", "color", "primvars:displayColor", "displayColor",
@@ -2087,10 +2178,10 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             };
             for (const auto& name : legacyNames) {
                 if (mesh->get_primvar(name, &colorPrimvar, &primvarErr)) {
-                    std::vector<tinyusdz::value::color3f> color3fValues;
-                    std::vector<tinyusdz::value::color4f> color4fValues;
-                    std::vector<tinyusdz::value::float3> float3Values;
-                    std::vector<tinyusdz::value::float4> float4Values;
+                    std::vector<lightusd::value::color3f> color3fValues;
+                    std::vector<lightusd::value::color4f> color4fValues;
+                    std::vector<lightusd::value::float3> float3Values;
+                    std::vector<lightusd::value::float4> float4Values;
 
                     if (colorPrimvar.get_value(&color4fValues)) {
                         MIDDLEWARE_LOG_DEBUG("Found %zu RGBA vertex colors in primvar: %s",
@@ -2209,11 +2300,11 @@ glm::mat4 UsdProcessor::GetLocalTransform(void* prim) {
     MIDDLEWARE_VALIDATE_POINTER(prim, "GetLocalTransform");
 
     try {
-        const tinyusdz::Prim& usdPrim = *static_cast<const tinyusdz::Prim*>(prim);
+        const lightusd::Prim& usdPrim = *static_cast<const lightusd::Prim*>(prim);
         glm::mat4 localTransform(1.0f); // Identity matrix
 
-        const tinyusdz::Xformable* xformable = nullptr;
-        if (!tinyusdz::CastToXformable(usdPrim, &xformable) || !xformable) {
+        const lightusd::Xformable* xformable = nullptr;
+        if (!lightusd::CastToXformable(usdPrim, &xformable) || !xformable) {
             return localTransform; // Return identity if not transformable
         }
 
@@ -2223,8 +2314,8 @@ glm::mat4 UsdProcessor::GetLocalTransform(void* prim) {
         for (const auto& op : xformable->xformOps) {
             try {
                 switch (op.op_type) {
-                    case tinyusdz::XformOp::OpType::Translate: {
-                        tinyusdz::value::double3 trans;
+                    case lightusd::XformOp::OpType::Translate: {
+                        lightusd::value::double3 trans;
                         if (op.get_interpolated_value(&trans)) {
                             // Validate translation values
                             if (std::isfinite(trans[0]) && std::isfinite(trans[1]) && std::isfinite(trans[2])) {
@@ -2241,8 +2332,8 @@ glm::mat4 UsdProcessor::GetLocalTransform(void* prim) {
                         break;
                     }
 
-                    case tinyusdz::XformOp::OpType::Scale: {
-                        tinyusdz::value::double3 scale;
+                    case lightusd::XformOp::OpType::Scale: {
+                        lightusd::value::double3 scale;
                         if (op.get_interpolated_value(&scale)) {
                             if (std::isfinite(scale[0]) && std::isfinite(scale[1]) && std::isfinite(scale[2]) &&
                                 scale[0] > safety::EPSILON && scale[1] > safety::EPSILON && scale[2] > safety::EPSILON) {
@@ -2259,8 +2350,8 @@ glm::mat4 UsdProcessor::GetLocalTransform(void* prim) {
                         break;
                     }
 
-                    case tinyusdz::XformOp::OpType::RotateXYZ: {
-                        tinyusdz::value::double3 rot;
+                    case lightusd::XformOp::OpType::RotateXYZ: {
+                        lightusd::value::double3 rot;
                         if (op.get_interpolated_value(&rot)) {
                             if (std::isfinite(rot[0]) && std::isfinite(rot[1]) && std::isfinite(rot[2])) {
                                 // Apply rotations in XYZ order
@@ -2307,7 +2398,7 @@ glm::mat4 UsdProcessor::GetLocalTransform(void* prim) {
 
 // MISSING METHOD IMPLEMENTATIONS - These were causing linker errors
 
-void UsdProcessor::ExtractReferencePaths(const tinyusdz::Stage& stage,
+void UsdProcessor::ExtractReferencePaths(const lightusd::Stage& stage,
                                         std::vector<std::string>& outReferencePaths) {
     MIDDLEWARE_LOG_INFO("Extracting reference paths from stage");
 
@@ -2344,38 +2435,36 @@ std::vector<std::string> UsdProcessor::UsdProcessorImpl::extractClipsFromString(
     return clipPaths;
 }
 
-void UsdProcessor::ExtractReferencePathsFromPrim(const tinyusdz::Prim& prim,
+void UsdProcessor::ExtractReferencePathsFromPrim(const lightusd::Prim& prim,
                                                 std::vector<std::string>& outReferencePaths) {
-    // Check for references in this prim
+    // Check for references in this prim.
+    // In LightUSD dev this is a list of (ListEditQual, vector<Reference>) pairs.
     if (prim.metas().references.has_value()) {
         const auto& refs = prim.metas().references.value();
 
-        // Access the references vector (second element of the pair)
-        const auto& references = refs.second;
-
-        // For each reference in the vector
-        for (const auto& ref : references) {
-            std::string assetPath = ref.asset_path.GetAssetPath();
-            if (!assetPath.empty()) {
-                MIDDLEWARE_LOG_INFO("Found reference: %s", assetPath.c_str());
-                outReferencePaths.push_back(assetPath);
+        for (const auto& entry : refs) {
+            // `entry.second` is the vector<Reference> for this list-edit op
+            for (const auto& ref : entry.second) {
+                std::string assetPath = ref.asset_path.GetAssetPath();
+                if (!assetPath.empty()) {
+                    MIDDLEWARE_LOG_INFO("Found reference: %s", assetPath.c_str());
+                    outReferencePaths.push_back(assetPath);
+                }
             }
         }
     }
 
-    // Check for payloads in this prim
+    // Check for payloads in this prim (same list-of-pairs layout).
     if (prim.metas().payload.has_value()) {
         const auto& pl = prim.metas().payload.value();
 
-        // Access the payloads vector (second element of the pair)
-        const auto& payloads = pl.second;
-
-        // For each payload in the vector
-        for (const auto& payload : payloads) {
-            std::string assetPath = payload.asset_path.GetAssetPath();
-            if (!assetPath.empty()) {
-                MIDDLEWARE_LOG_INFO("Found payload: %s", assetPath.c_str());
-                outReferencePaths.push_back(assetPath);
+        for (const auto& entry : pl) {
+            for (const auto& payload : entry.second) {
+                std::string assetPath = payload.asset_path.GetAssetPath();
+                if (!assetPath.empty()) {
+                    MIDDLEWARE_LOG_INFO("Found payload: %s", assetPath.c_str());
+                    outReferencePaths.push_back(assetPath);
+                }
             }
         }
     }
@@ -2386,7 +2475,7 @@ void UsdProcessor::ExtractReferencePathsFromPrim(const tinyusdz::Prim& prim,
     }
 }
 
-void UsdProcessor::ListPrimHierarchy(const tinyusdz::Prim& prim, int depth) {
+void UsdProcessor::ListPrimHierarchy(const lightusd::Prim& prim, int depth) {
     std::string indent(depth * 2, ' ');
     MIDDLEWARE_LOG_INFO("%s- %s (%s)", indent.c_str(),
                       prim.element_name().c_str(),
@@ -2587,15 +2676,14 @@ bool UsdProcessor::calculateMeshNormals(const std::vector<glm::vec3>& points,
     }
 }
 
-void UsdProcessor::extractUVCoordinates(tinyusdz::GeomMesh* mesh, MeshData& meshData) {
+void UsdProcessor::extractUVCoordinates(lightusd::GeomMesh* mesh, MeshData& meshData) {
     if (!mesh) return;
 
     try {
         auto uvStartTime = std::chrono::high_resolution_clock::now();
         
-        // ✅ MODIFIED: Support multiple UV sets.
-        // Bare names only: get_primvar()/find_attr_ptr() prepend "primvars:"
-        // themselves (the old "primvars:st" list entries never matched).
+        // Support multiple UV sets.
+        // Bare names only: the helper prepends "primvars:" itself.
         // Zero-copy fast path with a legacy GeomPrimvar fallback for indexed
         // or unusual types.
         const std::vector<std::string> uvNames = {
@@ -2606,18 +2694,18 @@ void UsdProcessor::extractUVCoordinates(tinyusdz::GeomMesh* mesh, MeshData& mesh
         meshData.uvSetNames.clear();
 
         for (const auto& name : uvNames) {
-            const tinyusdz::Attribute* attr = mesh->find_attr_ptr(name);
+            const lightusd::Attribute* attr = JusyncFindPrimvarAttribute(*mesh, name);
             const bool indexed =
                 attr && mesh->props.count("primvars:" + name + ":indices") > 0;
 
-            const std::vector<tinyusdz::value::texcoord2f>* uvs = nullptr;
+            const std::vector<lightusd::value::texcoord2f>* uvs = nullptr;
             if (attr && !attr->is_blocked() && !attr->is_connection() && !indexed) {
-                uvs = attr->get_var().as_ptr<std::vector<tinyusdz::value::texcoord2f>>();
+                uvs = JusyncGetAttributeVector<lightusd::value::texcoord2f>(*attr);
             }
 
-            std::vector<tinyusdz::value::texcoord2f> legacyUvs;
+            std::vector<lightusd::value::texcoord2f> legacyUvs;
             if (!uvs) {
-                tinyusdz::GeomPrimvar primvar;
+                lightusd::GeomPrimvar primvar;
                 std::string primvarErr;
                 if (mesh->get_primvar(name, &primvar, &primvarErr) &&
                     primvar.get_value(&legacyUvs)) {
@@ -2636,7 +2724,7 @@ void UsdProcessor::extractUVCoordinates(tinyusdz::GeomMesh* mesh, MeshData& mesh
                 std::transform(PAR_POLICY
                              uvs->begin(), uvs->end(),
                              uvChannel.begin(),
-                             [](const tinyusdz::value::texcoord2f& uv) {
+                             [](const lightusd::value::texcoord2f& uv) {
                                  return glm::vec2(uv.s, uv.t);
                              });
 
@@ -2683,7 +2771,7 @@ bool UsdProcessor::hasEmptyGeometry(const std::vector<MeshData>& meshData) const
     return meshData.empty();
 }
 
-bool UsdProcessor::resolveReferences(const tinyusdz::Stage& stage,
+bool UsdProcessor::resolveReferences(const lightusd::Stage& stage,
                                      const std::vector<uint8_t>& buffer,
                                      const std::string& fileName,
                                      std::vector<MeshData>& outMeshData,
@@ -2715,7 +2803,7 @@ bool UsdProcessor::resolveReferences(const tinyusdz::Stage& stage,
         MIDDLEWARE_LOG_INFO("Found %zu reference/clip paths to process", referencePaths.size());
 
         // Get base directory using TinyUSDZ's function
-        std::string baseDir = tinyusdz::io::GetBaseDir(fileName);
+        std::string baseDir = lightusd::io::GetBaseDir(fileName);
         MIDDLEWARE_LOG_INFO("Base directory: %s", baseDir.c_str());
         if (baseDir.empty()) {
             // Extract directory from the full file path
@@ -2773,21 +2861,21 @@ bool UsdProcessor::loadReferencedFile(const std::string& filePath, std::vector<M
 
         size_t initialMeshCount = outMeshData.size();
 
-        tinyusdz::Stage refStage;
+        lightusd::Stage refStage;
         std::string warnings, errors;
-        tinyusdz::USDLoadOptions options;
+        lightusd::USDLoadOptions options;
         options.load_payloads = true;
         options.load_references = true;
         options.max_memory_limit_in_mb = static_cast<int>(memoryLimitMB.load());
 
-        bool result = tinyusdz::LoadUSDFromMemory(
+        bool result = lightusd::LoadUSDFromMemory(
             buffer.data(), buffer.size(), filePath.c_str(),
             &refStage, &warnings, &errors, options);
 
         if (result) {
             glm::mat4 identity(1.0f);
             for (const auto& rootPrim : refStage.root_prims()) {
-                ProcessPrim(const_cast<tinyusdz::Prim*>(&rootPrim),
+                ProcessPrim(const_cast<lightusd::Prim*>(&rootPrim),
                             outMeshData, nullptr, identity, 0);
             }
 
@@ -2810,7 +2898,7 @@ bool UsdProcessor::loadReferencedFile(const std::string& filePath, std::vector<M
     }
 }
 
-bool UsdProcessor::ExtractPointCloudData(tinyusdz::GeomPoints* geomPoints,
+bool UsdProcessor::ExtractPointCloudData(lightusd::GeomPoints* geomPoints,
                                          PointCloudData& outData,
                                          const glm::mat4& worldTransform) {
     if (!geomPoints) {
@@ -2822,26 +2910,21 @@ bool UsdProcessor::ExtractPointCloudData(tinyusdz::GeomPoints* geomPoints,
         auto startTime = std::chrono::high_resolution_clock::now();
 
         // ── Extract point positions (zero-copy fast path, copy fallback) ──
-        // TypedAttribute<Animatable<...>>: get_ptr() chains skip the optional
-        // copy and the get()/get_default() materialization for static values.
-        const auto* pointsAnim = geomPoints->points.get_ptr();
-        std::vector<tinyusdz::value::point3f> pointsCopy;
-        const std::vector<tinyusdz::value::point3f>* rawPoints = nullptr;
+        // TypedAttribute<Animatable<...>>: static values are read through
+        // get_scalar_ref(); timesampled values fall back to Animatable::get().
+        std::vector<lightusd::value::point3f> pointsCopy;
+        const std::vector<lightusd::value::point3f>* rawPoints =
+            JusyncGetStaticVector<lightusd::value::point3f>(geomPoints->points);
         bool havePoints = false;
 
-        if (pointsAnim && pointsAnim->is_timesamples()) {
-            if (pointsAnim->get(0.0, &pointsCopy) && !pointsCopy.empty()) {
+        if (!rawPoints) {
+            if (JusyncGetVectorAtTime<lightusd::value::point3f>(geomPoints->points, 0.0, pointsCopy) &&
+                !pointsCopy.empty()) {
                 rawPoints = &pointsCopy;
                 havePoints = true;
             }
-        } else if (pointsAnim && pointsAnim->has_value()) {
-            if (const auto* staticPts = pointsAnim->get_ptr()) {
-                rawPoints = staticPts;
-                havePoints = true;
-            } else if (pointsAnim->get_default(&pointsCopy)) {
-                rawPoints = &pointsCopy;
-                havePoints = true;
-            }
+        } else {
+            havePoints = true;
         }
 
         if (!havePoints) {
@@ -2866,16 +2949,15 @@ bool UsdProcessor::ExtractPointCloudData(tinyusdz::GeomPoints* geomPoints,
             outData.positions.size(), outData.elementName.c_str());
 
         // ── Extract normals (zero-copy fast path, copy fallback) ──
-        if (const auto* normalsAnim = geomPoints->normals.get_ptr()) {
-            const std::vector<tinyusdz::value::normal3f>* normalData = normalsAnim->get_ptr();
-            std::vector<tinyusdz::value::normal3f> normalDataCopy;
+        {
+            std::vector<lightusd::value::normal3f> normalDataCopy;
+            const std::vector<lightusd::value::normal3f>* normalData =
+                JusyncGetStaticVector<lightusd::value::normal3f>(geomPoints->normals);
             if (!normalData) {
-                if (normalsAnim->is_timesamples()) {
-                    normalsAnim->get(0.0, &normalDataCopy);
-                } else if (normalsAnim->has_value()) {
-                    normalsAnim->get_default(&normalDataCopy);
+                if (JusyncGetVectorAtTime<lightusd::value::normal3f>(geomPoints->normals, 0.0, normalDataCopy) &&
+                    !normalDataCopy.empty()) {
+                    normalData = &normalDataCopy;
                 }
-                if (!normalDataCopy.empty()) normalData = &normalDataCopy;
             }
             if (normalData && !normalData->empty()) {
                 outData.normals.resize(normalData->size());
@@ -2890,16 +2972,15 @@ bool UsdProcessor::ExtractPointCloudData(tinyusdz::GeomPoints* geomPoints,
         }
 
         // ── Extract widths (zero-copy fast path, copy fallback) ──
-        if (const auto* widthsAnim = geomPoints->widths.get_ptr()) {
-            const std::vector<float>* widthData = widthsAnim->get_ptr();
+        {
             std::vector<float> widthDataCopy;
+            const std::vector<float>* widthData =
+                JusyncGetStaticVector<float>(geomPoints->widths);
             if (!widthData) {
-                if (widthsAnim->is_timesamples()) {
-                    widthsAnim->get(0.0, &widthDataCopy);
-                } else if (widthsAnim->has_value()) {
-                    widthsAnim->get_default(&widthDataCopy);
+                if (JusyncGetVectorAtTime<float>(geomPoints->widths, 0.0, widthDataCopy) &&
+                    !widthDataCopy.empty()) {
+                    widthData = &widthDataCopy;
                 }
-                if (!widthDataCopy.empty()) widthData = &widthDataCopy;
             }
             if (widthData && !widthData->empty()) {
                 outData.widths = *widthData;
@@ -2908,22 +2989,21 @@ bool UsdProcessor::ExtractPointCloudData(tinyusdz::GeomPoints* geomPoints,
         }
 
         // ── Extract attribute0 (zero-copy fast path, legacy fallback) ──
-        // Bare names only: get_primvar()/find_attr_ptr() prepend "primvars:"
-        // themselves (the old "primvars:attribute0" entries never matched).
+        // Bare names only: the helper prepends "primvars:" itself.
         outData.scalarAttributes.clear();
         const std::vector<std::string> attrNames = {
             "attribute0", "st", "map1"
         };
         for (const auto& name : attrNames) {
-            const tinyusdz::Attribute* attr = geomPoints->find_attr_ptr(name);
-            const std::vector<tinyusdz::value::texcoord2f>* uvData = nullptr;
+            const lightusd::Attribute* attr = JusyncFindPrimvarAttribute(*geomPoints, name);
+            const std::vector<lightusd::value::texcoord2f>* uvData = nullptr;
             if (attr && !attr->is_blocked() && !attr->is_connection() &&
                 geomPoints->props.count("primvars:" + name + ":indices") == 0) {
-                uvData = attr->get_var().as_ptr<std::vector<tinyusdz::value::texcoord2f>>();
+                uvData = JusyncGetAttributeVector<lightusd::value::texcoord2f>(*attr);
             }
-            std::vector<tinyusdz::value::texcoord2f> legacyUv;
+            std::vector<lightusd::value::texcoord2f> legacyUv;
             if (!uvData) {
-                tinyusdz::GeomPrimvar primvar;
+                lightusd::GeomPrimvar primvar;
                 std::string err;
                 if (geomPoints->get_primvar(name, &primvar, &err) &&
                     primvar.get_value(&legacyUv)) {
@@ -2943,20 +3023,18 @@ bool UsdProcessor::ExtractPointCloudData(tinyusdz::GeomPoints* geomPoints,
         }
 
         // ── Extract direct colors (zero-copy fast path, legacy fallback) ──
-        // NOTE: the legacy lookup name is intentionally kept exactly as it was
-        // ("primvars:color" passed to get_primvar() double-prefixes and never
-        // matched, so this path has always been inert). Preserved 1:1.
+        // Use the bare primvar name; the helper prepends "primvars:".
         {
-            const tinyusdz::Attribute* attr = geomPoints->find_attr_ptr("primvars:color");
-            const std::vector<tinyusdz::value::color4f>* rawColors = nullptr;
+            const lightusd::Attribute* attr = JusyncFindPrimvarAttribute(*geomPoints, "color");
+            const std::vector<lightusd::value::color4f>* rawColors = nullptr;
             if (attr && !attr->is_blocked() && !attr->is_connection()) {
-                rawColors = attr->get_var().as_ptr<std::vector<tinyusdz::value::color4f>>();
+                rawColors = JusyncGetAttributeVector<lightusd::value::color4f>(*attr);
             }
-            std::vector<tinyusdz::value::color4f> legacyColors;
+            std::vector<lightusd::value::color4f> legacyColors;
             if (!rawColors) {
-                tinyusdz::GeomPrimvar colorPrimvar;
+                lightusd::GeomPrimvar colorPrimvar;
                 std::string colorErr;
-                if (geomPoints->get_primvar("primvars:color", &colorPrimvar, &colorErr) &&
+                if (geomPoints->get_primvar("color", &colorPrimvar, &colorErr) &&
                     colorPrimvar.get_value(&legacyColors)) {
                     rawColors = &legacyColors;
                 }

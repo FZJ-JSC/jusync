@@ -28,7 +28,7 @@ namespace anari_usd_middleware {
 #endif
 
 // Forward declarations for TinyUSDZ
-namespace tinyusdz {
+namespace lightusd {
     class Prim;
     class Stage;
     class GeomMesh;
@@ -431,7 +431,7 @@ private:
      * @param stage USD stage reference (validated)
      * @param outReferencePaths Output vector for reference paths
      */
-    void ExtractReferencePaths(const tinyusdz::Stage& stage,
+    void ExtractReferencePaths(const lightusd::Stage& stage,
                               std::vector<std::string>& outReferencePaths);
 
     /**
@@ -446,7 +446,7 @@ private:
      * @param prim USD primitive reference
      * @param outReferencePaths Output vector for reference paths
      */
-    void ExtractReferencePathsFromPrim(const tinyusdz::Prim& prim,
+    void ExtractReferencePathsFromPrim(const lightusd::Prim& prim,
                                       std::vector<std::string>& outReferencePaths);
 
     /**
@@ -454,7 +454,7 @@ private:
      * @param prim USD primitive reference
      * @param depth Current depth for indentation
      */
-    void ListPrimHierarchy(const tinyusdz::Prim& prim, int depth);
+    void ListPrimHierarchy(const lightusd::Prim& prim, int depth);
 
     /**
      * Validate transformation matrix for finite values
@@ -521,7 +521,7 @@ private:
      * @param mesh GeomMesh pointer
      * @param meshData Output mesh data
      */
-    void extractUVCoordinates(tinyusdz::GeomMesh* mesh, MeshData& meshData);
+    void extractUVCoordinates(lightusd::GeomMesh* mesh, MeshData& meshData);
 
     /**
      * Check if mesh data has empty geometry
@@ -539,7 +539,7 @@ private:
      * @param progressCallback Progress callback
      * @return True if successful
      */
-    bool resolveReferences(const tinyusdz::Stage& stage,
+    bool resolveReferences(const lightusd::Stage& stage,
                            const std::vector<uint8_t>& buffer,
                            const std::string& fileName,
                            std::vector<MeshData>& outMeshData,
@@ -559,7 +559,7 @@ private:
          * @param mesh Pointer to TinyUSDZ GeomMesh
          * @param meshData Output mesh data to populate with colors
          */
-    void extractVertexColors(tinyusdz::GeomMesh* mesh, MeshData& meshData);
+    void extractVertexColors(lightusd::GeomMesh* mesh, MeshData& meshData);
 
     /**
      * Extract point cloud data from USD GeomPoints primitive
@@ -568,7 +568,7 @@ private:
      * @param worldTransform World transformation matrix
      * @return True if extraction succeeded
      */
-    bool ExtractPointCloudData(tinyusdz::GeomPoints* geomPoints,
+    bool ExtractPointCloudData(lightusd::GeomPoints* geomPoints,
                                PointCloudData& outData,
                                const glm::mat4& worldTransform);
 
