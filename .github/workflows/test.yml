@@ -1,0 +1,201 @@
+name: USD Middleware CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & Smoke Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libssl-dev \
+            libzstd-dev
+
+      - name: Configure CMake
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTS=ON \
+            -DENABLE_CUDA=OFF \
+            -DBUILD_JUSYNC_Receiver_GUI=OFF \
+            -DENABLE_ZSTD=ON \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DTINYUSDZ_BUILD_TESTS=OFF \
+            -DTINYUSDZ_BUILD_EXAMPLES=OFF \
+            -DTINYUSDZ_BUILD_BENCHMARKS=OFF \
+            -DGLM_BUILD_TESTS=OFF
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --parallel
+
+      - name: Run smoke tests
+        shell: bash
+        run: ctest --test-dir build -R '^(build_verification|binary_static_check)$' --output-on-failure
+
+      - name: Upload test payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: jusync-test-payload
+          path: |
+            build/usd_validation_tool
+            build/libanari_usd_middleware.so
+            build/compile_commands.json
+          retention-days: 1
+
+  static-analysis:
+    name: Static Analysis
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install clang-tidy
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-tidy
+
+      - name: Download test payload
+        uses: actions/download-artifact@v4
+        with:
+          name: jusync-test-payload
+          path: .
+
+      - name: Run clang-tidy
+        id: clang-tidy
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          clang-tidy -p build \
+            --exclude='external/|build/' \
+            --header-filter='^(.*workspace.*)(/src|/include|/tests)/' \
+            --checks='-*,bugprone-*,clang-analyzer-*' \
+            --use-color \
+            | tee clang-tidy.log
+
+      - name: Upload clang-tidy log
+        uses: actions/upload-artifact@v4
+        with:
+          name: clang-tidy
+          path: clang-tidy.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  usd-basic:
+    name: Test USD Basic
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: ./.github/actions/run-ctest
+        with:
+          test-regex: '^usd_basic_processing$'
+          artifact-name: usd-basic
+
+  collision-simple:
+    name: Test Collision Simple
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: ./.github/actions/run-ctest
+        with:
+          test-regex: '^collision_simple$'
+          artifact-name: collision-simple
+
+  collision-complex:
+    name: Test Collision Complex
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: ./.github/actions/run-ctest
+        with:
+          test-regex: '^collision_complex$'
+          artifact-name: collision-complex
+
+  collision-convex:
+    name: Test Collision Convex
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: ./.github/actions/run-ctest
+        with:
+          test-regex: '^collision_convex$'
+          artifact-name: collision-convex
+
+  error-handling:
+    name: Test Error Handling
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: ./.github/actions/run-ctest
+        with:
+          test-regex: '^error_handling_tests$'
+          artifact-name: error-handling
+
+  performance:
+    name: Test Performance
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: ./.github/actions/run-ctest
+        with:
+          test-regex: '^performance_benchmarks$'
+          artifact-name: performance
+
+  integration:
+    name: Test Integration
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: ./.github/actions/run-ctest
+        with:
+          test-regex: '^integration_suite$'
+          artifact-name: integration
+
+  usd-files:
+    name: Test USD Files
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: ./.github/actions/run-ctest
+        with:
+          test-regex: '^usd_file_.*$'
+          artifact-name: usd-files

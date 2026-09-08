@@ -1,20 +1,15 @@
-using UnrealBuildTool;
+﻿using UnrealBuildTool;
+using System;
 using System.IO;
 
 public class JUSYNC : ModuleRules
 {
     public JUSYNC(ReadOnlyTargetRules Target) : base(Target)
     {
-        // Fix PCH issues by using explicit PCH mode
-        PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
-
-        // UE5.5 requires C++20
+        PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
         CppStandard = CppStandardVersion.Cpp20;
-
-        // Critical: Disable Unity builds and enable STL support
-        bUseUnity = false;
-        bUseRTTI = true;
         bEnableExceptions = true;
+        bUseRTTI = false;
 
         PublicDependencyModuleNames.AddRange(new string[]
         {
@@ -30,82 +25,145 @@ public class JUSYNC : ModuleRules
             "SlateCore",
             "RenderCore",
             "RHI",
-            "GameplayTasks"
+            "GameplayTasks",
+            "LidarPointCloudRuntime",
+            "ImageWrapper"
         });
 
-        // Critical STL linking definitions
-        PublicDefinitions.AddRange(new string[]
-        {
-            "NOMINMAX",
-            "WIN32_LEAN_AND_MEAN",
-            "_CRT_SECURE_NO_WARNINGS=1",
-            "_SCL_SECURE_NO_WARNINGS=1",
-            "ANARI_USD_MIDDLEWARE_SAFE_MODE=1",
-            "_ITERATOR_DEBUG_LEVEL=0",
-            "_HAS_EXCEPTIONS=1"
-        });
+        // Setup third-party includes
+        string ThirdPartyPath = Path.Combine(ModuleDirectory, "..", "ThirdParty");
+        string AnariUsdPath = Path.Combine(ThirdPartyPath, "AnariUsdMiddleware");
 
+        // Add GLM headers (points to your glm/glm/ directory)
+        PublicIncludePaths.Add(Path.Combine(ThirdPartyPath, "glm"));
+
+        // Add middleware headers  
+        PublicIncludePaths.Add(Path.Combine(AnariUsdPath, "Include"));
+
+        // Platform configuration
         if (Target.Platform == UnrealTargetPlatform.Win64)
         {
-            // Add required system libraries for STL
-            PublicSystemLibraries.AddRange(new string[]
+            ConfigureWindows(AnariUsdPath);
+        }
+        else if (Target.Platform == UnrealTargetPlatform.Linux)
+        {
+            ConfigureLinux(AnariUsdPath);
+        }
+        else
+        {
+            PublicDefinitions.Add("WITH_ANARI_USD_MIDDLEWARE=0");
+            Console.WriteLine("JUSYNC: Unsupported platform - middleware disabled");
+        }
+    }
+
+    private void ConfigureWindows(string AnariUsdPath)
+    {
+        // Windows system libraries
+        PublicSystemLibraries.AddRange(new string[]
+        {
+            "kernel32.lib",
+            "ws2_32.lib",
+            "iphlpapi.lib",
+            "userenv.lib",
+            "DXGI.lib"  // Added for GPU memory queries
+        });
+
+        string LibDir = Path.Combine(AnariUsdPath, "Lib", "Win64");
+        string LibFile = Path.Combine(LibDir, "anari_usd_middleware.lib");
+
+        if (File.Exists(LibFile))
+        {
+            PublicAdditionalLibraries.Add(LibFile);
+
+            // Stage required DLLs with enhanced multi-location staging
+            string[] RequiredDlls = new string[]
             {
-                "kernel32.lib",
-                "user32.lib",
-                "gdi32.lib",
-                "winspool.lib",
-                "comdlg32.lib",
-                "advapi32.lib",
-                "shell32.lib",
-                "ole32.lib",
-                "oleaut32.lib",
-                "uuid.lib",
-                "odbc32.lib",
-                "odbccp32.lib"
-            });
+                "anari_usd_middleware.dll",
+            };
 
-            // Third-party library integration
-            string ThirdPartyPath = Path.Combine(ModuleDirectory, "..", "ThirdParty");
-            string AnariUsdPath = Path.Combine(ThirdPartyPath, "AnariUsdMiddleware");
-            PublicIncludePaths.Add(Path.Combine(AnariUsdPath, "Include"));
+            StageDllsEnhanced(LibDir, RequiredDlls);
 
-            string LibPath = Path.Combine(AnariUsdPath, "Lib", "Win64");
-            string LibFile = Path.Combine(LibPath, "anari_usd_middleware.lib");
+            PublicDefinitions.Add("WITH_ANARI_USD_MIDDLEWARE=1");
+            Console.WriteLine("JUSYNC: ✅ Windows middleware enabled with enhanced staging");
+        }
+        else
+        {
+            PublicDefinitions.Add("WITH_ANARI_USD_MIDDLEWARE=0");
+            Console.WriteLine($"JUSYNC: ❌ Windows library not found: {LibFile}");
+        }
+    }
 
-            if (File.Exists(LibFile))
+    private void ConfigureLinux(string AnariUsdPath)
+    {
+        // Linux system libraries
+        PublicSystemLibraries.AddRange(new string[]
+        {
+            "pthread",
+            "dl",
+            "rt",
+            "m"
+        });
+
+        string LibDir = Path.Combine(AnariUsdPath, "Lib", "Linux");
+        string LibFile = Path.Combine(LibDir, "libanari_usd_middleware.so");
+
+        if (File.Exists(LibFile))
+        {
+            PublicAdditionalLibraries.Add(LibFile);
+            RuntimeDependencies.Add(LibFile);
+
+            PublicDefinitions.Add("WITH_ANARI_USD_MIDDLEWARE=1");
+            Console.WriteLine("JUSYNC: ✅ Linux middleware enabled with static ZeroMQ");
+        }
+        else
+        {
+            PublicDefinitions.Add("WITH_ANARI_USD_MIDDLEWARE=0");
+            Console.WriteLine($"JUSYNC: ❌ Linux library not found: {LibFile}");
+        }
+    }
+
+    // ✅ ENHANCED: Multi-location DLL staging for comprehensive coverage
+    private void StageDllsEnhanced(string LibDir, string[] RequiredDlls)
+    {
+        Console.WriteLine("JUSYNC: Starting enhanced DLL staging...");
+
+        foreach (string dll in RequiredDlls)
+        {
+            string sourceDll = Path.Combine(LibDir, dll);
+
+            if (File.Exists(sourceDll))
             {
-                PublicAdditionalLibraries.Add(LibFile);
+                // Stage to multiple locations for comprehensive coverage
 
-                // List of DLLs to copy
-                string[] Dlls = new string[]
-                {
-                    "anari_usd_middleware.dll",
-                    "libzmq-v143-mt-4_3_6.dll",
-                    "libcrypto-3-x64.dll",
-                    "libssl-3-x64.dll"
-                };
+                // 1. Binary output directory (for packaged builds)
+                RuntimeDependencies.Add(
+                    Path.Combine("$(BinaryOutputDir)", dll),
+                    sourceDll,
+                    StagedFileType.NonUFS
+                );
 
-                foreach (string Dll in Dlls)
-                {
-                    // Source: ThirdParty/AnariUsdMiddleware/Lib/Win64/DLL
-                    string SourceDll = Path.Combine(LibPath, Dll);
-                    // Destination: Plugins/JUSYNC/Binaries/Win64/DLL
-                    string DestDll = Path.Combine(ModuleDirectory, "../../Binaries/Win64", Dll);
+                // 2. Project binaries directory (for editor and PIE)
+                RuntimeDependencies.Add(
+                    Path.Combine("$(ProjectDir)", "Binaries", "Win64", dll),
+                    sourceDll,
+                    StagedFileType.NonUFS
+                );
 
-                    // Register for runtime & packaging, and copy to Binaries/Win64
-                    RuntimeDependencies.Add(DestDll, SourceDll);
-                }
+                // 3. Plugin binaries directory (for plugin-specific loading)
+                RuntimeDependencies.Add(
+                    Path.Combine("$(PluginDir)", "Binaries", "Win64", dll),
+                    sourceDll,
+                    StagedFileType.NonUFS
+                );
 
-                PublicDefinitions.Add("WITH_ANARI_USD_MIDDLEWARE=1");
-                System.Console.WriteLine("JUSYNC: Middleware libraries linked and DLLs set for runtime copy.");
+                Console.WriteLine($"JUSYNC: ✅ Multi-staged: {dll}");
             }
             else
             {
-                System.Console.WriteLine("JUSYNC: Library file not found: " + LibFile);
-                PublicDefinitions.Add("WITH_ANARI_USD_MIDDLEWARE=0");
+                Console.WriteLine($"JUSYNC: ⚠️ Missing DLL: {dll}");
             }
         }
 
-        UndefinedIdentifierWarningLevel = WarningLevel.Off;
+        Console.WriteLine("JUSYNC: Enhanced DLL staging complete");
     }
 }

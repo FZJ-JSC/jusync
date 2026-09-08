@@ -9,6 +9,7 @@ UnrealPlugin/JUSYNC/Binaries/
 cmake-build-debug/
 cmake-build-release/
 test_output/
+ANARI-USD/
 
 # CMake generated files
 CMakeCache.txt
@@ -72,3 +73,4 @@ Thumbs.db
 # Project specific temporary files
 # Add your project-specific temporary files here
 
+build_docker/

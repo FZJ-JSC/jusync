@@ -1,0 +1,216 @@
+{
+  "main": {
+    "id": "141b42126addb5bb",
+    "type": "split",
+    "children": [
+      {
+        "id": "cf639c3650a81787",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "628e8e624c5a4292",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "Modules/Modules/CUDA GPU.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "CUDA GPU"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "b42a8b56c773cf34",
+    "type": "split",
+    "children": [
+      {
+        "id": "89b5cf1f9d1bdb13",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "c9c942e446696a95",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "36fc3ec4e9619a78",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "aa817325c0dd1014",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "77aed11d7b6f2cc2",
+    "type": "split",
+    "children": [
+      {
+        "id": "def75a75b062ee10",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "57bf3d262a78fa12",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "Modules/Modules/CUDA GPU.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks for CUDA GPU"
+            }
+          },
+          {
+            "id": "9e98e1f56e179bb6",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "Modules/Modules/CUDA GPU.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links from CUDA GPU"
+            }
+          },
+          {
+            "id": "84b4aed4876f5cf2",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "fae20108874b05ed",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          },
+          {
+            "id": "98bfe0064f07e4d7",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "Modules/Modules/CUDA GPU.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline of CUDA GPU"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false
+    }
+  },
+  "active": "628e8e624c5a4292",
+  "lastOpenFiles": [
+    "Unreal Plugin Optimizations.md",
+    "Reference/Known Issues & Dead Code.md",
+    "Reference/External Dependencies.md",
+    "Modules/Modules/C Global State.md",
+    "Modules/Modules/Color Interpolation.md",
+    "Modules/Modules/Point Cloud.md",
+    "Reference/Edit Guide.md",
+    "Reference/Data Flow.md",
+    "Reference/LLM Architecture Guide.md",
+    "Reference",
+    "Modules/Modules/Logging System.md",
+    "Modules/Modules/Hash Verifier.md",
+    "Modules/Modules/Memory Monitor.md",
+    "Modules/Modules/Message Protocol.md",
+    "Modules/Modules/Middleware Core.md",
+    "Modules/Modules/Network Layer.md",
+    "Modules/Modules/Parallel Downloader.md",
+    "Modules/Modules/USD Processing.md",
+    "Modules/Modules/USD Processor.md",
+    "Modules/Modules/ZeroMQ Client.md",
+    "00 Inbox/02 Architecture Overview.md",
+    "00 Inbox/01 Getting Started.md",
+    "Modules/Modules/CUDA GPU.md",
+    "Modules/Modules/Collision Processor.md",
+    "Modules/Modules/C Interface.md",
+    "Build/03 Build System.md",
+    "Build/08 Troubleshooting.md"
+  ]
+}

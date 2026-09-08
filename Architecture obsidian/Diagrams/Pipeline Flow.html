@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Pipeline Flow — HPC Worker → JUSYNC → Unreal Engine</title>
+<script src="https://cdn.jsdelivr.net/npm/gojs@3.0.11/release/go.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f1117; color: #ccd6f6; }
+#header { background: linear-gradient(135deg, #1a1d2e 0%, #0d1117 100%); padding: 20px 30px; border-bottom: 1px solid #30363d; }
+#header h1 { font-size: 22px; color: #58a6ff; margin-bottom: 4px; }
+#header p  { font-size: 13px; color: #8b949e; }
+#legend { display: flex; gap: 14px; padding: 10px 30px; background: #161b22; border-bottom: 1px solid #21262d; flex-wrap: wrap; }
+#legend .item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #8b949e; }
+#legend .box { width: 16px; height: 16px; border-radius: 3px; }
+#myDiagramDiv { width: 100%; height: calc(100vh - 110px); background: #0d1117; }
+</style>
+</head>
+<body>
+<div id="header">
+  <h1>Pipeline Flow — HPC Worker → ANARI-SDK → ZMQ → JUSYNC → UE</h1>
+  <p>Interactive diagram · Scroll to zoom · Drag to pan · Nodes are draggable</p>
+</div>
+<div id="legend">
+  <div class="item"><div class="box" style="background:#1f6feb"></div>HPC SDK / ANARI-USD</div>
+  <div class="item"><div class="box" style="background:#d29922"></div>DiffCapture (old-state)</div>
+  <div class="item"><div class="box" style="background:#a371f7"></div>ZMQ Broker</div>
+  <div class="item"><div class="box" style="background:#da3633"></div>JUSYNC Middleware</div>
+  <div class="item"><div class="box" style="background:#238636"></div>UE Plugin</div>
+  <div class="item"><div class="box" style="background:#f778ba"></div>UE RMC / GPU</div>
+</div>
+<div id="myDiagramDiv"></div>
+<script>
+const $ = go.GraphObject.make;
+const diagram = $(go.Diagram, "myDiagramDiv", {
+  initialAutoScale: go.Diagram.Uniform,
+  "undoManager.isEnabled": true,
+  layout: $(go.LayeredDigraphLayout, { direction: 90, layerSpacing: 80, columnSpacing: 50 }),
+});
+
+// Color palette
+const colors = {
+  hpc:    { bg:'#1f6feb', border:'#58a6ff' },
+  diff:   { bg:'#d29922', border:'#f0c674' },
+  broker: { bg:'#a371f7', border:'#d2a8ff' },
+  mid:    { bg:'#da3633', border:'#ff6e69' },
+  ue:     { bg:'#238636', border:'#3fb950' },
+  gpu:    { bg:'#f778ba', border:'#ffafc8' },
+};
+
+// Node template
+diagram.nodeTemplate =
+  $(go.Node, "Auto",
+    $(go.Shape, "RoundedRectangle", {
+      desiredSize: new go.Size(NaN, 48),
+      name: "MAINSHAPE",
+    }),
+    $(go.Panel, "Vertical", { margin: 10 },
+      $(go.TextBlock, {
+        font: "bold 12px 'Segoe UI', system-ui",
+        stroke: "#e6edf3", name: "TITLE",
+      }, new go.Binding("text", "title")),
+      $(go.TextBlock, {
+        font: "11px 'Segoe UI', system-ui",
+        stroke: "#8b949e", name: "DESC",
+        width: 250,
+        maxSize: new go.Size(250, NaN),
+      }, new go.Binding("text", "desc")),
+      $(go.Panel, "Horizontal", { margin: 3 },
+        $(go.Panel, "Wrap", { padding: 3, background: "#21262d" },
+          new go.Binding("itemArray", "tags"),
+          $(go.Panel, "Item",
+            $(go.TextBlock, {
+              font: "10px monospace",
+              stroke: "#79c0ff", margin: 2,
+            }, new go.Binding("text", "")),
+          ),
+      )),
+    ),
+  );
+
+// Link template
+diagram.linkTemplate =
+  $(go.Link,
+    { routing: go.Link.AvoidsNodes, corner: 6 },
+    $(go.Shape, { strokeWidth: 2, stroke: "#30363d", name: "LINKSHAPE" }),
+    $(go.Shape, { toArrow: "Standard", stroke: null, fill: "#30363d" }),
+    $(go.Panel, "Auto",
+      { segmentFraction: 0.5 },
+      $(go.Shape, "RoundedRectangle", {
+        fill: "#161b22", stroke: "#30363d", strokeWidth: 1, margin: 2,
+      }),
+      $(go.TextBlock, {
+        font: "10px 'Segoe UI', system-ui",
+        stroke: "#8b949e", alignment: go.Spot.Center, margin: 3,
+      }, new go.Binding("text", "text")),
+    ),
+  );
+
+const modelData = {
+  linkDataProperty: "edges",
+  nodeDataArray: [
+    // HPC → ANARI-SDK
+    { key:1,  title:"ParaView / Catalyst Worker", desc:"HPC simulation on rank N", loc:"0 0", tags:["rank 0..N-1","Catalyst2"], color:"hpc" },
+    { key:2,  title:"UsdDevice::flushCommit()", desc:"ANARI-SDK geometry update cycle", tags:["UsdDevice.cpp"], color:"hpc" },
+    { key:3,  title:"TrackStageMemory()", desc:"Export current stage to ASCII .usda", tags:["UsdBridgeUsdWriter.cpp"], color:"hpc" },
+    { key:4,  title:"DiffCapture — CapturePreStore()", desc:"📸 Read OLD FileEntry before StoreFile overwrites", loc:"0 200", tags:["DiffCapture.cpp","old data","hashPrev"], color:"diff" },
+    { key:5,  title:"MemoryStore::StoreFile()", desc:"Overwrite FileEntry with new data + hash128", tags:["hash128 updated"], color:"hpc" },
+    { key:6,  title:"UsdBridgeZmqBroker", desc:"ZMQ worker → broker → client forwarding", tags:["DEALER socket"], color:"broker" },
+    { key:7,  title:"SendFileNotificationV2()", desc:"NOTIFY_FILE_UPDATE_V2 (302) with hashPrev128", tags:["360 byte payload"], color:"broker" },
+    { key:8,  title:"DiffCapture — Commit()", desc:"Clear captured old data after send", tags:["cleanup"], color:"diff" },
+
+    // Middleware
+    { key:9,  title:"JUSYNC AnariUsdClient", desc:"Dispatcher thread owns ALL ZMQ recv()", tags:["dispatcher","recv()"], color:"mid" },
+    { key:10, title:"handleNotification()", desc:"Parse V2 struct, dispatch to UE callback", tags:["hashLo/Hi","hashPrevLo/Hi","hasOldData"], color:"mid" },
+    { key:11, title:"RequestFileListWithSizes()", desc:"Periodic poll (5–30s): names, sizes, hashes", tags:["REQ_LIST_FILES","JSON","hash arrays"], color:"mid" },
+
+    // UE Plugin
+    { key:12, title:"NotificationCallback_Static", desc:"C callback → AsyncTask to game thread", tags:["extern C","UE threading"], color:"ue" },
+    { key:13, title:"OnBrokerNotification()", desc:"Broadcast FJUSYNCNotification to BP listeners", tags:["FileToActorMap","hash compare"], color:"ue" },
+    { key:14, title:"Hash Decision Gate", desc:"hashPrevLo/Hi vs FileHashLo/Hi — match=SKIP", tags:["no download","no destroy"], color:"ue" },
+    { key:15, title:"ParallelDownloadManager", desc:"Parallel REQ_GET_FILE with MemoryMonitor", tags:["worker threads","4MB chunks"], color:"mid" },
+    { key:16, title:"UsdProcessor — ExtractMeshData", desc:"TinyUSDZ → FJUSYNCMeshData (points, indices, normals)", tags:["background thread","TinyUSDZ"], color:"mid" },
+    { key:17, title:"SpawnRealtimeMeshAtLocation", desc:"Build RMC streams, create section group, spawn actor", tags:["TRealtimeMeshBuilder","GPU upload"], color:"ue" },
+    { key:18, title:"Spawn / Recycle PointCloud", desc:"Pool reuse → SetPointCloud → RefreshBounds", tags:["actor pool","LiDAR"], color:"ue" },
+
+    // GPU
+    { key:19, title:"RealtimeMeshComponent", desc:"GPU mesh: positions, normals, UVs, colors, indices", tags:["RMC","GPU buffers"], color:"gpu" },
+    { key:20, title:"Gradient Recolor", desc:"LUT colormap applied to PC scalar attributes", tags:["CreateFromData","async recolor"], color:"gpu" },
+    { key:21, title:"Destroy Old Actors", desc:"After new actors verified, destroy old — no flicker", tags:["FileToActorMap swap"], color:"ue" },
+    { key:22, title:"UE Blueprint / Game", desc:"Visible mesh/point cloud in viewport", tags:["rendered","viewport"], color:"gpu" },
+  ],
+  linkDataArray: [
+    { from:1, to:2, text:"flush commit" },
+    { from:2, to:3, text:"scene stage" },
+    { from:3, to:4, text:"📸 capture OLD" },
+    { from:4, to:5, text:"before overwrite" },
+    { from:3, to:5, text:"EXPORT .usda" },
+    { from:5, to:6, text:"file data ready" },
+    { from:6, to:7, text:"V2 notification" },
+    { from:4, to:7, text:"hashPrev populated" },
+    { from:7, to:8, text:"after send" },
+    { from:5, to:7, text:"hash128 + size" },
+    { from:6, to:9, text:"ZMQ → broker → client" },
+    { from:7, to:9, text:"NOTIFY_UPDATE_V2 (302)" },
+    { from:11, to:9, text:"periodic poll" },
+    { from:9, to:10, text:"notify callback" },
+    { from:10, to:11, text:"also triggers" },
+    { from:10, to:12, text:"C callback" },
+    { from:11, to:10, text:"file list callback" },
+    { from:12, to:13, text:"async task" },
+    { from:13, to:14, text:"hash compare" },
+    { from:14, to:22, text:"SKIP → visible" },
+    { from:14, to:15, text:"mismatch → download" },
+    { from:15, to:16, text:"full file → parse" },
+    { from:16, to:17, text:"mesh data" },
+    { from:16, to:18, text:"point cloud data" },
+    { from:17, to:19, text:"RMC GPU build" },
+    { from:18, to:19, text:"LiDAR GPU" },
+    { from:18, to:20, text:"gradient recolor" },
+    { from:20, to:19, text:"color updated" },
+    { from:19, to:21, text:"verify new" },
+    { from:21, to:22, text:"visible, old destroyed" },
+  ],
+};
+
+diagram.model = new go.GraphLinksModel(modelData);
+
+// Color nodes by category
+function colorNode(node) {
+  const colorKey = node.data.color || "hpc";
+  const col = colors[colorKey];
+  const shape = node.findObject("MAINSHAPE");
+  if (shape) {
+    shape.fill = col.bg;
+    shape.stroke = col.border;
+    shape.strokeWidth = 1;
+    shape.opacity = 0.95;
+  }
+}
+diagram.nodes.each(colorNode);
+diagram.addDiagramListener("GraphLinksModelChanged", () => diagram.nodes.each(colorNode));
+</script>
+</body>
+</html>

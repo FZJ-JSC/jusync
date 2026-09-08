@@ -7,9 +7,17 @@
 #include <mutex>
 #include <shared_mutex>
 #include <functional>
+#include <limits>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include "MiddlewareLogging.h"
+
+// Forward declare GPU components (optional includes)
+namespace anari_usd_middleware {
+    class GpuContext;
+    class GpuKernels;
+    class GpuValidation;
+}
 
 #ifndef ANARI_USD_MIDDLEWARE_API
 #ifdef _WIN32
@@ -20,13 +28,17 @@
 #endif
 
 // Forward declarations for TinyUSDZ
-namespace tinyusdz {
+namespace lightusd {
     class Prim;
     class Stage;
     class GeomMesh;
+    class GeomPoints;
 }
 
 namespace anari_usd_middleware {
+
+// Forward declaration of MeshData from AnariUsdMiddleware.h
+struct MeshData;
 
 /**
  * Thread-safe USD processing engine with comprehensive error handling and memory safety
@@ -37,6 +49,7 @@ class ANARI_USD_MIDDLEWARE_API UsdProcessor {
 public:
     /**
      * Enhanced mesh data structure with validation and bounds checking
+     * ENHANCED: Now includes USD geometry features (subdivision, multi-UV, etc.)
      */
     struct MeshData {
         std::string elementName;        ///< Name of the USD element (validated)
@@ -45,7 +58,14 @@ public:
         std::vector<uint32_t> indices;  ///< Triangle indices (validated)
         std::vector<glm::vec3> normals; ///< Normal vectors (normalized)
         std::vector<glm::vec2> uvs;     ///< Texture coordinates (clamped)
-        std::vector<glm::vec4> vertex_colors; ///vertex colors
+        std::vector<glm::vec4> vertex_colors; ///< Vertex colors
+
+        // NEW: USD geometry features
+        std::string subdivisionScheme;  ///< Subdivision scheme (e.g., "catmull-clark", "bilinear", "none")
+        bool doubleSided = false;       ///< Double-sided flag from USD
+        std::vector<uint32_t> faceVertexCounts;  ///< Face vertex counts for heterogenous polygons
+        std::vector<std::vector<glm::vec2>> uvSets;  ///< Multiple UV sets (channels)
+        std::vector<std::string> uvSetNames;  ///< Names of UV sets
 
         // Validation methods
         bool isValid() const {
@@ -62,6 +82,8 @@ public:
         size_t getTriangleCount() const { return indices.size() / 3; }
         bool hasNormals() const { return !normals.empty(); }
         bool hasUVs() const { return !uvs.empty(); }
+        bool hasSubdivision() const { return !subdivisionScheme.empty() && subdivisionScheme != "none"; }
+        size_t getUVSetCount() const { return uvSets.size(); }
 
         // Calculate bounding box
         std::pair<glm::vec3, glm::vec3> getBounds() const;
@@ -77,7 +99,16 @@ public:
             indices.clear();
             normals.clear();
             uvs.clear();
+            vertex_colors.clear();
+            subdivisionScheme.clear();
+            doubleSided = false;
+            faceVertexCounts.clear();
+            uvSets.clear();
+            uvSetNames.clear();
         }
+
+        // Convert to AnariUsdMiddleware::MeshData format
+        MeshData toMiddlewareMeshData() const;
     };
 
     /**
@@ -110,6 +141,34 @@ public:
         void clear() {
             width = height = channels = 0;
             data.clear();
+        }
+    };
+
+    /**
+     * Point cloud data structure for USD def Points primitives
+     * Stores positions, baked colors (from gradient texture), widths, and scalar attributes
+     */
+    struct PointCloudData {
+        std::string elementName;        ///< Name of the USD element
+        std::string typeName;           ///< Type (always "GeomPoints")
+        std::vector<glm::vec3> positions;  ///< 3D point positions
+        std::vector<glm::vec4> vertex_colors; ///< Baked RGBA colors (from gradient)
+        std::vector<glm::vec3> normals; ///< Normal vectors (optional)
+        std::vector<float> widths;      ///< Point sizes/radii (optional)
+        std::vector<glm::vec2> scalarAttributes; ///< attribute0 values [scalar, 0] per point
+        std::vector<std::string> uvSetNames; ///< Names of UV/attribute sets
+
+        size_t getPointCount() const { return positions.size(); }
+        bool hasColors() const { return !vertex_colors.empty(); }
+        bool hasUVs() const { return !scalarAttributes.empty(); }
+        bool hasNormals() const { return !normals.empty(); }
+        bool isValid() const {
+            return !elementName.empty() && !positions.empty();
+        }
+        void clear() {
+            elementName.clear(); typeName.clear();
+            positions.clear(); vertex_colors.clear(); normals.clear();
+            widths.clear(); scalarAttributes.clear(); uvSetNames.clear();
         }
     };
 
@@ -212,16 +271,31 @@ public:
 
     /**
      * Load USD data from buffer with comprehensive error handling
-     * @param buffer Raw USD data buffer (validated)
+     * @param buffer Raw USD data (validated)
      * @param fileName Original filename for format detection (validated)
      * @param outMeshData Output vector for extracted mesh data (cleared first)
+     * @param outPointCloudData Optional: output vector for extracted point cloud data
      * @param progressCallback Optional progress callback
      * @return True if loading was successful, false otherwise
      */
     bool LoadUSDBuffer(const std::vector<uint8_t>& buffer,
-                      const std::string& fileName,
-                      std::vector<MeshData>& outMeshData,
-                      ProgressCallback progressCallback = nullptr);
+                       const std::string& fileName,
+                       std::vector<MeshData>& outMeshData,
+                       std::vector<PointCloudData>* outPointCloudData = nullptr,
+                       ProgressCallback progressCallback = nullptr);
+
+    /**
+     * Pointer-based overload: TRUE zero-copy when no preprocessing is required.
+     * Callers pass raw buffer + size directly (e.g., from TArray<uint8> or external
+     * memory). If the buffer contains no USD quirks (`0: None`, `asset:images/`,
+     * `texCoord2f`) it is handed to TinyUSDZ unchanged with zero copies. Only when
+     * a byte-length-changing rewrite is required is a single working copy made.
+     */
+    bool LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_size,
+                              const std::string& fileName,
+                              std::vector<MeshData>& outMeshData,
+                              std::vector<PointCloudData>* outPointCloudData = nullptr,
+                              ProgressCallback progressCallback = nullptr);
 
     /**
      * Load USD data directly from disk with file validation
@@ -314,7 +388,7 @@ private:
 
     // Configuration
     std::atomic<int32_t> maxRecursionDepth{safety::MAX_RECURSION_DEPTH};
-    std::atomic<size_t> memoryLimitMB{1024};
+    std::atomic<size_t> memoryLimitMB{static_cast<size_t>(std::numeric_limits<int64_t>::max() / (1024 * 1024))}; // Essentially unlimited (4.6EB)
     std::atomic<bool> referenceResolutionEnabled{true};
 
     // Statistics - using the fixed version
@@ -328,10 +402,11 @@ private:
      * @param depth Current recursion depth (limited)
      * @return True if processing succeeded, false otherwise
      */
-    bool ProcessPrim(void* prim,
-                    std::vector<MeshData>& meshDataArray,
-                    const glm::mat4& parentTransform,
-                    int32_t depth);
+     bool ProcessPrim(void* prim,
+                     std::vector<MeshData>& meshDataArray,
+                     std::vector<PointCloudData>* outPointCloudData,
+                     const glm::mat4& parentTransform,
+                     int32_t depth);
 
     /**
      * Extract mesh data from USD mesh primitive with validation
@@ -356,7 +431,7 @@ private:
      * @param stage USD stage reference (validated)
      * @param outReferencePaths Output vector for reference paths
      */
-    void ExtractReferencePaths(const tinyusdz::Stage& stage,
+    void ExtractReferencePaths(const lightusd::Stage& stage,
                               std::vector<std::string>& outReferencePaths);
 
     /**
@@ -371,7 +446,7 @@ private:
      * @param prim USD primitive reference
      * @param outReferencePaths Output vector for reference paths
      */
-    void ExtractReferencePathsFromPrim(const tinyusdz::Prim& prim,
+    void ExtractReferencePathsFromPrim(const lightusd::Prim& prim,
                                       std::vector<std::string>& outReferencePaths);
 
     /**
@@ -379,7 +454,7 @@ private:
      * @param prim USD primitive reference
      * @param depth Current depth for indentation
      */
-    void ListPrimHierarchy(const tinyusdz::Prim& prim, int depth);
+    void ListPrimHierarchy(const lightusd::Prim& prim, int depth);
 
     /**
      * Validate transformation matrix for finite values
@@ -411,10 +486,16 @@ private:
     bool checkMemoryLimit(size_t additionalBytes = 0) const;
 
     /**
-     * Normalize and validate UV coordinates
+     * Normalize and validate UV coordinates (sequential)
      * @param uvs Input/output UV coordinates
      */
     void normalizeUVCoordinates(std::vector<glm::vec2>& uvs);
+
+    /**
+     * Normalize and validate UV coordinates (parallel optimized)
+     * @param uvs Input/output UV coordinates
+     */
+    void normalizeUVCoordinatesParallel(std::vector<glm::vec2>& uvs);
 
     /**
      * Validate and fix mesh indices
@@ -440,7 +521,7 @@ private:
      * @param mesh GeomMesh pointer
      * @param meshData Output mesh data
      */
-    void extractUVCoordinates(tinyusdz::GeomMesh* mesh, MeshData& meshData);
+    void extractUVCoordinates(lightusd::GeomMesh* mesh, MeshData& meshData);
 
     /**
      * Check if mesh data has empty geometry
@@ -458,11 +539,12 @@ private:
      * @param progressCallback Progress callback
      * @return True if successful
      */
-    bool resolveReferences(const tinyusdz::Stage& stage,
-                          const std::vector<uint8_t>& buffer,
-                          const std::string& fileName,
-                          std::vector<MeshData>& outMeshData,
-                          ProgressCallback progressCallback);
+    bool resolveReferences(const lightusd::Stage& stage,
+                           const std::vector<uint8_t>& buffer,
+                           const std::string& fileName,
+                           std::vector<MeshData>& outMeshData,
+                           ProgressCallback progressCallback,
+                           const std::string* preExistingContent = nullptr);
 
     /**
      * Load referenced file and extract meshes
@@ -477,7 +559,29 @@ private:
          * @param mesh Pointer to TinyUSDZ GeomMesh
          * @param meshData Output mesh data to populate with colors
          */
-    void extractVertexColors(tinyusdz::GeomMesh* mesh, MeshData& meshData);
+    void extractVertexColors(lightusd::GeomMesh* mesh, MeshData& meshData);
+
+    /**
+     * Extract point cloud data from USD GeomPoints primitive
+     * @param geomPoints Pointer to TinyUSDZ GeomPoints
+     * @param outData Output point cloud data structure
+     * @param worldTransform World transformation matrix
+     * @return True if extraction succeeded
+     */
+    bool ExtractPointCloudData(lightusd::GeomPoints* geomPoints,
+                               PointCloudData& outData,
+                               const glm::mat4& worldTransform);
+
+    /**
+     * Bake per-point colors from a gradient/colormap texture using attribute0 scalars
+     * @param pointCloud Output point cloud data (must have scalarAttributes)
+     * @param gradientRGBA Raw RGBA gradient texture data
+     * @param texWidth Width of the gradient texture in pixels
+     * @return True if baking succeeded
+     */
+    bool BakeColorsFromGradient(PointCloudData& pointCloud,
+                                const uint8_t* gradientRGBA,
+                                int texWidth);
 };
 
 } // namespace anari_usd_middleware

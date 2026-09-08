@@ -5,14 +5,11 @@
 [submodule "external/tinyusdz"]
 	path = external/tinyusdz
 	url = https://github.com/lighttransport/tinyusdz.git
+	branch = dev
 
 [submodule "external/stb"]
 	path = external/stb
 	url = https://github.com/nothings/stb.git
-
-[submodule "external/cppzmq"]
-	path = external/cppzmq
-	url = https://github.com/zeromq/cppzmq.git
 
 [submodule "external/imgui"]
 	path = external/imgui
@@ -27,3 +24,6 @@
 [submodule "external/zmq"]
 	path = external/zmq
 	url = https://github.com/zeromq/libzmq.git
+[submodule "external/cppzmq"]
+	path = external/cppzmq
+	url = https://github.com/zeromq/cppzmq.git

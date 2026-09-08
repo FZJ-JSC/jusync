@@ -1,0 +1,20 @@
+services:
+  jusync-middleware:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jusync-middleware
+    ports:
+      - "5556:5556"
+    volumes:
+      - ./tests/data:/workspace/tests/data:ro
+      - ./tests/reports:/workspace/tests/reports
+    environment:
+      - WORKSPACE=/workspace
+      - ZMQ_ROOT=/usr/local
+      - OPENSSL_ROOT_DIR=/usr
+    networks:
+      - jusync-network
+networks:
+  jusync-network:
+    driver: bridge
