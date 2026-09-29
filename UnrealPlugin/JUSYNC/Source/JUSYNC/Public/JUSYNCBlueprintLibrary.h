@@ -4,6 +4,7 @@
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "Engine/Texture2D.h"
 #include "JUSYNCTypes.h"
+#include "JUSYNCBenchmarkTiming.h"
 #include "JUSYNCSubsystem.h"
 #include "TimerManager.h"
 #include "JUSYNCBlueprintLibrary.generated.h"
@@ -433,6 +434,13 @@ public:
     UFUNCTION(BlueprintPure, Category = "JUSYNC|Helpers")
     static UJUSYNCSubsystem* GetJUSYNCSubsystem();
 
+    // Current GPU VRAM used by the process, in bytes (0 if it cannot be queried).
+    static int64 QueryVRAMUsageBytes();
+
+    // Current process CPU usage (0.0-100.0) and active thread count.
+    static float QueryCPUUsagePercent();
+    static int32 QueryActiveThreadCount();
+
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Utilities")
     static FRotator ConvertParaViewToUERotation(const FRotator& ParaViewRotation);
 
@@ -528,6 +536,10 @@ private:
 
     // ========== BENCHMARKING FUNCTIONS ==========
 
+    // (promoted to public: the spawner actor drives the benchmark session
+    // automatically and calls these statics from C++)
+
+public:
     /**
      * Start benchmarking for a specific test
      */
@@ -582,8 +594,50 @@ private:
         float BatchDelay = 0.016f
     );
 
+    /**
+     * Open the interactive FPS measurement window (real frames only, no
+     * synthetic fallback). Open it after the scene is fully spawned; it
+     * closes itself after DurationSeconds.
+     */
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
+    static void StartInteractiveWindow(float DurationSeconds = 5.0f);
+
+    /**
+     * Close the interactive FPS measurement window early.
+     */
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
+    static void StopInteractiveWindow();
+
+    /**
+     * Measured interactive-window statistics (0 / bValid=false if not measured).
+     */
+    UFUNCTION(BlueprintPure, Category = "JUSYNC|Benchmarking")
+    static FJUSYNCInteractiveStats GetInteractiveWindowStats();
+
+    /**
+     * Time-to-frame session statistics (connect start -> first frame / full scene).
+     */
+    UFUNCTION(BlueprintPure, Category = "JUSYNC|Benchmarking")
+    static FJUSYNCBenchmarkTTF GetBenchmarkTTF();
+
+    /**
+     * Clear all benchmark timing state (interactive window + TTF session).
+     */
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
+    static void ResetBenchmarkTimings();
+
+    /**
+     * Export the middleware's client-side benchmark report (benchmark_client.json)
+     * to FilePath. Contains receive bytes, file counters (raw + dedup) and
+     * connect->first/last-byte timing; cross-checkable against the cluster-side
+     * ANARI-USD benchmark_rank_*.json serving counters.
+     */
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
+    static bool ExportClientBenchmarkReport(const FString& FilePath);
+
     // ========== DYNAMIC TIMEOUT & RETRY LOGIC ==========
 
+private:
     /**
      * Request file with dynamic timeout and retry logic
      */
@@ -665,6 +719,9 @@ private:
     static bool bIsBenchmarking;
     static FDateTime BenchmarkSessionStartTime;
 
+    // (promoted to public: record + result builders are driven by the spawner
+    // actor's automatic benchmark session)
+public:
     // Benchmark helper functions
     static void RecordBenchmarkResult(const FJUSYNCBenchmarkResult& Result);
     static FJUSYNCBenchmarkResult CreateBenchmarkResult(const FString& TestName, float TotalTimeMs, int32 TriangleCount, int32 VertexCount, int64 RAMBefore, int64 RAMAfter, int32 ActorCount, int32 ErrorCount, int32 SplitMeshCount);

@@ -1,4 +1,4 @@
-﻿#include "JUSYNCAsyncActions.h"
+#include "JUSYNCAsyncActions.h"
 #include "JUSYNCBlueprintLibrary.h"
 #include "JUSYNCModule.h"
 #include "JUSYNCSubsystem.h"
@@ -18,7 +18,7 @@ UJUSYNCAsyncLoadUSD* UJUSYNCAsyncLoadUSD::AsyncLoadUSDFromBuffer(
     Action->bIsFromDisk = false;
 
     // Try to register with game instance, but don't fail if we can't find a world
-    // The Activate() method will try again with more comprehensive world detection
+    // The Activate() method retries with broader world detection
     UWorld* World = nullptr;
 
     // Method 1: Use GWorld global
@@ -68,7 +68,7 @@ UJUSYNCAsyncLoadUSD* UJUSYNCAsyncLoadUSD::AsyncLoadUSDFromDisk(const FString& Fi
     Action->bIsFromDisk = true;
 
     // Try to register with game instance, but don't fail if we can't find a world
-    // The Activate() method will try again with more comprehensive world detection
+    // The Activate() method retries with broader world detection
     UWorld* World = nullptr;
 
     // Method 1: Use GWorld global
@@ -113,7 +113,7 @@ UJUSYNCAsyncLoadUSD* UJUSYNCAsyncLoadUSD::AsyncLoadUSDFromDisk(const FString& Fi
 
 void UJUSYNCAsyncLoadUSD::Activate()
 {
-    // Enhanced world detection similar to UJUSYNCAsyncReceiveFiles
+    // World detection similar to UJUSYNCAsyncReceiveFiles
     UWorld* World = nullptr;
 
     // Method 1: Use GWorld global (most reliable for PIE)
@@ -139,7 +139,7 @@ void UJUSYNCAsyncLoadUSD::Activate()
         }
     }
 
-    // Method 3: Iterate through world contexts (comprehensive fallback)
+    // Method 3: iterate through world contexts (fallback)
     if (!World && GEngine)
     {
         // First try PIE worlds
@@ -284,7 +284,7 @@ UJUSYNCAsyncReceiveFiles* UJUSYNCAsyncReceiveFiles::AsyncStartReceiving()
 {
     UJUSYNCAsyncReceiveFiles* Action = NewObject<UJUSYNCAsyncReceiveFiles>();
 
-    // CRITICAL: Register with game instance to prevent garbage collection
+    // Register with the game instance to prevent garbage collection
     if (UWorld* World = GEngine->GetWorldFromContextObject(Action, EGetWorldErrorMode::LogAndReturnNull))
     {
         Action->RegisterWithGameInstance(World->GetGameInstance());
@@ -297,7 +297,7 @@ UJUSYNCAsyncReceiveFiles* UJUSYNCAsyncReceiveFiles::AsyncStartReceiving()
     return Action;
 }
 
-// Enhanced GetWorld implementation with more fallbacks
+// GetWorld with additional fallbacks
 UWorld* UJUSYNCAsyncReceiveFiles::GetWorld() const
 {
     // Method 1: Use GWorld global (most reliable for PIE)
@@ -321,7 +321,7 @@ UWorld* UJUSYNCAsyncReceiveFiles::GetWorld() const
         }
     }
 
-    // Method 3: Iterate through world contexts (comprehensive fallback)
+    // Method 3: iterate through world contexts (fallback)
     if (GEngine)
     {
         // First try PIE worlds
@@ -375,7 +375,7 @@ void UJUSYNCAsyncReceiveFiles::Activate()
         return;
     }
 
-    UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC receiving started successfully"));
+    UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC receiving started"));
 
     // Set up timer to check for files
     World->GetTimerManager().SetTimer(CheckTimer, this,
@@ -407,7 +407,7 @@ UJUSYNCAsyncCreateTexture* UJUSYNCAsyncCreateTexture::AsyncCreateTextureFromBuff
     UJUSYNCAsyncCreateTexture* Action = NewObject<UJUSYNCAsyncCreateTexture>();
     Action->BufferData = Buffer;
 
-    // CRITICAL: Register with game instance to prevent garbage collection
+    // Register with the game instance to prevent garbage collection
     if (UWorld* World = GEngine->GetWorldFromContextObject(Action, EGetWorldErrorMode::LogAndReturnNull))
     {
         Action->RegisterWithGameInstance(World->GetGameInstance());
@@ -466,7 +466,7 @@ UJUSYNCAsyncCreateMesh* UJUSYNCAsyncCreateMesh::AsyncCreateRealtimeMeshFromJUSYN
     Action->MeshDataCopy = MeshData;
     Action->MeshComponentPtr = RealtimeMeshComponent;
 
-    // CRITICAL: Register with game instance to prevent garbage collection
+    // Register with the game instance to prevent garbage collection
     if (UWorld* World = GEngine->GetWorldFromContextObject(Action, EGetWorldErrorMode::LogAndReturnNull))
     {
         Action->RegisterWithGameInstance(World->GetGameInstance());

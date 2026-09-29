@@ -40,9 +40,6 @@ private:
 
 #if PLATFORM_LINUX
     bool InitializeLinux();
-    void CheckLinuxDependencies();
 #endif
 
-    // Storage for loaded library handles
-    TMap<FString, void*> LoadedLibraryHandles;
 };

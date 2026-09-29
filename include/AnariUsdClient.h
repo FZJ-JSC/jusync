@@ -158,6 +158,18 @@ public:
     ConnectionStatus getConnectionStatus() const;
     bool isShutdownRequested() const { return shutdownRequested.load(); }
 
+    // ---- Client-side benchmark counters ----------------------------------
+    // Feed the client benchmark report (benchmark_client.json). The report
+    // is cross-checkable against the cluster-side ANARI-USD
+    // benchmark_rank_*.json: cluster "serving.bytes" should match the client
+    // "total.bytes_received" for the same run (modulo the rank-0 local relay).
+    // All methods are thread-safe (atomics) and cheap.
+    void benchmarkMarkConnectStart();
+    void benchmarkNoteReceive();
+    void benchmarkNoteRequestBatch(uint64_t filesRequested, uint64_t filesUnique);
+    void benchmarkNoteFileCompleted(bool success);
+    std::string buildBenchmarkReportJson() const;
+
     // File request methods
     bool requestFileList(int32_t targetRank, FileListCallback callback, int timeoutMs = 10000);
     bool requestFileListWithSizes(int32_t targetRank, FileListWithSizesCallback callback, int timeoutMs = 10000);
@@ -336,6 +348,31 @@ private:
     ConnectionStats connectionStats;
     std::atomic<size_t> maxMessageSize{104857600}; // 100MB default
     std::chrono::steady_clock::time_point lastHealthCheck;
+
+    // Benchmark session state (all atomics; safe from dispatcher,
+    // worker-pool and request threads).
+    struct BenchmarkState {
+        std::atomic<uint64_t> connectStartSteadyNs{0};  // 0 = never connected
+        std::atomic<uint64_t> connectStartSystemMs{0};  // unix ms at connect
+        std::atomic<uint64_t> firstReceiveSteadyNs{0};  // 0 = nothing received
+        std::atomic<uint64_t> lastReceiveSteadyNs{0};
+        std::atomic<uint64_t> chunkMessages{0};
+        std::atomic<uint64_t> filesRequested{0};        // raw (pre-dedup) count
+        std::atomic<uint64_t> filesUnique{0};           // post-dedup count
+        std::atomic<uint64_t> filesCompleted{0};
+        std::atomic<uint64_t> filesFailed{0};
+    };
+    BenchmarkState benchmarkState;
+
+    static uint64_t benchmarkSteadyNowNs() {
+        return static_cast<uint64_t>(
+            std::chrono::steady_clock::now().time_since_epoch().count());
+    }
+    static uint64_t benchmarkSystemNowMs() {
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+    }
 
     // Notification callback (live update support)
     std::mutex notificationCallbackMutex;

@@ -24,16 +24,22 @@
 #include <future>
 #include <vector>
 #include <string_view>
-// <execution> header: available in libstdc++ (GCC) but NOT in libc++ (clang)
-// PAR_POLICY macro expands to "std::execution::par," on GCC, empty on clang
-#if defined(__clang__)
-// libc++ has no parallel execution policies - algorithms run sequentially
+// PAR_POLICY is intentionally EMPTY (serial) on every compiler.
+//
+// We used to expand this to "std::execution::par," on GCC. But GCC's libstdc++
+// implements the parallel execution policies by calling into TBB at RUNTIME,
+// and TBB's lazy initialization (tbb::isolate_within_arena -> dlopen ->
+// libirml -> pthread_once) dereferences a NULL function pointer when this
+// shared library is loaded via ctypes (the way the Blender/UE plugins load
+// it), SEGV-ing the host process on the first mesh parse. Point-cloud parsing
+// never invoked a PAR_POLICY algorithm, which is why clouds worked while every
+// triangle mesh crashed the process.
+//
+// The affected algorithms (per-vertex finiteness checks / vector transforms)
+// are trivial float work, so the serial cost is negligible (a few ms even for
+// millions of vertices). Serial is the correct, portable, crash-free choice.
 #define PAR_POLICY
-#else
-#include <execution>
-#define PAR_POLICY std::execution::par,
-#endif
-#include <numeric>      // For parallel reduce
+#include <numeric>      // For reduce
 
 // zstd: broker USD payloads arrive zstd-frame-wrapped (magic-detected,
 // self-describing). JUSYNC_HAS_ZSTD is defined by CMake when libzstd was found.
@@ -231,11 +237,10 @@ public:
         return result;
     }
     
-    // Enhanced preprocessing with comprehensive validation
+    // Preprocess USD content (texture coords, shader defaults) before parsing.
     std::vector<uint8_t> preprocessUsdContent(const std::vector<uint8_t>& buffer) {
-        MIDDLEWARE_LOG_INFO("Preprocessing USD content of size %zu", buffer.size());
+        MIDDLEWARE_LOG_DEBUG("Preprocessing USD content of size %zu", buffer.size());
 
-        // Validate input buffer
         if (buffer.empty()) {
             MIDDLEWARE_LOG_ERROR("Cannot preprocess empty buffer");
             return buffer;
@@ -320,8 +325,6 @@ public:
                     pos += texCoordReplacement.length();
                 }
 
-                MIDDLEWARE_LOG_DEBUG("Applied optimized string replacements successfully");
-
             } catch (const std::exception& e) {
                 MIDDLEWARE_LOG_ERROR("String replacement error during preprocessing: %s", e.what());
                 return buffer;
@@ -349,7 +352,6 @@ public:
                         std::string prefix = "uniform token info:id = \"UsdPreviewSurface\";";
                         if ((prefix.size() + line34.size()) < 1000) {
                             fileContent.replace(lineStart, 0, prefix);
-                            MIDDLEWARE_LOG_DEBUG("Modified line 34 successfully");
                         } else {
                             MIDDLEWARE_LOG_WARNING("Modified line would be too long, skipping");
                         }
@@ -368,7 +370,6 @@ public:
         }
     }
 
-    // Enhanced memory monitoring
     bool checkMemoryUsage(size_t additionalBytes = 0) const {
         // Simple memory usage estimation
         static std::atomic<size_t> currentMemoryUsage{0};
@@ -411,7 +412,7 @@ public:
         
  #ifdef ENABLE_CUDA_ACCELERATION
         // Log GPU availability status for debugging
-        MIDDLEWARE_LOG_INFO("🔥 GPU Acceleration Check: vertices=%zu, threshold=10000, isAvailable=%d",
+        MIDDLEWARE_LOG_DEBUG("GPU Acceleration Check: vertices=%zu, threshold=10000, isAvailable=%d",
                            points.size(), GpuContext::isAvailable() ? 1 : 0);
         
         if (GpuContext::isAvailable() && points.size() >= 10000) {
@@ -674,7 +675,6 @@ public:
     int colorCacheType = -1;
 };
 
-// Enhanced MeshData validation methods
 std::pair<glm::vec3, glm::vec3> UsdProcessor::MeshData::getBounds() const {
     if (points.empty()) {
         return {glm::vec3(0.0f), glm::vec3(0.0f)};
@@ -728,15 +728,14 @@ UsdProcessor::UsdProcessor() : pImpl(std::make_unique<UsdProcessorImpl>()) {
     
     // Initialize GPU context on startup
 #ifdef ENABLE_CUDA_ACCELERATION
-    MIDDLEWARE_LOG_INFO("🔥 Initializing GPU acceleration support...");
     if (GpuContext::getInstance().initialize()) {
-        MIDDLEWARE_LOG_INFO("✅ GPU acceleration initialized successfully - Device: %s",
+        MIDDLEWARE_LOG_INFO("GPU acceleration initialized - Device: %s",
                            GpuContext::getDeviceInfo().deviceName.c_str());
     } else {
-        MIDDLEWARE_LOG_WARNING("⚠️ GPU acceleration not available - using CPU fallback");
+        MIDDLEWARE_LOG_WARNING("GPU acceleration not available - using CPU fallback");
     }
 #else
-    MIDDLEWARE_LOG_INFO("ℹ️ GPU acceleration not compiled in - using CPU only");
+    MIDDLEWARE_LOG_DEBUG("GPU acceleration not compiled in - using CPU only");
 #endif
 }
 
@@ -749,7 +748,6 @@ UsdProcessor::~UsdProcessor() {
     MIDDLEWARE_LOG_INFO("UsdProcessor shutdown complete");
 }
 
-// Enhanced texture creation with comprehensive validation
 UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vector<uint8_t>& buffer,
                                                                const std::string& expectedFormat) {
     std::shared_lock<std::shared_mutex> lock(processingMutex);
@@ -952,7 +950,7 @@ UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vecto
             return textureData;
         }
 
-        MIDDLEWARE_LOG_INFO("Texture created successfully: %dx%d, %d channels",
+        MIDDLEWARE_LOG_DEBUG("Texture created: %dx%d, %d channels",
                           textureData.width, textureData.height, textureData.channels);
 
         stats.texturesProcessed.fetch_add(1);
@@ -1260,7 +1258,7 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
             MIDDLEWARE_LOG_WARNING("TinyUSDZ load warnings for '%s': %s", fileName.c_str(), warnings.c_str());
         }
 
-        MIDDLEWARE_LOG_INFO("USD stage loaded successfully. Root prims: %zu", stage.root_prims().size());
+        MIDDLEWARE_LOG_INFO("USD stage loaded: %zu root prims", stage.root_prims().size());
 
         if (progressCallback) {
             progressCallback(0.5f, "Processing primitives");
@@ -1292,7 +1290,7 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
             progressCallback(0.7f, "Resolving references");
         }
 
-        // Enhanced reference resolution
+        // Resolve references for missing geometry.
         if (referenceResolutionEnabled.load() && (outMeshData.empty() || hasEmptyGeometry(outMeshData))) {
             MIDDLEWARE_LOG_INFO("Attempting reference resolution for missing geometry");
 
@@ -1352,7 +1350,6 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
 }
 
 
-// Enhanced disk loading with file validation
 bool UsdProcessor::LoadUSDFromDisk(const std::string& filePath,
                                   std::vector<MeshData>& outMeshData,
                                   ProgressCallback progressCallback) {
@@ -1449,10 +1446,9 @@ UsdProcessor::ProcessingStats::Snapshot UsdProcessor::getProcessingStats() const
 
 void UsdProcessor::resetProcessingStats() {
     stats.reset();
-    MIDDLEWARE_LOG_INFO("Processing statistics reset");
+    MIDDLEWARE_LOG_DEBUG("Processing statistics reset");
 }
 
-// Enhanced format validation
 bool UsdProcessor::validateUSDFormat(const std::vector<uint8_t>& buffer, const std::string& fileName) {
     if (buffer.empty() || fileName.empty()) {
         return false;
@@ -2046,10 +2042,10 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         // Extract UV coordinates
         extractUVCoordinates(geomMesh, outMeshData);
 
-        // ✅ NEW: Extract vertex colors from primvars:color.timeSamples
+        // Extract vertex colors from primvars:color.timeSamples.
         extractVertexColors(geomMesh, outMeshData);
 
-        MIDDLEWARE_LOG_DEBUG("Successfully extracted mesh: %zu vertices, %zu triangles, %zu normals, %zu UVs, %zu colors",
+        MIDDLEWARE_LOG_DEBUG("Extracted mesh: %zu vertices, %zu triangles, %zu normals, %zu UVs, %zu colors",
                            outMeshData.points.size(),
                            outMeshData.indices.size() / 3,
                            outMeshData.normals.size(),

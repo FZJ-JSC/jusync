@@ -147,7 +147,7 @@ for _, data in recv_all(sock, poller, 15):
                 s = f.get("size", 0)
                 if FILTER and not n.startswith(FILTER):
                     continue
-                print(f"    {n:<40} {s:>10,d} bytes")
+                print(f"  {n:<40} {s:>10,d} bytes")
                 all_files[rank].append((n, s))
 
     elif msg_type == RESP_FILE_COMPLETE:

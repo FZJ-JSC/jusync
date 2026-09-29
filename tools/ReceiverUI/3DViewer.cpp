@@ -165,7 +165,7 @@ void Camera3D::updatePosition() {
 MeshRenderer::MeshRenderer() : shaderProgram(0), wireframeShaderProgram(0),
                                wireframeMode(false), showNormals(false),
                                showCollisionMesh(true), showVisualMesh(true),
-                               collisionAlpha(0.5f), subdivisionLevel(0) {  // ✅ Changed to 0
+                               collisionAlpha(0.5f), subdivisionLevel(0) {  //  Changed to 0
 }
 
 MeshRenderer::~MeshRenderer() {
@@ -199,61 +199,61 @@ void MeshRenderer::cleanup() {
 }
 
 void MeshRenderer::loadMesh(const CMeshData& meshData, bool isCollisionMesh) {
-    std::cout << "📦 MeshRenderer::loadMesh called (collision=" << isCollisionMesh << ")" << std::endl;
+    std::cout << "MeshRenderer::loadMesh called (collision=" << isCollisionMesh << ")" << std::endl;
 
     // ============================================================================
-    // ✅ COMPREHENSIVE NULL CHECKS - VALIDATE ALL POINTERS FIRST!
+    //  COMPREHENSIVE NULL CHECKS - VALIDATE ALL POINTERS FIRST!
     // ============================================================================
     if (isCollisionMesh) {
         // Collision mesh validation
         if (!meshData.collision_vertices) {
-            std::cerr << "❌ FATAL ERROR: NULL collision_vertices pointer!" << std::endl;
-            std::cerr << "   Pointer address: " << (void*)meshData.collision_vertices << std::endl;
-            return;  // ← SAFETY EXIT
+            std::cerr << "FATAL ERROR: NULL collision_vertices pointer!" << std::endl;
+            std::cerr << "Pointer address: " << (void*)meshData.collision_vertices << std::endl;
+            return;
         }
         if (!meshData.collision_indices) {
-            std::cerr << "❌ FATAL ERROR: NULL collision_indices pointer!" << std::endl;
-            std::cerr << "   Pointer address: " << (void*)meshData.collision_indices << std::endl;
-            return;  // ← SAFETY EXIT
+            std::cerr << "FATAL ERROR: NULL collision_indices pointer!" << std::endl;
+            std::cerr << "Pointer address: " << (void*)meshData.collision_indices << std::endl;
+            return;
         }
         if (meshData.collision_vertices_count == 0) {
-            std::cerr << "❌ ERROR: Zero collision_vertices_count!" << std::endl;
+            std::cerr << "ERROR: Zero collision_vertices_count!" << std::endl;
             return;
         }
         if (meshData.collision_indices_count == 0) {
-            std::cerr << "❌ ERROR: Zero collision_indices_count!" << std::endl;
+            std::cerr << "ERROR: Zero collision_indices_count!" << std::endl;
             return;
         }
-        std::cout << "✅ Collision mesh validated: "
-                  << (meshData.collision_vertices_count/3) << " vertices, "
-                  << (meshData.collision_indices_count/3) << " triangles" << std::endl;
+        std::cout << "Collision mesh validated: "
+                  << (meshData.collision_vertices_count/3) << "vertices, "
+                  << (meshData.collision_indices_count/3) << "triangles" << std::endl;
     } else {
         // Visual mesh validation
         if (!meshData.points) {
-            std::cerr << "❌ FATAL ERROR: NULL points pointer!" << std::endl;
-            std::cerr << "   Pointer address: " << (void*)meshData.points << std::endl;
-            return;  // ← SAFETY EXIT
+            std::cerr << "FATAL ERROR: NULL points pointer!" << std::endl;
+            std::cerr << "Pointer address: " << (void*)meshData.points << std::endl;
+            return;
         }
         if (!meshData.indices) {
-            std::cerr << "❌ FATAL ERROR: NULL indices pointer!" << std::endl;
-            std::cerr << "   Pointer address: " << (void*)meshData.indices << std::endl;
-            return;  // ← SAFETY EXIT
+            std::cerr << "FATAL ERROR: NULL indices pointer!" << std::endl;
+            std::cerr << "Pointer address: " << (void*)meshData.indices << std::endl;
+            return;
         }
         if (meshData.points_count == 0) {
-            std::cerr << "❌ ERROR: Zero points_count!" << std::endl;
+            std::cerr << "ERROR: Zero points_count!" << std::endl;
             return;
         }
         if (meshData.indices_count == 0) {
-            std::cerr << "❌ ERROR: Zero indices_count!" << std::endl;
+            std::cerr << "ERROR: Zero indices_count!" << std::endl;
             return;
         }
-        std::cout << "✅ Visual mesh validated: "
-                  << (meshData.points_count/3) << " vertices, "
-                  << (meshData.indices_count/3) << " triangles" << std::endl;
+        std::cout << "Visual mesh validated: "
+                  << (meshData.points_count/3) << "vertices, "
+                  << (meshData.indices_count/3) << "triangles" << std::endl;
     }
 
     // ============================================================================
-    // ✅ ALL POINTERS ARE VALID - PROCEED WITH MESH CREATION
+    //  ALL POINTERS ARE VALID - PROCEED WITH MESH CREATION
     // ============================================================================
     MeshObject mesh;
     mesh.name = meshData.element_name;
@@ -310,17 +310,15 @@ void MeshRenderer::loadMesh(const CMeshData& meshData, bool isCollisionMesh) {
     try {
         createMeshBuffers(mesh, meshData, isCollisionMesh);
         meshes.push_back(mesh);
-        std::cout << "✅ Mesh '" << mesh.name << "' loaded successfully!" << std::endl;
+        std::cout << "Mesh '" << mesh.name << "' loaded successfully!" << std::endl;
     } catch (const std::exception& e) {
-        std::cerr << "❌ EXCEPTION in createMeshBuffers: " << e.what() << std::endl;
+        std::cerr << "EXCEPTION in createMeshBuffers: " << e.what() << std::endl;
         // Clean up partially created mesh
         if (mesh.VAO) glDeleteVertexArrays(1, &mesh.VAO);
         if (mesh.VBO) glDeleteBuffers(1, &mesh.VBO);
         if (mesh.EBO) glDeleteBuffers(1, &mesh.EBO);
     }
 }
-
-
 void MeshRenderer::clearMeshes() {
     for (auto& mesh : meshes) {
         glDeleteVertexArrays(1, &mesh.VAO);
@@ -503,7 +501,7 @@ void MeshRenderer::subdivideCatmullClark(std::vector<glm::vec3>& vertices,
                     unsigned int prev = indices[indexOffset + (i + faceSize - 1) % faceSize];
                     unsigned int next = indices[indexOffset + (i + 1) % faceSize];
 
-                    // ✅ Fixed type casting
+                    //  Fixed type casting
                     adjacentEdges.push_back(std::make_pair(
                         std::min(static_cast<unsigned int>(v), prev),
                         std::max(static_cast<unsigned int>(v), prev)
@@ -585,10 +583,10 @@ void MeshRenderer::subdivideCatmullClark(std::vector<glm::vec3>& vertices,
 }
 
 void MeshRenderer::createMeshBuffers(MeshObject& mesh, const CMeshData& meshData, bool isCollisionMesh) {
-    std::cout << "🔨 createMeshBuffers called (collision=" << isCollisionMesh << ")" << std::endl;
+    std::cout << "createMeshBuffers called (collision=" << isCollisionMesh << ")" << std::endl;
 
     // ============================================================================
-    // ✅ STEP 1: VALIDATE AND EXTRACT MESH DATA
+    //  STEP 1: VALIDATE AND EXTRACT MESH DATA
     // ============================================================================
     const float* vertices = nullptr;
     const unsigned int* indices = nullptr;
@@ -598,47 +596,47 @@ void MeshRenderer::createMeshBuffers(MeshObject& mesh, const CMeshData& meshData
     if (isCollisionMesh) {
         // Collision mesh validation
         if (!meshData.collision_vertices || !meshData.collision_indices) {
-            std::cerr << "❌ FATAL: NULL collision pointers!" << std::endl;
+            std::cerr << "FATAL: NULL collision pointers!" << std::endl;
             return;
         }
         if (meshData.collision_vertices_count == 0 || meshData.collision_indices_count == 0) {
-            std::cerr << "❌ FATAL: Zero-size collision data!" << std::endl;
+            std::cerr << "FATAL: Zero-size collision data!" << std::endl;
             return;
         }
 
         vertices = meshData.collision_vertices;
         indices = meshData.collision_indices;
-        vertexCount = meshData.collision_vertices_count / 3;  // Total floats → vertex count
+        vertexCount = meshData.collision_vertices_count / 3;  // Total floats  vertex count
         indexCount = meshData.collision_indices_count;
 
-        std::cout << "✅ Collision: " << vertexCount << " vertices, " << (indexCount/3) << " triangles" << std::endl;
+        std::cout << "Collision: " << vertexCount << "vertices, " << (indexCount/3) << "triangles" << std::endl;
     } else {
         // Visual mesh validation
         if (!meshData.points || !meshData.indices) {
-            std::cerr << "❌ FATAL: NULL visual mesh pointers!" << std::endl;
+            std::cerr << "FATAL: NULL visual mesh pointers!" << std::endl;
             return;
         }
         if (meshData.points_count == 0 || meshData.indices_count == 0) {
-            std::cerr << "❌ FATAL: Zero-size visual data!" << std::endl;
+            std::cerr << "FATAL: Zero-size visual data!" << std::endl;
             return;
         }
 
         vertices = meshData.points;
         indices = meshData.indices;
-        vertexCount = meshData.points_count / 3;  // Total floats → vertex count
+        vertexCount = meshData.points_count / 3;  // Total floats  vertex count
         indexCount = meshData.indices_count;
 
-        std::cout << "✅ Visual: " << vertexCount << " vertices, " << (indexCount/3) << " triangles" << std::endl;
+        std::cout << "Visual: " << vertexCount << "vertices, " << (indexCount/3) << "triangles" << std::endl;
     }
 
     // Final sanity check
     if (vertexCount == 0 || indexCount == 0) {
-        std::cerr << "❌ FATAL: Zero vertex/index count!" << std::endl;
+        std::cerr << "FATAL: Zero vertex/index count!" << std::endl;
         return;
     }
 
     // ============================================================================
-    // ✅ STEP 2: CREATE OPENGL BUFFERS
+    //  STEP 2: CREATE OPENGL BUFFERS
     // ============================================================================
     glGenVertexArrays(1, &mesh.VAO);
     glGenBuffers(1, &mesh.VBO);
@@ -646,13 +644,13 @@ void MeshRenderer::createMeshBuffers(MeshObject& mesh, const CMeshData& meshData
     glBindVertexArray(mesh.VAO);
 
     // ============================================================================
-    // ✅ STEP 3: COPY VERTEX AND INDEX DATA
+    //  STEP 3: COPY VERTEX AND INDEX DATA
     // ============================================================================
     std::vector<float> subdividedVerts(vertices, vertices + vertexCount * 3);
     std::vector<unsigned int> subdividedIndices(indices, indices + indexCount);
 
     // ============================================================================
-    // ✅ STEP 4: SMART SUBDIVISION (VISUAL MESHES ONLY)
+    //  STEP 4: SMART SUBDIVISION (VISUAL MESHES ONLY)
     // ============================================================================
     bool shouldSubdivide = false;
 
@@ -673,20 +671,20 @@ void MeshRenderer::createMeshBuffers(MeshObject& mesh, const CMeshData& meshData
         shouldSubdivide = hasQuads;
 
         if (!hasQuads && subdivisionLevel > 0) {
-            std::cout << "⚠️ Mesh '" << mesh.name << "' already triangulated. Skipping subdivision." << std::endl;
+            std::cout << "Mesh '" << mesh.name << "' already triangulated. Skipping subdivision." << std::endl;
         }
     }
 
     if (shouldSubdivide) {
-        std::cout << "✅ Applying " << mesh.subdivisionScheme << " subdivision level "
-                  << subdivisionLevel << " to '" << mesh.name << "'" << std::endl;
+        std::cout << "Applying " << mesh.subdivisionScheme << "subdivision level "
+                  << subdivisionLevel << "to '" << mesh.name << "'" << std::endl;
         subdivideMesh(subdividedVerts, subdividedIndices, mesh.faceVertexCounts, subdivisionLevel);
         vertexCount = subdividedVerts.size() / 3;
         indexCount = subdividedIndices.size();
     }
 
     // ============================================================================
-    // ✅ STEP 5: BUILD VERTEX DATA WITH NORMALS & COLORS
+    //  STEP 5: BUILD VERTEX DATA WITH NORMALS & COLORS
     // ============================================================================
     mesh.vertexCount = vertexCount;
     mesh.indexCount = indexCount;
@@ -739,7 +737,7 @@ void MeshRenderer::createMeshBuffers(MeshObject& mesh, const CMeshData& meshData
     }
 
     // ============================================================================
-    // ✅ STEP 6: UPLOAD TO GPU
+    //  STEP 6: UPLOAD TO GPU
     // ============================================================================
     glBindBuffer(GL_ARRAY_BUFFER, mesh.VBO);
     glBufferData(GL_ARRAY_BUFFER, vertexData.size() * sizeof(float), vertexData.data(), GL_STATIC_DRAW);
@@ -748,7 +746,7 @@ void MeshRenderer::createMeshBuffers(MeshObject& mesh, const CMeshData& meshData
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexCount * sizeof(unsigned int), subdividedIndices.data(), GL_STATIC_DRAW);
 
     // ============================================================================
-    // ✅ STEP 7: CONFIGURE VERTEX ATTRIBUTES
+    //  STEP 7: CONFIGURE VERTEX ATTRIBUTES
     // ============================================================================
     // Position attribute (location = 0)
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 10 * sizeof(float), (void*)0);
@@ -764,10 +762,8 @@ void MeshRenderer::createMeshBuffers(MeshObject& mesh, const CMeshData& meshData
 
     glBindVertexArray(0);
 
-    std::cout << "✅ Mesh buffers created successfully!" << std::endl;
+    std::cout << "Mesh buffers created successfully!" << std::endl;
 }
-
-
 glm::vec3 MeshRenderer::getCollisionTypeColor(int collisionType) const {
     switch (collisionType) {
         case 0: return glm::vec3(0.5f, 0.5f, 0.5f);
@@ -852,7 +848,7 @@ GLuint MeshRenderer::linkProgram(GLuint vertexShader, GLuint fragmentShader) {
 Viewer3D::Viewer3D() : isVisible(true), framebuffer(0), colorTexture(0), depthTexture(0),
                        viewportWidth(800), viewportHeight(600), wireframeMode(false),
                        showNormals(false), showCollisionMesh(true), showVisualMesh(true),
-                       collisionAlpha(0.5f), subdivisionLevel(0), selectedMeshIndex(-1),  // ✅ Changed to 0
+                       collisionAlpha(0.5f), subdivisionLevel(0), selectedMeshIndex(-1),  //  Changed to 0
                        lightPosition(10.0f, 10.0f, 10.0f), isDragging(false) {
     camera = std::make_unique<Camera3D>();
     renderer = std::make_unique<MeshRenderer>();
@@ -879,7 +875,7 @@ void Viewer3D::cleanup() {
 void Viewer3D::render(const std::vector<CMeshData>& meshes) {
     if (!isVisible) return;
 
-    ImGui::Begin("🎮 3D Model Viewer", &isVisible, ImGuiWindowFlags_MenuBar);
+    ImGui::Begin(" 3D Model Viewer", &isVisible, ImGuiWindowFlags_MenuBar);
 
     if (ImGui::BeginMenuBar()) {
         if (ImGui::BeginMenu("View")) {
@@ -926,22 +922,22 @@ void Viewer3D::render(const std::vector<CMeshData>& meshes) {
 }
 
 void Viewer3D::renderControls() {
-    ImGui::Text("🎛️ Controls");
-    if (ImGui::Button("🏠 Reset Camera")) {
+    ImGui::Text(" Controls");
+    if (ImGui::Button(" Reset Camera")) {
         camera->reset();
     }
     ImGui::SameLine();
-    if (ImGui::Button("🎯 Focus All")) {
+    if (ImGui::Button(" Focus All")) {
         focusOnAllMeshes();
     }
 
-    ImGui::Checkbox("📐 Wireframe", &wireframeMode);
+    ImGui::Checkbox(" Wireframe", &wireframeMode);
     ImGui::SameLine();
-    ImGui::Checkbox("👁️ Visual Mesh", &showVisualMesh);
+    ImGui::Checkbox(" Visual Mesh", &showVisualMesh);
     ImGui::SameLine();
-    ImGui::Checkbox("💥 Collision Mesh", &showCollisionMesh);
+    ImGui::Checkbox(" Collision Mesh", &showCollisionMesh);
 
-    if (ImGui::SliderInt("🔷 Subdivision Level", &subdivisionLevel, 0, 3)) {
+    if (ImGui::SliderInt(" Subdivision Level", &subdivisionLevel, 0, 3)) {
         renderer->setSubdivisionLevel(subdivisionLevel);
     }
 
@@ -949,7 +945,7 @@ void Viewer3D::renderControls() {
         ImGui::SliderFloat("Collision Alpha", &collisionAlpha, 0.1f, 1.0f, "%.2f");
     }
 
-    ImGui::Text("💡 Light Position:");
+    ImGui::Text(" Light Position:");
     ImGui::SliderFloat3("##LightPos", glm::value_ptr(lightPosition), -20.0f, 20.0f);
 
     renderer->setWireframeMode(wireframeMode);
@@ -993,14 +989,14 @@ void Viewer3D::renderViewport() {
 
     handleMouseInput(viewportSize);
 
-    ImGui::Text("📊 Meshes: %zu (Visual: %zu, Collision: %zu)",
+    ImGui::Text(" Meshes: %zu (Visual: %zu, Collision: %zu)",
                 renderer->getMeshCount(),
                 renderer->getVisualMeshCount(),
                 renderer->getCollisionMeshCount());
 }
 
 void Viewer3D::renderMeshList(const std::vector<CMeshData>& meshes) {
-    ImGui::Text("📋 Mesh List");
+    ImGui::Text(" Mesh List");
     ImGui::BeginChild("MeshList", ImVec2(0, 150), true);
     for (size_t i = 0; i < meshes.size(); ++i) {
         const auto& mesh = meshes[i];
@@ -1024,7 +1020,7 @@ void Viewer3D::renderMeshList(const std::vector<CMeshData>& meshes) {
 
 void Viewer3D::renderSelectedMeshInfo(const std::vector<CMeshData>& meshes) {
     const auto& mesh = meshes[selectedMeshIndex];
-    ImGui::Text("🔍 Selected: %s", mesh.element_name);
+    ImGui::Text(" Selected: %s", mesh.element_name);
     ImGui::Text("Visual: %zu vertices, %zu triangles",
                 mesh.points_count / 3, mesh.indices_count / 3);
     if (mesh.collision_vertices_count > 0) {
@@ -1053,7 +1049,7 @@ void Viewer3D::renderUSDGeometryFeatures(const std::vector<CMeshData>& meshes) {
     }
 
     ImGui::Separator();
-    ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "🔷 USD Geometry Features");
+    ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), " USD Geometry Features");
 
     if (rendererMesh.subdivisionScheme != "none") {
         ImGui::Text("Subdivision:");
@@ -1119,7 +1115,7 @@ void Viewer3D::handleMouseInput(const ImVec2& viewportSize) {
 }
 
 void Viewer3D::loadMeshesIntoRenderer(const std::vector<CMeshData>& meshes) {
-    std::cout << "🔍 loadMeshesIntoRenderer: Processing " << meshes.size() << " meshes" << std::endl;
+    std::cout << "loadMeshesIntoRenderer: Processing " << meshes.size() << "meshes" << std::endl;
     renderer->clearMeshes();
 
     for (size_t i = 0; i < meshes.size(); i++) {
@@ -1127,21 +1123,19 @@ void Viewer3D::loadMeshesIntoRenderer(const std::vector<CMeshData>& meshes) {
 
         // NULL checks
         if (!mesh.points || !mesh.indices || mesh.points_count == 0 || mesh.indices_count == 0) {
-            std::cerr << "❌ MESH " << i << ": Invalid visual mesh data!" << std::endl;
+            std::cerr << "MESH " << i << ": Invalid visual mesh data!" << std::endl;
             continue;
         }
 
-        std::cout << "✅ Loading mesh " << i << ": " << (mesh.points_count/3) << " vertices" << std::endl;
+        std::cout << "Loading mesh " << i << ": " << (mesh.points_count/3) << "vertices" << std::endl;
 
         try {
             renderer->loadMesh(mesh, false);  // Visual mesh only
         } catch (const std::exception& e) {
-            std::cerr << "❌ Exception: " << e.what() << std::endl;
+            std::cerr << "Exception: " << e.what() << std::endl;
         }
     }
 }
-
-
 void Viewer3D::focusOnAllMeshes() {
     glm::vec3 minBounds, maxBounds;
     if (renderer->calculateBounds(minBounds, maxBounds)) {

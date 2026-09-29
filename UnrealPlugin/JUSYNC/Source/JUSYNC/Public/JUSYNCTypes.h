@@ -622,6 +622,78 @@ struct JUSYNC_API FJUSYNCBenchmarkResult
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float MaxHitchDurationMs;
 
+	// Measured interactive-window duration (ms). 0 = window not run.
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float InteractWindowMs;
+
+	// Connect start -> first rendered frame with at least one spawned actor (ms). 0 = not captured.
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float FirstFrameMs;
+
+	// Connect start -> last actor of the initial spawn (ms). 0 = not captured.
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float FullSceneMs;
+
+	// Slowest frame inside the interactive window (ms). 0 = not measured.
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float FrameTimeMaxMs;
+
+	// True only if FPS/FrameTimeMs came from the real interactive window.
+	// False means "not measured" (reported as 0), never a synthetic value.
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	bool bFPSMeasured;
+
+	// Network/transfer totals captured from the middleware client report
+	// (benchmark_client.json): total payload received, ZMQ chunk messages,
+	// and file counters for this result's session.
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int64 BytesReceived;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int64 ChunkCount;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int64 FilesRequested;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int64 FilesCompleted;
+
+	// Total time from connect start to the last byte of the transfer (ms),
+	// from the middleware client report (timing_ms.connect_to_last_byte_ms).
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float DownloadTotalMs;
+
+	// Cluster-side (ANARI-USD) telemetry folded into this run, fetched live
+	// from the broker at benchmark finalize: per-worker + combined totals.
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int32 ClusterWorkerCount;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int64 ClusterCommitCount;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int64 ClusterRawBytes;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int64 ClusterWireBytes;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int64 ClusterServingBytes;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int64 ClusterServingChunks;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float ClusterSerializeMsTotal;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float ClusterStoreMsTotal;
+
+	// Full JSON object string (workers[] + totals + broker) embedded verbatim
+	// into the per-result "cluster" field of benchmark_results.json.
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	FString ClusterReport;
+
 	FJUSYNCBenchmarkResult()
 	{
 		TestName = TEXT("");
@@ -648,6 +720,25 @@ struct JUSYNC_API FJUSYNCBenchmarkResult
 		HitchCount = 0;
 		AvgHitchDurationMs = 0.0f;
 		MaxHitchDurationMs = 0.0f;
+		InteractWindowMs = 0.0f;
+		FirstFrameMs = 0.0f;
+		FullSceneMs = 0.0f;
+		FrameTimeMaxMs = 0.0f;
+		bFPSMeasured = false;
+		BytesReceived = 0;
+		ChunkCount = 0;
+		FilesRequested = 0;
+		FilesCompleted = 0;
+		DownloadTotalMs = 0.0f;
+		ClusterWorkerCount = 0;
+		ClusterCommitCount = 0;
+		ClusterRawBytes = 0;
+		ClusterWireBytes = 0;
+		ClusterServingBytes = 0;
+		ClusterServingChunks = 0;
+		ClusterSerializeMsTotal = 0.0f;
+		ClusterStoreMsTotal = 0.0f;
+		ClusterReport = TEXT("");
 	}
 };
 
@@ -675,12 +766,24 @@ struct JUSYNC_API FJUSYNCBenchmarkConfig
 	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Benchmark")
 	int32 OutputFormat = 0;
 
+	// Duration (seconds) of the interactive FPS measurement window that the
+	// harness opens after the scene is fully spawned (StartInteractiveWindow).
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Benchmark")
+	float InteractiveWindowSeconds = 5.0f;
+
+	// True when this session is a cold start: fresh UE session, no leftover
+	// actors or cache from a previous run (see benchmark/RUNNER_PROTOCOL.md).
+	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Benchmark")
+	bool bColdStart = false;
+
 	FJUSYNCBenchmarkConfig()
 	{
 		bEnableBenchmarking = false;
 		OutputDirectory = TEXT("");
 		bAppendTimestamp = true;
 		OutputFormat = 0; // Default to CSV for backward compatibility
+		InteractiveWindowSeconds = 5.0f;
+		bColdStart = false;
 	}
 };
 

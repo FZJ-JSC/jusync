@@ -259,7 +259,11 @@ public:
 
     /* status / stats */
     std::string getStatusInfo() const;
-    
+
+    /* Client-side benchmark report (JSON). Cross-checkable against the
+       cluster-side ANARI-USD benchmark_rank_*.json serving counters. */
+    std::string getBenchmarkReportJson() const;
+
     /* internal access for C API */
     class AnariUsdClient* getClient() const;
 

@@ -36,7 +36,7 @@ FJUSYNCRealtimeMeshData FJUSYNCRealtimeMeshData::FromStandardMesh(const FJUSYNCM
             Vertex.UV = FVector2D::ZeroVector; // Default UV
         }
 
-        // ✅ NEW: Vertex color from your middleware's vertex color data
+        // Vertex color from the middleware's vertex color data
         if (i < StandardMesh.VertexColors.Num())
         {
             Vertex.Color = StandardMesh.VertexColors[i];

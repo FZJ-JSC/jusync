@@ -91,11 +91,11 @@ public:
     }
 
     bool initialize() {
-        addLog("🚀 Initializing ANARI-USD Middleware Test Application with Collision Debug and 3D Viewer...");
+        addLog(" Initializing ANARI-USD Middleware Test Application with Collision Debug and 3D Viewer...");
 
         // Initialize GLFW
         if (!glfwInit()) {
-            addLog("❌ ERROR: Failed to initialize GLFW");
+            addLog(" ERROR: Failed to initialize GLFW");
             return false;
         }
 
@@ -108,7 +108,7 @@ public:
 
         window = glfwCreateWindow(1600, 1000, "ANARI-USD Middleware Test with Collision Debug & 3D Viewer", nullptr, nullptr);
         if (!window) {
-            addLog("❌ ERROR: Failed to create GLFW window");
+            addLog(" ERROR: Failed to create GLFW window");
             glfwTerminate();
             return false;
         }
@@ -118,7 +118,7 @@ public:
 
         // Initialize GLEW
         if (glewInit() != GLEW_OK) {
-            addLog("❌ ERROR: Failed to initialize GLEW");
+            addLog(" ERROR: Failed to initialize GLEW");
             return false;
         }
 
@@ -142,20 +142,20 @@ public:
 
         // Initialize 3D viewer
         if (!viewer3D->initialize()) {
-            addLog("⚠️ Warning: Failed to initialize 3D viewer - OpenGL features may be limited");
+            addLog(" Warning: Failed to initialize 3D viewer - OpenGL features may be limited");
             show3DViewer = false;
         } else {
-            addLog("✅ 3D viewer initialized successfully");
+            addLog(" 3D viewer initialized successfully");
         }
 
         // Register middleware callbacks
         RegisterUpdateCallback_C(fileReceivedCallback);
         RegisterMessageCallback_C(messageReceivedCallback);
 
-        addLog("✅ Application initialized successfully with collision debug and 3D viewer support");
-        addLog("✅ Callbacks registered and ready");
-        addLog("🔍 Collision Debug Window available for detailed mesh analysis");
-        addLog("🎮 3D Viewer available for interactive mesh visualization");
+        addLog(" Application initialized successfully with collision debug and 3D viewer support");
+        addLog(" Callbacks registered and ready");
+        addLog(" Collision Debug Window available for detailed mesh analysis");
+        addLog(" 3D Viewer available for interactive mesh visualization");
 
         return true;
     }
@@ -217,7 +217,7 @@ public:
                     if (ImGui::MenuItem("Focus 3D Camera")) {
                         if (viewer3D && !currentMeshes.empty()) {
                             // Focus camera on current meshes
-                            addLog("🎯 Focusing 3D camera on loaded meshes");
+                            addLog(" Focusing 3D camera on loaded meshes");
                         }
                     }
                     ImGui::EndMenu();
@@ -297,20 +297,20 @@ private:
     bool showAboutDialog = false;
 
     void renderMainWindow() {
-        ImGui::Begin("🎛️ ANARI-USD Middleware Control", &showMainWindow, ImGuiWindowFlags_AlwaysAutoResize);
+        ImGui::Begin(" ANARI-USD Middleware Control", &showMainWindow, ImGuiWindowFlags_AlwaysAutoResize);
 
         // Connection section
-        ImGui::SeparatorText("🔌 Connection");
+        ImGui::SeparatorText(" Connection");
         ImGui::SetNextItemWidth(300);
         ImGui::InputText("Endpoint", endpointBuffer, sizeof(endpointBuffer));
 
         ImGui::SameLine();
-        if (ImGui::Button("🚀 Initialize")) {
+        if (ImGui::Button(" Initialize")) {
             initializeMiddleware();
         }
 
         ImGui::SameLine();
-        if (ImGui::Button("🛑 Shutdown")) {
+        if (ImGui::Button(" Shutdown")) {
             shutdownMiddleware();
         }
 
@@ -318,77 +318,77 @@ private:
         ImGui::Text("Status: ");
         ImGui::SameLine();
         if (middlewareInitialized.load()) {
-            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "🟢 CONNECTED");
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), " CONNECTED");
         } else {
-            ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "🔴 DISCONNECTED");
+            ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), " DISCONNECTED");
         }
 
         // Data reception section
-        ImGui::SeparatorText("📡 Data Reception");
-        if (ImGui::Button("▶️ Start Receiving")) {
+        ImGui::SeparatorText(" Data Reception");
+        if (ImGui::Button(" Start Receiving")) {
             startReceiving();
         }
 
         ImGui::SameLine();
-        if (ImGui::Button("⏸️ Stop Receiving")) {
+        if (ImGui::Button(" Stop Receiving")) {
             stopReceiving();
         }
 
         ImGui::Text("Receiving: ");
         ImGui::SameLine();
         if (isReceiving.load()) {
-            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "🟢 ACTIVE");
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), " ACTIVE");
         } else {
-            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "🟡 INACTIVE");
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), " INACTIVE");
         }
 
         // Testing section with collision options
-        ImGui::SeparatorText("🧪 Testing & Collision");
+        ImGui::SeparatorText(" Testing & Collision");
 
         // Basic tests
-        if (ImGui::Button("📄 Test USD File")) {
+        if (ImGui::Button(" Test USD File")) {
             testUSDFile();
         }
         ImGui::SameLine();
-        if (ImGui::Button("🖼️ Test Texture")) {
+        if (ImGui::Button(" Test Texture")) {
             testTexture();
         }
 
         // Collision-specific tests
-        if (ImGui::Button("💥 Test Simple Collision")) {
+        if (ImGui::Button(" Test Simple Collision")) {
             testCollisionType(COLLISION_SIMPLE, "Simple (Bounding Box)");
         }
         ImGui::SameLine();
-        if (ImGui::Button("🔺 Test Convex Hull")) {
+        if (ImGui::Button(" Test Convex Hull")) {
             testCollisionType(COLLISION_CONVEX_HULL, "Convex Hull");
         }
 
-        if (ImGui::Button("🔶 Test Complex Collision")) {
+        if (ImGui::Button(" Test Complex Collision")) {
             testCollisionType(COLLISION_COMPLEX, "Complex (Full Mesh)");
         }
         ImGui::SameLine();
-        if (ImGui::Button("⚡ Test Simplified")) {
+        if (ImGui::Button(" Test Simplified")) {
             testCollisionType(COLLISION_SIMPLIFIED, "Simplified (Decimated)");
         }
 
-        if (ImGui::Button("🧩 Test All Collision Types")) {
+        if (ImGui::Button(" Test All Collision Types")) {
             testAllCollisionTypes();
         }
         ImGui::SameLine();
-        if (ImGui::Button("🎯 Load Sample USD with Collision")) {
+        if (ImGui::Button(" Load Sample USD with Collision")) {
             loadSampleUSDWithCollision();
         }
 
         // 3D Visualization section
-        ImGui::SeparatorText("🎮 3D Visualization");
-        if (ImGui::Button("🖥️ Open 3D Viewer")) {
+        ImGui::SeparatorText(" 3D Visualization");
+        if (ImGui::Button(" Open 3D Viewer")) {
             show3DViewer = true;
             if (viewer3D) {
                 viewer3D->setVisible(true);
             }
         }
         ImGui::SameLine();
-        if (ImGui::Button("🔍 Open Collision Debug")) {
+        if (ImGui::Button(" Open Collision Debug")) {
             showCollisionDebugWindow = true;
             if (collisionDebugWindow) {
                 collisionDebugWindow->setVisible(true);
@@ -397,11 +397,11 @@ private:
 
         // Show mesh count for 3D viewer
         if (!currentMeshes.empty()) {
-            ImGui::Text("📊 Loaded Meshes: %zu (ready for 3D viewing)", currentMeshes.size());
+            ImGui::Text(" Loaded Meshes: %zu (ready for 3D viewing)", currentMeshes.size());
         }
 
         // Collision configuration
-        ImGui::SeparatorText("⚙️ Collision Configuration");
+        ImGui::SeparatorText(" Collision Configuration");
 
         static int defaultCollisionType = COLLISION_COMPLEX;
         const char* collisionTypes[] = {
@@ -410,7 +410,7 @@ private:
 
         if (ImGui::Combo("Default Collision Type", &defaultCollisionType, collisionTypes, 6)) {
             SetDefaultCollisionComplexity_C(defaultCollisionType);
-            addLog("🔧 Default collision complexity set to: " + std::string(GetCollisionComplexityName_C(defaultCollisionType)));
+            addLog(" Default collision complexity set to: " + std::string(GetCollisionComplexityName_C(defaultCollisionType)));
         }
 
         // Advanced collision parameters
@@ -422,18 +422,18 @@ private:
         ImGui::SliderFloat("Convex Hull Precision", &convexHullPrecision, 0.001f, 0.1f, "%.3f");
         ImGui::SliderInt("Max Convex Hulls", &maxConvexHulls, 1, 64);
 
-        if (ImGui::Button("🔧 Apply Collision Parameters")) {
+        if (ImGui::Button(" Apply Collision Parameters")) {
             SetCollisionParameters_C(simplificationRatio, convexHullPrecision, maxConvexHulls);
-            addLog("🔧 Collision parameters updated");
+            addLog(" Collision parameters updated");
         }
 
         // Data management
-        ImGui::SeparatorText("🗂️ Data Management");
-        if (ImGui::Button("🗑️ Clear All Data")) {
+        ImGui::SeparatorText(" Data Management");
+        if (ImGui::Button(" Clear All Data")) {
             clearAllData();
         }
         ImGui::SameLine();
-        if (ImGui::Button("📊 Reset Statistics")) {
+        if (ImGui::Button(" Reset Statistics")) {
             resetStatistics();
         }
 
@@ -441,9 +441,9 @@ private:
     }
 
     void renderLogWindow() {
-        ImGui::Begin("📋 Log Messages", &showLogWindow);
+        ImGui::Begin(" Log Messages", &showLogWindow);
 
-        if (ImGui::Button("🗑️ Clear Log")) {
+        if (ImGui::Button(" Clear Log")) {
             logMessages.clear();
         }
         ImGui::SameLine();
@@ -457,15 +457,15 @@ private:
         for (const auto& message : logMessages) {
             // Color code messages based on content
             ImVec4 color = ImVec4(1.0f, 1.0f, 1.0f, 1.0f); // Default white
-            if (message.find("ERROR") != std::string::npos || message.find("❌") != std::string::npos) {
+            if (message.find("ERROR") != std::string::npos || message.find("") != std::string::npos) {
                 color = ImVec4(1.0f, 0.3f, 0.3f, 1.0f); // Red
-            } else if (message.find("WARNING") != std::string::npos || message.find("⚠️") != std::string::npos) {
+            } else if (message.find("WARNING") != std::string::npos || message.find("") != std::string::npos) {
                 color = ImVec4(1.0f, 1.0f, 0.3f, 1.0f); // Yellow
-            } else if (message.find("✅") != std::string::npos) {
+            } else if (message.find("") != std::string::npos) {
                 color = ImVec4(0.3f, 1.0f, 0.3f, 1.0f); // Green
-            } else if (message.find("🔍") != std::string::npos || message.find("collision") != std::string::npos) {
+            } else if (message.find("") != std::string::npos || message.find("collision") != std::string::npos) {
                 color = ImVec4(0.3f, 0.8f, 1.0f, 1.0f); // Light blue
-            } else if (message.find("🎮") != std::string::npos || message.find("3D") != std::string::npos) {
+            } else if (message.find("") != std::string::npos || message.find("3D") != std::string::npos) {
                 color = ImVec4(1.0f, 0.3f, 1.0f, 1.0f); // Magenta for 3D viewer
             }
 
@@ -482,16 +482,16 @@ private:
     }
 
     void renderStatsWindow() {
-        ImGui::Begin("📊 Statistics", &showStatsWindow, ImGuiWindowFlags_AlwaysAutoResize);
+        ImGui::Begin(" Statistics", &showStatsWindow, ImGuiWindowFlags_AlwaysAutoResize);
 
         // Basic statistics
-        ImGui::Text("📁 Files Received: %d", filesReceived.load());
-        ImGui::Text("🔺 Meshes Extracted: %d", meshesExtracted.load());
-        ImGui::Text("💾 Total Bytes: %s", formatBytes(totalBytesReceived.load()).c_str());
+        ImGui::Text(" Files Received: %d", filesReceived.load());
+        ImGui::Text(" Meshes Extracted: %d", meshesExtracted.load());
+        ImGui::Text(" Total Bytes: %s", formatBytes(totalBytesReceived.load()).c_str());
 
         // Collision statistics
         ImGui::Separator();
-        ImGui::Text("💥 Collision Statistics:");
+        ImGui::Text(" Collision Statistics:");
 
         std::map<int, int> collisionCounts;
         for (const auto& mesh : currentMeshes) {
@@ -507,7 +507,7 @@ private:
         // 3D Viewer statistics
         if (viewer3D && !currentMeshes.empty()) {
             ImGui::Separator();
-            ImGui::Text("🎮 3D Viewer:");
+            ImGui::Text(" 3D Viewer:");
             ImGui::Text("  Ready to display %zu meshes", currentMeshes.size());
             if (show3DViewer) {
                 ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "  Status: Active");
@@ -519,7 +519,7 @@ private:
         // Connection status from middleware
         if (middlewareInitialized.load()) {
             ImGui::Separator();
-            ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "🔌 Middleware Status:");
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), " Middleware Status:");
             const char* statusInfo = GetStatusInfo_C();
             ImGui::TextWrapped("%s", statusInfo);
         }
@@ -528,9 +528,9 @@ private:
     }
 
     void renderFileListWindow() {
-        ImGui::Begin("📁 Received Files", &showFileListWindow);
+        ImGui::Begin(" Received Files", &showFileListWindow);
 
-        if (ImGui::Button("🗑️ Clear File List")) {
+        if (ImGui::Button(" Clear File List")) {
             receivedFiles.clear();
         }
 
@@ -552,20 +552,20 @@ private:
     }
 
     void renderMeshInfoWindow() {
-        ImGui::Begin("🔺 Mesh Information", &showMeshInfoWindow);
+        ImGui::Begin(" Mesh Information", &showMeshInfoWindow);
 
-        if (ImGui::Button("🗑️ Clear Mesh Info")) {
+        if (ImGui::Button(" Clear Mesh Info")) {
             meshInfo.clear();
         }
         ImGui::SameLine();
-        if (ImGui::Button("🔍 Open Collision Debug")) {
+        if (ImGui::Button(" Open Collision Debug")) {
             showCollisionDebugWindow = true;
             if (collisionDebugWindow) {
                 collisionDebugWindow->setVisible(true);
             }
         }
         ImGui::SameLine();
-        if (ImGui::Button("🎮 Open 3D Viewer")) {
+        if (ImGui::Button(" Open 3D Viewer")) {
             show3DViewer = true;
             if (viewer3D) {
                 viewer3D->setVisible(true);
@@ -617,55 +617,55 @@ private:
     //      loadSampleUSDWithCollision, clearAllData, resetStatistics, formatBytes, cleanup]
 
     void initializeMiddleware() {
-        addLog("🚀 Initializing middleware with endpoint: " + std::string(endpointBuffer));
+        addLog(" Initializing middleware with endpoint: " + std::string(endpointBuffer));
 
         int result = InitializeMiddleware_C(endpointBuffer);
         if (result == 1) {
             middlewareInitialized.store(true);
-            addLog("✅ Middleware initialized successfully");
-            addLog("✅ Callbacks registered and active");
+            addLog(" Middleware initialized successfully");
+            addLog(" Callbacks registered and active");
         } else {
             middlewareInitialized.store(false);
-            addLog("❌ Failed to initialize middleware");
+            addLog(" Failed to initialize middleware");
         }
     }
 
     void shutdownMiddleware() {
-        addLog("🛑 Shutting down middleware...");
+        addLog(" Shutting down middleware...");
         if (isReceiving.load()) {
             stopReceiving();
         }
 
         ShutdownMiddleware_C();
         middlewareInitialized.store(false);
-        addLog("✅ Middleware shutdown complete");
+        addLog(" Middleware shutdown complete");
     }
 
     void startReceiving() {
         if (!middlewareInitialized.load()) {
-            addLog("❌ Cannot start receiving: middleware not initialized");
+            addLog(" Cannot start receiving: middleware not initialized");
             return;
         }
 
-        addLog("📡 Starting data reception...");
+        addLog(" Starting data reception...");
         int result = StartReceiving_C();
         if (result == 1) {
             isReceiving.store(true);
-            addLog("✅ Data reception started");
+            addLog(" Data reception started");
         } else {
-            addLog("❌ Failed to start data reception");
+            addLog(" Failed to start data reception");
         }
     }
 
     void stopReceiving() {
-        addLog("⏸️ Stopping data reception...");
+        addLog(" Stopping data reception...");
         StopReceiving_C();
         isReceiving.store(false);
-        addLog("✅ Data reception stopped");
+        addLog(" Data reception stopped");
     }
 
     void testUSDFile() {
-        addLog("🧪 Testing USD file loading...");
+        addLog(" Testing USD file loading...");
 
         std::string testUSD = R"(#usda 1.0
 def Mesh "TestCube"
@@ -689,10 +689,10 @@ def Mesh "TestCube"
         );
 
         if (result == 1 && meshes && meshCount > 0) {
-            addLog("✅ USD test successful: " + std::to_string(meshCount) + " meshes loaded");
+            addLog(" USD test successful: " + std::to_string(meshCount) + " meshes loaded");
 
             for (size_t i = 0; i < meshCount; ++i) {
-                std::string info = "📄 Mesh " + std::to_string(i) + ": " +
+                std::string info = " Mesh " + std::to_string(i) + ": " +
                     std::string(meshes[i].element_name) +
                     " (" + std::to_string(meshes[i].points_count / 3) + " vertices, " +
                     std::to_string(meshes[i].indices_count / 3) + " triangles)";
@@ -703,12 +703,12 @@ def Mesh "TestCube"
             meshesExtracted.fetch_add(meshCount);
             FreeMeshData_C(meshes, meshCount);
         } else {
-            addLog("❌ USD test failed");
+            addLog(" USD test failed");
         }
     }
 
     void testTexture() {
-        addLog("🖼️ Testing texture creation...");
+        addLog(" Testing texture creation...");
 
         // Create a simple test image (2x2 RGBA)
         std::vector<unsigned char> testImage = {
@@ -721,18 +721,18 @@ def Mesh "TestCube"
         CTextureData texture = CreateTextureFromBuffer_C(testImage.data(), testImage.size());
 
         if (texture.data && texture.width > 0 && texture.height > 0) {
-            addLog("✅ Texture test successful: " +
+            addLog(" Texture test successful: " +
                 std::to_string(texture.width) + "x" +
                 std::to_string(texture.height) + " (" +
                 std::to_string(texture.channels) + " channels)");
             FreeTextureData_C(&texture);
         } else {
-            addLog("❌ Texture test failed");
+            addLog(" Texture test failed");
         }
     }
 
     void testCollisionType(int collisionType, const std::string& typeName) {
-        addLog("💥 Testing " + typeName + " collision...");
+        addLog(" Testing " + typeName + " collision...");
 
         std::string testUSD = R"(#usda 1.0
 def Mesh "CollisionTestCube"
@@ -757,14 +757,14 @@ def Mesh "CollisionTestCube"
         );
 
         if (result == 1 && meshes && meshCount > 0) {
-            addLog("✅ " + typeName + " collision test successful: " + std::to_string(meshCount) + " meshes");
+            addLog(" " + typeName + " collision test successful: " + std::to_string(meshCount) + " meshes");
 
             // Clear current meshes and add new ones
             currentMeshes.clear();
             for (size_t i = 0; i < meshCount; ++i) {
                 currentMeshes.push_back(meshes[i]);
 
-                std::string info = "💥 " + typeName + " - Mesh " + std::to_string(i) + ": " +
+                std::string info = " " + typeName + " - Mesh " + std::to_string(i) + ": " +
                     std::string(meshes[i].element_name) +
                     " (Visual: " + std::to_string(meshes[i].points_count / 3) + " vertices, " +
                     std::to_string(meshes[i].indices_count / 3) + " triangles) " +
@@ -775,17 +775,17 @@ def Mesh "CollisionTestCube"
             }
 
             meshesExtracted.fetch_add(meshCount);
-            addLog("🔍 Open Collision Debug Window to analyze collision data");
-            addLog("🎮 Open 3D Viewer to visualize the mesh interactively");
+            addLog(" Open Collision Debug Window to analyze collision data");
+            addLog(" Open 3D Viewer to visualize the mesh interactively");
 
             // Don't free meshes yet - we need them for collision debug display and 3D viewer
         } else {
-            addLog("❌ " + typeName + " collision test failed");
+            addLog(" " + typeName + " collision test failed");
         }
     }
 
     void testAllCollisionTypes() {
-        addLog("🧩 Testing all collision complexity types...");
+        addLog(" Testing all collision complexity types...");
 
         std::string testUSD = R"(#usda 1.0
 def Mesh "CompleteCollisionTest"
@@ -805,7 +805,7 @@ def Mesh "CompleteCollisionTest"
             size_t meshCount = 0;
 
             std::string typeName = GetCollisionComplexityName_C(collisionType);
-            addLog("🔄 Testing " + typeName + "...");
+            addLog(" Testing " + typeName + "...");
 
             int result = LoadUSDBufferWithCollision_C(
                 reinterpret_cast<const unsigned char*>(testUSD.c_str()),
@@ -817,7 +817,7 @@ def Mesh "CompleteCollisionTest"
             );
 
             if (result == 1 && meshes && meshCount > 0) {
-                addLog("✅ " + typeName + " successful: " + std::to_string(meshCount) + " meshes");
+                addLog(" " + typeName + " successful: " + std::to_string(meshCount) + " meshes");
 
                 for (size_t j = 0; j < meshCount; ++j) {
                     // Modify element name to include collision type
@@ -827,24 +827,24 @@ def Mesh "CompleteCollisionTest"
 
                     currentMeshes.push_back(meshes[j]);
 
-                    addLog("   📊 " + typeName + ": " +
+                    addLog("  " + typeName + ": " +
                            std::to_string(meshes[j].collision_vertices_count / 3) + " collision vertices, " +
                            std::to_string(meshes[j].collision_indices_count / 3) + " collision triangles");
                 }
 
                 meshesExtracted.fetch_add(meshCount);
             } else {
-                addLog("❌ " + typeName + " failed");
+                addLog(" " + typeName + " failed");
             }
         }
 
-        addLog("🎉 Complete collision test finished!");
-        addLog("🔍 Open Collision Debug Window to analyze all collision types");
-        addLog("🎮 Open 3D Viewer to see all meshes with different collision types");
+        addLog(" Complete collision test finished!");
+        addLog(" Open Collision Debug Window to analyze all collision types");
+        addLog(" Open 3D Viewer to see all meshes with different collision types");
     }
 
     void loadSampleUSDWithCollision() {
-        addLog("🎯 Loading sample USD with advanced collision...");
+        addLog(" Loading sample USD with advanced collision...");
 
         // More complex test geometry
         std::string complexUSD = R"(#usda 1.0
@@ -885,13 +885,13 @@ def Xform "World"
         );
 
         if (result == 1 && meshes && meshCount > 0) {
-            addLog("✅ Sample USD loaded with convex hull collision: " + std::to_string(meshCount) + " meshes");
+            addLog(" Sample USD loaded with convex hull collision: " + std::to_string(meshCount) + " meshes");
 
             currentMeshes.clear();
             for (size_t i = 0; i < meshCount; ++i) {
                 currentMeshes.push_back(meshes[i]);
 
-                std::string info = "🎯 Sample Mesh " + std::to_string(i) + ": " +
+                std::string info = " Sample Mesh " + std::to_string(i) + ": " +
                     std::string(meshes[i].element_name) +
                     " | Visual: " + std::to_string(meshes[i].points_count / 3) + "v/" +
                     std::to_string(meshes[i].indices_count / 3) + "t" +
@@ -902,10 +902,10 @@ def Xform "World"
             }
 
             meshesExtracted.fetch_add(meshCount);
-            addLog("🔍 Collision Debug Window updated with sample data");
-            addLog("🎮 3D Viewer ready to display sample mesh");
+            addLog(" Collision Debug Window updated with sample data");
+            addLog(" 3D Viewer ready to display sample mesh");
         } else {
-            addLog("❌ Failed to load sample USD");
+            addLog(" Failed to load sample USD");
         }
     }
 
@@ -916,14 +916,14 @@ def Xform "World"
         filesReceived.store(0);
         meshesExtracted.store(0);
         totalBytesReceived.store(0);
-        addLog("🗑️ All data cleared");
+        addLog(" All data cleared");
     }
 
     void resetStatistics() {
         filesReceived.store(0);
         meshesExtracted.store(0);
         totalBytesReceived.store(0);
-        addLog("📊 Statistics reset");
+        addLog(" Statistics reset");
     }
 
     std::string formatBytes(size_t bytes) {
@@ -967,17 +967,17 @@ def Xform "World"
 
 static void fileReceivedCallback(const CFileData* file_data) {
     if (!file_data || !g_app) {
-        std::cout << "❌ ERROR: Null file_data or app instance in callback" << std::endl;
+        std::cout << "ERROR: Null file_data or app instance in callback" << std::endl;
         return;
     }
 
-    std::cout << "🎉 CALLBACK TRIGGERED: File received!" << std::endl;
+    std::cout << "CALLBACK TRIGGERED: File received!" << std::endl;
 
     std::string filename = file_data->filename;
     size_t dataSize = file_data->data_size;
     std::string fileType = file_data->file_type;
 
-    g_app->addLog("📁 File received: " + filename + " (" + std::to_string(dataSize) + " bytes, " + fileType + ")");
+    g_app->addLog(" File received: " + filename + " (" + std::to_string(dataSize) + " bytes, " + fileType + ")");
     g_app->receivedFiles.push_back(filename + " (" + std::to_string(dataSize) + " bytes)");
     g_app->filesReceived.fetch_add(1);
     g_app->totalBytesReceived.fetch_add(dataSize);
@@ -998,14 +998,14 @@ static void fileReceivedCallback(const CFileData* file_data) {
         );
 
         if (result == 1 && meshes && meshCount > 0) {
-            g_app->addLog("✅ USD processed with collision: " + std::to_string(meshCount) + " meshes extracted");
+            g_app->addLog(" USD processed with collision: " + std::to_string(meshCount) + " meshes extracted");
 
             // Update current meshes for collision debug and 3D viewer
             g_app->currentMeshes.clear();
             for (size_t i = 0; i < meshCount; ++i) {
                 g_app->currentMeshes.push_back(meshes[i]);
 
-                std::string info = "📡 Received Mesh: " + std::string(meshes[i].element_name) +
+                std::string info = " Received Mesh: " + std::string(meshes[i].element_name) +
                     " (Visual: " + std::to_string(meshes[i].points_count / 3) + " vertices, " +
                     std::to_string(meshes[i].indices_count / 3) + " triangles)" +
                     " (Collision: " + std::to_string(meshes[i].collision_vertices_count / 3) + " vertices, " +
@@ -1014,8 +1014,8 @@ static void fileReceivedCallback(const CFileData* file_data) {
             }
 
             g_app->meshesExtracted.fetch_add(meshCount);
-            g_app->addLog("🔍 Collision data available in debug window");
-            g_app->addLog("🎮 3D visualization ready");
+            g_app->addLog(" Collision data available in debug window");
+            g_app->addLog(" 3D visualization ready");
 
             // Don't free meshes immediately - keep for collision debug and 3D viewer
         }
@@ -1024,12 +1024,12 @@ static void fileReceivedCallback(const CFileData* file_data) {
 
 static void messageReceivedCallback(const char* message) {
     if (!message || !g_app) {
-        std::cout << "❌ ERROR: Null message or app instance in callback" << std::endl;
+        std::cout << "ERROR: Null message or app instance in callback" << std::endl;
         return;
     }
 
-    std::cout << "🎉 CALLBACK TRIGGERED: Message received!" << std::endl;
-    g_app->addLog("💬 Message received: " + std::string(message));
+    std::cout << "CALLBACK TRIGGERED: Message received!" << std::endl;
+    g_app->addLog(" Message received: " + std::string(message));
 }
 
 // ============================================================================
@@ -1041,14 +1041,14 @@ int main() {
     g_app = &app; // Set global instance BEFORE initialize
 
     if (!app.initialize()) {
-        std::cerr << "❌ Failed to initialize application" << std::endl;
+        std::cerr << "Failed to initialize application" << std::endl;
         return -1;
     }
 
-    std::cout << "🚀 ANARI-USD Middleware Test Application Started with Collision Debug & 3D Viewer Support" << std::endl;
-    std::cout << "🔍 Collision Debug Window provides detailed mesh and collision analysis" << std::endl;
-    std::cout << "🎮 3D Viewer provides interactive mesh visualization with collision overlay" << std::endl;
-    std::cout << "💡 Use the GUI to test middleware functionality and collision generation" << std::endl;
+    std::cout << "ANARI-USD Middleware Test Application Started with Collision Debug & 3D Viewer Support" << std::endl;
+    std::cout << "Collision Debug Window provides detailed mesh and collision analysis" << std::endl;
+    std::cout << "3D Viewer provides interactive mesh visualization with collision overlay" << std::endl;
+    std::cout << "Use the GUI to test middleware functionality and collision generation" << std::endl;
 
     app.run();
 

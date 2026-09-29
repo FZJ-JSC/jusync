@@ -57,7 +57,7 @@ typedef struct {
 } CFileData;
 
 /**
- * Enhanced mesh data structure for C interface with collision support
+ * Mesh data for the C interface, with optional collision.
  * Contains all geometric data for a single mesh primitive
  * Compatible with Unreal Engine RealtimeMeshComponent and Physics System
  *
@@ -544,7 +544,6 @@ ANARI_USD_MIDDLEWARE_C_API void FreeUSDFullLayouts_C(
 
 /**
  * Load USD data from memory buffer with collision generation
- * Enhanced version of LoadUSDBuffer_C with collision support
  *
  * Collision Generation Process:
  * 1. Extract visual mesh data (same as legacy function)
@@ -573,7 +572,6 @@ ANARI_USD_MIDDLEWARE_C_API int LoadUSDBufferWithCollision_C(const unsigned char*
 
 /**
  * Load USD data from disk with collision generation
- * Enhanced version of LoadUSDFromDisk_C with collision support
  *
  * @param filepath Path to USD file on disk
  * @param collision_complexity Collision complexity level (ECollisionComplexity_C)
@@ -1410,6 +1408,20 @@ ANARI_USD_MIDDLEWARE_C_API void FreePointCloudData_C(CPointCloudData* clouds, si
  * @param gradient_rgba Previously returned gradient texture data
  */
 ANARI_USD_MIDDLEWARE_C_API void FreeCachedGradientTexture_C(unsigned char* gradient_rgba);
+
+/**
+ * Export the client-side benchmark report as a JSON file.
+ *
+ * The report contains receive byte counts, request/file counters (raw and
+ * post-dedup), and connect->first/last-byte timing. It is designed to be
+ * cross-checked against the cluster-side ANARI-USD benchmark_rank_*.json
+ * reports (cluster "serving.bytes" should match "total.bytes_received"
+ * for the same run, modulo the rank-0 local relay).
+ *
+ * @param json_path Output path for the JSON report
+ * @return 1 on success, 0 on failure
+ */
+ANARI_USD_MIDDLEWARE_C_API int ExportClientBenchmarkReport_C(const char* json_path);
 
 #ifdef __cplusplus
 }

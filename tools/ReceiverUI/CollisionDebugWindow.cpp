@@ -17,7 +17,7 @@ CollisionDebugWindow::CollisionDebugWindow() {
 void CollisionDebugWindow::render(const std::vector<CMeshData>& meshes) {
     if (!isVisible) return;
 
-    ImGui::Begin("🔍 Collision Debug Viewer", &isVisible, ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::Begin(" Collision Debug Viewer", &isVisible, ImGuiWindowFlags_AlwaysAutoResize);
 
     renderOverviewStats(meshes);
     ImGui::Separator();
@@ -36,7 +36,7 @@ void CollisionDebugWindow::render(const std::vector<CMeshData>& meshes) {
 }
 
 void CollisionDebugWindow::renderOverviewStats(const std::vector<CMeshData>& meshes) {
-    ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "📊 Collision Overview");
+    ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), " Collision Overview");
 
     // Count collision types
     std::map<int, int> collisionCounts;
@@ -49,9 +49,9 @@ void CollisionDebugWindow::renderOverviewStats(const std::vector<CMeshData>& mes
         totalCollisionTriangles += mesh.collision_indices_count / 3;
     }
 
-    ImGui::Text("📁 Total Meshes: %zu", meshes.size());
-    ImGui::Text("🔺 Total Collision Vertices: %d", totalCollisionVertices);
-    ImGui::Text("📐 Total Collision Triangles: %d", totalCollisionTriangles);
+    ImGui::Text(" Total Meshes: %zu", meshes.size());
+    ImGui::Text(" Total Collision Vertices: %d", totalCollisionVertices);
+    ImGui::Text(" Total Collision Triangles: %d", totalCollisionTriangles);
 
     ImGui::Spacing();
     ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Collision Type Distribution:");
@@ -62,7 +62,7 @@ void CollisionDebugWindow::renderOverviewStats(const std::vector<CMeshData>& mes
 }
 
 void CollisionDebugWindow::renderDisplayControls() {
-    ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "🎨 Display Controls");
+    ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), " Display Controls");
 
     ImGui::Checkbox("Show Collision Meshes", &showCollisionMeshes);
     ImGui::SameLine();
@@ -74,13 +74,13 @@ void CollisionDebugWindow::renderDisplayControls() {
 
     ImGui::Checkbox("Colorize by Complexity", &colorizeByComplexity);
 
-    if (ImGui::Button("🔄 Reset View")) {
+    if (ImGui::Button(" Reset View")) {
         selectedMeshIndex = -1;
     }
 }
 
 void CollisionDebugWindow::renderMeshList(const std::vector<CMeshData>& meshes) {
-    ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "📋 Mesh List");
+    ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), " Mesh List");
 
     ImGui::BeginChild("MeshScrolling", ImVec2(0, 200), true);
 
@@ -112,52 +112,52 @@ void CollisionDebugWindow::renderMeshList(const std::vector<CMeshData>& meshes) 
 }
 
 void CollisionDebugWindow::renderSelectedMeshDetails(const CMeshData& mesh) {
-    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "🔍 Selected Mesh Details");
+    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), " Selected Mesh Details");
 
-    ImGui::Text("📛 Name: %s", mesh.element_name);
-    ImGui::Text("🏷️  Type: %s", mesh.type_name);
+    ImGui::Text(" Name: %s", mesh.element_name);
+    ImGui::Text("  Type: %s", mesh.type_name);
 
     ImGui::Spacing();
 
     // Visual mesh info
-    ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "👁️  Visual Mesh:");
-    ImGui::Text("   Vertices: %zu", mesh.points_count / 3);
-    ImGui::Text("   Triangles: %zu", mesh.indices_count / 3);
-    ImGui::Text("   Normals: %zu", mesh.normals_count / 3);
-    ImGui::Text("   UVs: %zu", mesh.uvs_count / 2);
-    ImGui::Text("   Colors: %zu", mesh.vertex_colors_count / 4);
+    ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "  Visual Mesh:");
+    ImGui::Text(" Vertices: %zu", mesh.points_count / 3);
+    ImGui::Text(" Triangles: %zu", mesh.indices_count / 3);
+    ImGui::Text(" Normals: %zu", mesh.normals_count / 3);
+    ImGui::Text(" UVs: %zu", mesh.uvs_count / 2);
+    ImGui::Text(" Colors: %zu", mesh.vertex_colors_count / 4);
 
     ImGui::Spacing();
 
     // Collision info
     ImVec4 collisionColor = getCollisionTypeColor(mesh.collision_type);
-    ImGui::TextColored(collisionColor, "💥 Collision Data:");
-    ImGui::Text("   Type: %s (%d)", getCollisionTypeName(mesh.collision_type).c_str(), mesh.collision_type);
+    ImGui::TextColored(collisionColor, " Collision Data:");
+    ImGui::Text(" Type: %s (%d)", getCollisionTypeName(mesh.collision_type).c_str(), mesh.collision_type);
 
     if (mesh.collision_type != 0) { // Not COLLISION_NONE
-        ImGui::Text("   Collision Vertices: %zu", mesh.collision_vertices_count / 3);
-        ImGui::Text("   Collision Triangles: %zu", mesh.collision_indices_count / 3);
+        ImGui::Text(" Collision Vertices: %zu", mesh.collision_vertices_count / 3);
+        ImGui::Text(" Collision Triangles: %zu", mesh.collision_indices_count / 3);
 
         // Bounding box info
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "📦 Bounding Box:");
-        ImGui::Text("   Min: (%.3f, %.3f, %.3f)",
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), " Bounding Box:");
+        ImGui::Text(" Min: (%.3f, %.3f, %.3f)",
                    mesh.bounding_box_min[0], mesh.bounding_box_min[1], mesh.bounding_box_min[2]);
-        ImGui::Text("   Max: (%.3f, %.3f, %.3f)",
+        ImGui::Text(" Max: (%.3f, %.3f, %.3f)",
                    mesh.bounding_box_max[0], mesh.bounding_box_max[1], mesh.bounding_box_max[2]);
 
         // Calculate bounding box dimensions
         float width = mesh.bounding_box_max[0] - mesh.bounding_box_min[0];
         float height = mesh.bounding_box_max[1] - mesh.bounding_box_min[1];
         float depth = mesh.bounding_box_max[2] - mesh.bounding_box_min[2];
-        ImGui::Text("   Dimensions: %.3f × %.3f × %.3f", width, height, depth);
+        ImGui::Text(" Dimensions: %.3f × %.3f × %.3f", width, height, depth);
 
         // Bounding sphere info
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 1.0f, 1.0f), "🔮 Bounding Sphere:");
-        ImGui::Text("   Center: (%.3f, %.3f, %.3f)",
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 1.0f, 1.0f), " Bounding Sphere:");
+        ImGui::Text(" Center: (%.3f, %.3f, %.3f)",
                    mesh.sphere_center[0], mesh.sphere_center[1], mesh.sphere_center[2]);
-        ImGui::Text("   Radius: %.3f", mesh.sphere_radius);
+        ImGui::Text(" Radius: %.3f", mesh.sphere_radius);
 
         // Complexity analysis
         ImGui::Spacing();
@@ -167,32 +167,32 @@ void CollisionDebugWindow::renderSelectedMeshDetails(const CMeshData& mesh) {
         ImGui::Spacing();
         renderMemoryUsage(mesh);
     } else {
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "   No collision data generated");
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), " No collision data generated");
     }
 }
 
 void CollisionDebugWindow::renderComplexityAnalysis(const CMeshData& mesh) {
-    ImGui::TextColored(ImVec4(1.0f, 0.0f, 1.0f, 1.0f), "⚡ Complexity Analysis:");
+    ImGui::TextColored(ImVec4(1.0f, 0.0f, 1.0f, 1.0f), " Complexity Analysis:");
 
     if (mesh.points_count > 0 && mesh.collision_vertices_count > 0) {
         float reductionRatio = static_cast<float>(mesh.collision_vertices_count) /
                               static_cast<float>(mesh.points_count);
-        ImGui::Text("   Vertex Reduction: %.1f%% of original", reductionRatio * 100.0f);
+        ImGui::Text(" Vertex Reduction: %.1f%% of original", reductionRatio * 100.0f);
     }
 
     if (mesh.indices_count > 0 && mesh.collision_indices_count > 0) {
         float triangleReduction = static_cast<float>(mesh.collision_indices_count) /
                                  static_cast<float>(mesh.indices_count);
-        ImGui::Text("   Triangle Reduction: %.1f%% of original", triangleReduction * 100.0f);
+        ImGui::Text(" Triangle Reduction: %.1f%% of original", triangleReduction * 100.0f);
     }
 
     // Performance estimate
     std::string performanceLevel = getPerformanceEstimate(mesh.collision_type, mesh.collision_indices_count / 3);
-    ImGui::Text("   Performance: %s", performanceLevel.c_str());
+    ImGui::Text(" Performance: %s", performanceLevel.c_str());
 }
 
 void CollisionDebugWindow::renderMemoryUsage(const CMeshData& mesh) {
-    ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "💾 Memory Usage:");
+    ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), " Memory Usage:");
 
     size_t visualMemory = (mesh.points_count + mesh.normals_count + mesh.uvs_count) * sizeof(float) +
                           mesh.vertex_colors_count * sizeof(float) +
@@ -203,9 +203,9 @@ void CollisionDebugWindow::renderMemoryUsage(const CMeshData& mesh) {
 
     size_t totalMemory = visualMemory + collisionMemory;
 
-    ImGui::Text("   Visual Mesh: %s", formatBytes(visualMemory).c_str());
-    ImGui::Text("   Collision Mesh: %s", formatBytes(collisionMemory).c_str());
-    ImGui::Text("   Total: %s", formatBytes(totalMemory).c_str());
+    ImGui::Text(" Visual Mesh: %s", formatBytes(visualMemory).c_str());
+    ImGui::Text(" Collision Mesh: %s", formatBytes(collisionMemory).c_str());
+    ImGui::Text(" Total: %s", formatBytes(totalMemory).c_str());
 }
 
 std::string CollisionDebugWindow::getCollisionTypeName(int type) {
@@ -234,20 +234,20 @@ ImVec4 CollisionDebugWindow::getCollisionTypeColor(int type) {
 
 std::string CollisionDebugWindow::getPerformanceEstimate(int collisionType, size_t triangleCount) {
     switch (collisionType) {
-        case 0: return "⭐⭐⭐⭐⭐ Excellent (No collision)";
-        case 1: return "⭐⭐⭐⭐⭐ Excellent (Primitive)";
+        case 0: return " Excellent (No collision)";
+        case 1: return " Excellent (Primitive)";
         case 2:
-            if (triangleCount < 100) return "⭐⭐⭐⭐ Very Good";
-            else return "⭐⭐⭐ Good";
+            if (triangleCount < 100) return " Very Good";
+            else return " Good";
         case 3:
-            if (triangleCount < 1000) return "⭐⭐⭐ Good";
-            else if (triangleCount < 10000) return "⭐⭐ Fair";
-            else return "⭐ Poor";
+            if (triangleCount < 1000) return " Good";
+            else if (triangleCount < 10000) return " Fair";
+            else return " Poor";
         case 4:
-            if (triangleCount < 500) return "⭐⭐⭐⭐ Very Good";
-            else return "⭐⭐⭐ Good";
-        case 5: return "⭐⭐ Fair (Complex decomp)";
-        default: return "❓ Unknown";
+            if (triangleCount < 500) return " Very Good";
+            else return " Good";
+        case 5: return " Fair (Complex decomp)";
+        default: return " Unknown";
     }
 }
 

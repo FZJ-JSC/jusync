@@ -100,11 +100,11 @@ extern "C" {
  */
 int InitializeMiddleware_C(const char* endpoint) {
     try {
-        // Log DLL version info for debugging
+        // Log GPU acceleration build status.
         #ifdef ENABLE_CUDA_ACCELERATION
-        MIDDLEWARE_LOG_INFO("🔥🔥🔥 GPU ACCELERATION ENABLED IN DLL 🔥🔥🔥");
+        MIDDLEWARE_LOG_INFO("GPU acceleration enabled in DLL");
         #else
-        MIDDLEWARE_LOG_INFO("⚠️⚠️⚠️ GPU ACCELERATION NOT COMPILED IN DLL ⚠️⚠️⚠️");
+        MIDDLEWARE_LOG_INFO("GPU acceleration not compiled into DLL");
         #endif
         
         // Create middleware instance if not already created
@@ -169,8 +169,7 @@ int InitializeMiddleware_C(const char* endpoint) {
                     // Call the callback
                     file_callback(&c_data);
 
-                    // ✅ CRITICAL FIX: Clean up allocated memory after callback
-                    // The callback should have copied any data it needs to keep
+                    // Free the per-callback buffer; the callback must copy what it keeps.
                     if (c_data.data) {
                         delete[] c_data.data;
                         c_data.data = nullptr;
@@ -207,7 +206,6 @@ void ShutdownMiddleware_C() {
         g_middleware.reset();
     }
 
-    // ✅ NEW: Cleanup collision processor
     if (g_collision_processor) {
         g_collision_processor.reset();
     }
@@ -1252,7 +1250,7 @@ static void ConvertMeshDataToCFormat(const anari_usd_middleware::UsdProcessor::M
 
     // Points: src.points is std::vector<glm::vec3> -> convert to flat float array
     size_t numVertices = src.points.size();
-    dst.points_count = numVertices * 3;  // ✅ FIXED: Each vec3 = 3 floats
+    dst.points_count = numVertices * 3;  // each vec3 = 3 floats
     if (dst.points_count > 0) {
         dst.points = new float[dst.points_count];
         for (size_t i = 0; i < numVertices; ++i) {
@@ -1271,7 +1269,7 @@ static void ConvertMeshDataToCFormat(const anari_usd_middleware::UsdProcessor::M
 
     // Normals: src.normals is std::vector<glm::vec3> -> convert to flat float array
     size_t numNormals = src.normals.size();
-    dst.normals_count = numNormals * 3;  // ✅ FIXED: Each vec3 = 3 floats
+    dst.normals_count = numNormals * 3;  // each vec3 = 3 floats
     if (dst.normals_count > 0) {
         dst.normals = new float[dst.normals_count];
         for (size_t i = 0; i < numNormals; ++i) {
@@ -1283,7 +1281,7 @@ static void ConvertMeshDataToCFormat(const anari_usd_middleware::UsdProcessor::M
 
     // UVs: src.uvs is std::vector<glm::vec2> -> convert to flat float array
     size_t numUVs = src.uvs.size();
-    dst.uvs_count = numUVs * 2;  // ✅ FIXED: Each vec2 = 2 floats
+    dst.uvs_count = numUVs * 2;  // each vec2 = 2 floats
     if (dst.uvs_count > 0) {
         dst.uvs = new float[dst.uvs_count];
         for (size_t i = 0; i < numUVs; ++i) {
@@ -1548,11 +1546,6 @@ int LoadUSDBufferWithCollision_C(const unsigned char* buffer,
                         dst.collision_indices = new unsigned int[dst.collision_indices_count];
                         std::memcpy(dst.collision_indices, collisionData.indices.data(),
                                    dst.collision_indices_count * sizeof(unsigned int));
-
-                        // ✅ DEBUG PRINT
-                        std::cout << "🔍 COLLISION COPY: vertices=" << dst.collision_vertices_count
-                                  << " indices=" << dst.collision_indices_count
-                                  << " ptr=" << (void*)dst.collision_vertices << std::endl;
                     }
 
                     // Copy simple collision data
@@ -2025,7 +2018,6 @@ void FreeMeshData_C(CMeshData* meshes, size_t count) {
         if (meshes[i].uvs) delete[] meshes[i].uvs;
         if (meshes[i].vertex_colors) delete[] meshes[i].vertex_colors;
 
-        // ✅ NEW: Free collision data with null checks
         if (meshes[i].collision_vertices) delete[] meshes[i].collision_vertices;
         if (meshes[i].collision_indices) delete[] meshes[i].collision_indices;
     }
@@ -2365,35 +2357,19 @@ void RequestFilesParallelAsync_C(
     ParallelDownloadCompleteCallback_C completion_callback,
     ParallelDownloadErrorCallback_C error_callback,
     int timeout_ms) {
-    
-    // NUCLEAR DEBUG: Force immediate logging that CANNOT be missed
-    // Use OutputDebugString for Windows - appears in DebugView
+    // Identify which DLL export is running (useful when multiple builds coexist).
     #ifdef _WIN32
-    OutputDebugStringA("=== JUSYNC DEBUG: RequestFilesParallelAsync_C ENTER ===\n");
-    
     HMODULE hModule = GetModuleHandle(TEXT("anari_usd_middleware.dll"));
     if (hModule) {
         char path[MAX_PATH];
         GetModuleFileNameA(hModule, path, MAX_PATH);
-        char debugMsg[512];
-        sprintf(debugMsg, "=== JUSYNC DEBUG: DLL LOADED FROM: %s ===\n", path);
-        OutputDebugStringA(debugMsg);
-        MIDDLEWARE_LOG_INFO("=== DLL LOADED FROM: %s ===", path);
+        MIDDLEWARE_LOG_INFO("DLL loaded from: %s", path);
     } else {
-        OutputDebugStringA("=== JUSYNC DEBUG: DLL NOT LOADED ===\n");
-        MIDDLEWARE_LOG_ERROR("=== DLL NOT LOADED ===");
+        MIDDLEWARE_LOG_ERROR("anari_usd_middleware.dll module handle not found");
     }
     #endif
-    
-    // Force log to middleware log AND debug output
-    char countMsg[256];
-    sprintf(countMsg, "=== JUSYNC DEBUG: Filename count: %zu ===\n", filename_count);
-    #ifdef _WIN32
-    OutputDebugStringA(countMsg);
-    #endif
-    
-    MIDDLEWARE_LOG_INFO("=== RequestFilesParallelAsync_C ENTER ===");
-    MIDDLEWARE_LOG_INFO("Filename count: %zu", filename_count);
+
+    MIDDLEWARE_LOG_DEBUG("RequestFilesParallelAsync_C: %zu filenames", filename_count);
     
     if (!g_middleware) {
         MIDDLEWARE_LOG_ERROR("g_middleware is NULL!");
@@ -2437,6 +2413,13 @@ void RequestFilesParallelAsync_C(
         MIDDLEWARE_LOG_INFO("Parallel download deduplication: %zu → %zu files (removed %zu duplicates)",
             filename_count, filename_vec.size(), filename_count - filename_vec.size());
     }
+
+    // Benchmark: record raw (pre-dedup) vs unique (post-dedup) request counts
+    if (g_middleware->getClient()) {
+        g_middleware->getClient()->benchmarkNoteRequestBatch(
+            static_cast<uint64_t>(filename_count),
+            static_cast<uint64_t>(filename_vec.size()));
+    }
     
     // Convert C callbacks to C++ callbacks
     std::function<void(const std::string&, const std::vector<uint8_t>&)> cpp_file_callback = nullptr;
@@ -2460,7 +2443,7 @@ void RequestFilesParallelAsync_C(
         };
     }
     
-    // Call the C++ async function with extreme crash protection
+    // Call the C++ async function. The C boundary must not let C++ exceptions escape.
     try {
         if (!g_middleware) {
             MIDDLEWARE_LOG_ERROR("RequestFilesParallelAsync_C: g_middleware is NULL!");
@@ -2469,13 +2452,9 @@ void RequestFilesParallelAsync_C(
             }
             return;
         }
-        
-        MIDDLEWARE_LOG_INFO("RequestFilesParallelAsync_C: Calling requestFilesParallelAsync with %zu files", filename_count);
-        
-        #ifdef _WIN32
-        OutputDebugStringA("[ANARI] RequestFilesParallelAsync_C: About to call C++ API\n");
-        #endif
-        
+
+        MIDDLEWARE_LOG_DEBUG("RequestFilesParallelAsync_C: %zu files requested", filename_count);
+
         g_middleware->requestFilesParallelAsync(
             filename_vec,
             target_ranks_vec,
@@ -2483,12 +2462,6 @@ void RequestFilesParallelAsync_C(
             cpp_file_callback,
             cpp_completion_callback,
             cpp_error_callback);
-            
-        MIDDLEWARE_LOG_INFO("RequestFilesParallelAsync_C: Successfully called requestFilesParallelAsync");
-        
-        #ifdef _WIN32
-        OutputDebugStringA("[ANARI] RequestFilesParallelAsync_C: C++ API call completed\n");
-        #endif
     } catch (const std::exception& e) {
         MIDDLEWARE_LOG_ERROR("RequestFilesParallelAsync_C: Exception: %s", e.what());
         if (error_callback) {
@@ -2508,13 +2481,8 @@ void RequestFilesParallelAsync_C(
  * Returns: 1 if working, 0 if broken
  */
 ANARI_USD_MIDDLEWARE_C_API int VerifyParallelDownloadDLL_C() {
-    #ifdef _WIN32
-    OutputDebugStringA("=== JUSYNC DEBUG: VerifyParallelDownloadDLL_C called ===\n");
-    #endif
-    
-    MIDDLEWARE_LOG_INFO("=== VerifyParallelDownloadDLL_C ===");
-    
-    // Check if middleware is initialized
+    MIDDLEWARE_LOG_DEBUG("VerifyParallelDownloadDLL_C");
+
     if (!g_middleware) {
         MIDDLEWARE_LOG_ERROR("g_middleware is NULL");
         return 0;
@@ -2525,8 +2493,8 @@ ANARI_USD_MIDDLEWARE_C_API int VerifyParallelDownloadDLL_C() {
         MIDDLEWARE_LOG_ERROR("Broker not connected");
         return 0;
     }
-    
-    MIDDLEWARE_LOG_INFO("DLL verification PASSED");
+
+    MIDDLEWARE_LOG_DEBUG("DLL verification passed");
     return 1;
 }
 
@@ -2538,31 +2506,19 @@ ANARI_USD_MIDDLEWARE_C_API int RequestFilesParallelDirect_C(
     ParallelDownloadCompleteCallback_C completion_callback,
     ParallelDownloadErrorCallback_C error_callback,
     int timeout_ms) {
-    
-    #ifdef _WIN32
-    OutputDebugStringA("[ANARI] RequestFilesParallelDirect_C: Entering direct C API\n");
-    #endif
-    
     if (!g_middleware) {
-        #ifdef _WIN32
-        OutputDebugStringA("[ANARI] RequestFilesParallelDirect_C: g_middleware is NULL!\n");
-        #endif
+        MIDDLEWARE_LOG_ERROR("RequestFilesParallelDirect_C: middleware not initialized");
         return 0;
     }
-    
+
     if (!filenames || filename_count == 0) {
-        #ifdef _WIN32
-        OutputDebugStringA("[ANARI] RequestFilesParallelDirect_C: Invalid parameters\n");
-        #endif
+        MIDDLEWARE_LOG_ERROR("RequestFilesParallelDirect_C: invalid parameters");
         return 0;
     }
-    
-    // Get the client from the middleware
+
     auto client = g_middleware->getClient();
     if (!client) {
-        #ifdef _WIN32
-        OutputDebugStringA("[ANARI] RequestFilesParallelDirect_C: Client is NULL!\n");
-        #endif
+        MIDDLEWARE_LOG_ERROR("RequestFilesParallelDirect_C: broker client not available");
         return 0;
     }
     
@@ -2600,14 +2556,7 @@ ANARI_USD_MIDDLEWARE_C_API int RequestFilesParallelDirect_C(
         };
     }
     
-    #ifdef _WIN32
-    char debug_msg[256];
-    snprintf(debug_msg, sizeof(debug_msg), "[ANARI] RequestFilesParallelDirect_C: Calling client->requestFilesParallel with %zu files\n", 
-             filename_count);
-    OutputDebugStringA(debug_msg);
-    #endif
-    
-    // Call the client directly (synchronous within this thread)
+    // Call the client directly (synchronous within this thread).
     try {
         bool success = client->requestFilesParallel(
             filename_vec,
@@ -2616,25 +2565,14 @@ ANARI_USD_MIDDLEWARE_C_API int RequestFilesParallelDirect_C(
             cpp_completion_callback,
             cpp_error_callback,
             timeout_ms);
-        
-        #ifdef _WIN32
-        OutputDebugStringA(success ? 
-            "[ANARI] RequestFilesParallelDirect_C: Success!\n" : 
-            "[ANARI] RequestFilesParallelDirect_C: Failed!\n");
-        #endif
-        
+
+        MIDDLEWARE_LOG_DEBUG("RequestFilesParallelDirect_C: %s", success ? "success" : "failed");
         return success ? 1 : 0;
     } catch (const std::exception& e) {
-        #ifdef _WIN32
-        char error_msg[512];
-        snprintf(error_msg, sizeof(error_msg), "[ANARI] RequestFilesParallelDirect_C: Exception: %s\n", e.what());
-        OutputDebugStringA(error_msg);
-        #endif
+        MIDDLEWARE_LOG_ERROR("RequestFilesParallelDirect_C: exception: %s", e.what());
         return 0;
     } catch (...) {
-        #ifdef _WIN32
-        OutputDebugStringA("[ANARI] RequestFilesParallelDirect_C: Unknown exception\n");
-        #endif
+        MIDDLEWARE_LOG_ERROR("RequestFilesParallelDirect_C: unknown exception");
         return 0;
     }
 }
@@ -2984,6 +2922,40 @@ void FreePointCloudData_C(CPointCloudData* clouds, size_t count) {
 void FreeCachedGradientTexture_C(unsigned char* gradient_rgba) {
     if (!gradient_rgba) return;
     delete[] gradient_rgba;
+}
+
+/**
+ * Export the client-side benchmark report as a JSON file.
+ */
+int ExportClientBenchmarkReport_C(const char* json_path) {
+    if (!g_middleware) {
+        MIDDLEWARE_LOG_ERROR("ExportClientBenchmarkReport_C: middleware not initialized");
+        return 0;
+    }
+    if (!json_path || json_path[0] == '\0') {
+        MIDDLEWARE_LOG_ERROR("ExportClientBenchmarkReport_C: invalid path");
+        return 0;
+    }
+
+    try {
+        std::string json = g_middleware->getBenchmarkReportJson();
+        std::ofstream out(json_path);
+        if (!out) {
+            MIDDLEWARE_LOG_ERROR("ExportClientBenchmarkReport_C: cannot open %s for writing", json_path);
+            return 0;
+        }
+        out << json << std::endl;
+        out.flush();
+        if (!out) {
+            MIDDLEWARE_LOG_ERROR("ExportClientBenchmarkReport_C: write failed for %s", json_path);
+            return 0;
+        }
+        MIDDLEWARE_LOG_INFO("Client benchmark report written to: %s", json_path);
+        return 1;
+    } catch (const std::exception& e) {
+        MIDDLEWARE_LOG_ERROR("ExportClientBenchmarkReport_C: exception: %s", e.what());
+        return 0;
+    }
 }
 
 } // extern "C"

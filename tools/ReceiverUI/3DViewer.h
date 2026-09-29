@@ -59,7 +59,7 @@ struct MeshObject {
     glm::vec3 sphereCenter;
     float sphereRadius;
 
-    // ✅ USD Geometry Features
+    //  USD Geometry Features
     std::string subdivisionScheme = "none";
     bool doubleSided = false;
     std::vector<unsigned int> faceVertexCounts;
@@ -104,7 +104,7 @@ public:
     inline void setShowVisual(bool enabled) { showVisualMesh = enabled; }
     inline void setCollisionAlpha(float alpha) { collisionAlpha = alpha; }
 
-    // ✅ NEW: Subdivision control
+    //  NEW: Subdivision control
     inline void setSubdivisionLevel(int level) { subdivisionLevel = level; }
     inline int getSubdivisionLevel() const { return subdivisionLevel; }
 
@@ -113,7 +113,7 @@ private:
     void renderSingleMesh(const MeshObject& mesh, GLuint shader, float alpha = 1.0f);
     glm::vec3 getCollisionTypeColor(int collisionType) const;
 
-    // ✅ NEW: Subdivision functions
+    //  NEW: Subdivision functions
     void subdivideMesh(std::vector<float>& vertices, std::vector<unsigned int>& indices,
                       const std::vector<unsigned int>& faceVertexCounts, int levels);
     void subdivideCatmullClark(std::vector<glm::vec3>& vertices, std::vector<unsigned int>& indices,
@@ -132,7 +132,7 @@ private:
     bool showCollisionMesh;
     bool showVisualMesh;
     float collisionAlpha;
-    int subdivisionLevel; // ✅ NEW
+    int subdivisionLevel; //  NEW
 };
 
 // ============================================================================
@@ -179,7 +179,7 @@ private:
     bool showCollisionMesh;
     bool showVisualMesh;
     float collisionAlpha;
-    int subdivisionLevel; // ✅ NEW
+    int subdivisionLevel; //  NEW
 
     int selectedMeshIndex;
     glm::vec3 lightPosition;

@@ -41,16 +41,13 @@ namespace anari_usd_middleware {
 struct MeshData;
 
 /**
- * Thread-safe USD processing engine with comprehensive error handling and memory safety
- * features for Unreal Engine 5.5 compatibility. Handles USD file conversion, mesh extraction,
- * texture processing, and reference resolution with robust validation.
+ * Thread-safe USD processing engine (per-method locking).
+ * Handles USD file conversion, mesh extraction, texture processing,
+ * and reference resolution.
  */
 class ANARI_USD_MIDDLEWARE_API UsdProcessor {
 public:
-    /**
-     * Enhanced mesh data structure with validation and bounds checking
-     * ENHANCED: Now includes USD geometry features (subdivision, multi-UV, etc.)
-     */
+    /** Extracted mesh data, including USD geometry features (subdivision, multi-UV, etc.). */
     struct MeshData {
         std::string elementName;        ///< Name of the USD element (validated)
         std::string typeName;           ///< Type of the USD element (validated)
@@ -111,9 +108,7 @@ public:
         MeshData toMiddlewareMeshData() const;
     };
 
-    /**
-     * Enhanced texture data structure with comprehensive validation
-     */
+    /** Decoded texture data. */
     struct TextureData {
         int width = 0;                  ///< Width in pixels (validated > 0)
         int height = 0;                 ///< Height in pixels (validated > 0)
@@ -270,13 +265,13 @@ public:
                                        const std::string& expectedFormat = "");
 
     /**
-     * Load USD data from buffer with comprehensive error handling
-     * @param buffer Raw USD data (validated)
-     * @param fileName Original filename for format detection (validated)
+     * Load USD data from a buffer.
+     * @param buffer Raw USD data
+     * @param fileName Original filename (used for format detection)
      * @param outMeshData Output vector for extracted mesh data (cleared first)
      * @param outPointCloudData Optional: output vector for extracted point cloud data
      * @param progressCallback Optional progress callback
-     * @return True if loading was successful, false otherwise
+     * @return true on success
      */
     bool LoadUSDBuffer(const std::vector<uint8_t>& buffer,
                        const std::string& fileName,
@@ -510,7 +505,7 @@ private:
      * @param points Vertex positions
      * @param indices Triangle indices
      * @param outNormals Output normal vectors
-     * @return True if normals calculated successfully, false otherwise
+     * @return true on success
      */
     bool calculateMeshNormals(const std::vector<glm::vec3>& points,
                              const std::vector<uint32_t>& indices,

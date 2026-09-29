@@ -35,7 +35,6 @@ CollisionProcessor::~CollisionProcessor() {
         static_cast<unsigned long long>(generationErrors_.load()));
 }
 
-// ✅ MISSING IMPLEMENTATIONS - Add these parameter setter methods
 void CollisionProcessor::setSimplificationRatio(float ratio) {
     if (ratio > 0.0f && ratio <= 1.0f) {
         simplificationRatio_ = ratio;
@@ -200,7 +199,7 @@ bool CollisionProcessor::generateCollisionForMeshes(std::vector<MeshDataWithColl
         }
     }
 
-    MIDDLEWARE_LOG_INFO("Collision generation complete: %zu/%zu meshes processed successfully",
+    MIDDLEWARE_LOG_INFO("Collision generation complete: %zu/%zu meshes",
         processedCount, meshes.size());
     return allSuccessful;
 }
@@ -338,8 +337,7 @@ bool CollisionProcessor::generateComplexCollision(const std::vector<float>& vert
     outCollisionData.vertices = vertices;
     outCollisionData.indices = indices;
 
-    // ✅ FIX: Calculate bounding box WITHOUT overwriting vertices/indices
-    // Just calculate the min/max bounds and sphere
+    // Compute bounds and sphere in place; don't overwrite vertices/indices.
     if (vertices.size() >= 9) {
         glm::vec3 minBounds(vertices[0], vertices[1], vertices[2]);
         glm::vec3 maxBounds = minBounds;

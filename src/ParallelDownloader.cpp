@@ -20,7 +20,7 @@ ParallelDownloader::ParallelDownloader(std::shared_ptr<AnariUsdClient> client)
 ParallelDownloader::~ParallelDownloader() {
     cancelAll();
     stopPollThread();
-    // ✅ FIX: Join streaming thread for safe shutdown
+    // Join the streaming thread for a clean shutdown.
     if (streamingThread_.joinable()) {
         streamingThread_.join();
     }
@@ -59,8 +59,7 @@ ParallelDownloader::downloadFiles(const std::vector<std::string>& files,
         actualMaxParallel = files.size();
     }
     
-    // Create tasks
-    // ✅ FIX: Use shared_ptr vector instead of raw unique_ptr vector to prevent dangling references
+    // Shared so the executing thread can own the tasks after the caller returns.
     std::shared_ptr<std::vector<std::unique_ptr<DownloadTask>>> tasks = std::make_shared<std::vector<std::unique_ptr<DownloadTask>>>();
     std::vector<std::future<DownloadResult>> futures;
     
@@ -591,7 +590,7 @@ void ParallelDownloader::downloadWithStreaming(const std::vector<std::string>& f
         }
     });
     
-    // ✅ FIX: Track streaming thread for safe shutdown instead of .detach()
+    // Track the streaming thread (no detach) so shutdown can join it.
     streamingThread_ = std::move(streamingThread);
 }
 

@@ -127,7 +127,7 @@ bool GpuContext::initialize() {
     initialized.store(true);
     available.store(true);
 
-    MIDDLEWARE_LOG_INFO("GPU context initialized successfully");
+    MIDDLEWARE_LOG_INFO("GPU context initialized");
     MIDDLEWARE_LOG_INFO("  Device: %s", deviceInfo.deviceName.c_str());
     MIDDLEWARE_LOG_INFO("  Compute Capability: %d.%d", 
                        deviceInfo.computeCapabilityMajor, 

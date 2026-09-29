@@ -90,6 +90,7 @@ bool AnariUsdClient::connect(const char* brokerEndpoint, int timeoutMs) {
             zmqSocket->connect(endpoint);
             this->brokerEndpoint = endpoint;
             MIDDLEWARE_LOG_INFO("Successfully connected to ANARI USD broker: %s", endpoint.c_str());
+            benchmarkMarkConnectStart();
         } catch (const zmq::error_t& e) {
             MIDDLEWARE_LOG_ERROR("Failed to connect to broker %s: %s (errno: %d)",
                                   endpoint.c_str(), e.what(), e.num());
@@ -109,7 +110,7 @@ bool AnariUsdClient::connect(const char* brokerEndpoint, int timeoutMs) {
         dispatcherActive.store(true);
         dispatchThread = std::thread(&AnariUsdClient::dispatcherThread, this);
 
-        MIDDLEWARE_LOG_INFO("AnariUsdClient connected successfully");
+        MIDDLEWARE_LOG_INFO("AnariUsdClient connected");
         return true;
 
     } catch (const zmq::error_t& e) {
@@ -192,7 +193,7 @@ bool AnariUsdClient::configureWindowsSocket() {
         zmqSocket->set(zmq::sockopt::sndbuf, 2097152);  // 2MB send buffer
         zmqSocket->set(zmq::sockopt::rcvbuf, 4194304);  // 4MB receive buffer for burst responses
 
-        MIDDLEWARE_LOG_INFO("Windows ZMQ socket configuration applied successfully");
+        MIDDLEWARE_LOG_INFO("Windows ZMQ socket configuration applied");
         return true;
     } catch (const zmq::error_t& e) {
         MIDDLEWARE_LOG_ERROR("Windows socket configuration failed: %s (errno: %d)", e.what(), e.num());
@@ -213,7 +214,7 @@ bool AnariUsdClient::configureLinuxSocket() {
         zmqSocket->set(zmq::sockopt::sndbuf, 1048576);
         zmqSocket->set(zmq::sockopt::rcvbuf, 1048576);
 
-        MIDDLEWARE_LOG_INFO("Linux ZMQ socket configuration applied successfully");
+        MIDDLEWARE_LOG_INFO("Linux ZMQ socket configuration applied");
         return true;
     } catch (const zmq::error_t& e) {
         MIDDLEWARE_LOG_ERROR("Linux socket configuration failed: %s (errno: %d)", e.what(), e.num());
@@ -273,7 +274,7 @@ bool AnariUsdClient::requestFileList(int32_t targetRank, FileListCallback callba
             return false;
         }
         
-        MIDDLEWARE_LOG_INFO("DEBUG: File list request sent successfully, waiting for response...");
+        MIDDLEWARE_LOG_DEBUG("File list request sent, waiting for response");
 
         // Receive file list response — FILTER BY request_id
         uint32_t myRequestId = request.request_id;
@@ -783,8 +784,8 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
         return false;
     }
 
-    // ✅ FIX: Removed outer requestMutex lock - sendRequest() handles its own locking
-    // Holding lock during blocking recv loop serialized ALL network I/O and caused hangs
+    // No outer lock: sendRequest() locks internally. Holding requestMutex across the
+    // blocking recv loop would serialize all network I/O and cause hangs.
 
     try {
         // Create file request
@@ -859,6 +860,7 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
                     }
 
                     connectionStats.totalBytesReceived.fetch_add(dataSize);
+                    benchmarkNoteReceive();
                     totalSize = chunk->file_size;
                     break;
                 }
@@ -934,8 +936,8 @@ bool AnariUsdClient::requestFrame(int32_t frameNumber, int32_t targetRank,
         return false;
     }
 
-    // ✅ FIX: Removed outer requestMutex lock - sendRequest() handles its own locking
-    // Holding lock during blocking recv loop serialized ALL network I/O and caused hangs
+    // No outer lock: sendRequest() locks internally. Holding requestMutex across the
+    // blocking recv loop would serialize all network I/O and cause hangs.
 
     try {
         // Create frame request
@@ -1023,6 +1025,7 @@ bool AnariUsdClient::requestFrame(int32_t frameNumber, int32_t targetRank,
                                       dataSize, chunk->chunk_offset, chunk->file_size);
                     }
                     connectionStats.totalBytesReceived.fetch_add(dataSize);
+                    benchmarkNoteReceive();
                     break;
                 }
 
@@ -1174,7 +1177,7 @@ bool AnariUsdClient::sendRequest(const void* data, size_t size, uint32_t request
             return false;
         }
         
-        MIDDLEWARE_LOG_DEBUG("DEBUG sendRequest: Empty delimiter sent successfully");
+        MIDDLEWARE_LOG_DEBUG("sendRequest: empty delimiter sent");
         
         // Send binary struct (second/last frame, no SNDMORE flag)
         zmq::message_t msg(size);
@@ -1187,7 +1190,7 @@ bool AnariUsdClient::sendRequest(const void* data, size_t size, uint32_t request
             return false;
         }
 
-        MIDDLEWARE_LOG_DEBUG("DEBUG sendRequest: Request data sent successfully (%zu bytes)", size);
+        MIDDLEWARE_LOG_DEBUG("sendRequest: %zu bytes sent", size);
         connectionStats.totalRequestsSent.fetch_add(1);
         return true;
 
@@ -1208,6 +1211,74 @@ AnariUsdClient::ConnectionStats::Snapshot AnariUsdClient::getConnectionStats() c
 
 void AnariUsdClient::resetConnectionStats() {
     connectionStats.reset();
+}
+
+// ---- Client-side benchmark counters --------------------------------------
+
+void AnariUsdClient::benchmarkMarkConnectStart() {
+    benchmarkState.connectStartSteadyNs.store(benchmarkSteadyNowNs());
+    benchmarkState.connectStartSystemMs.store(benchmarkSystemNowMs());
+}
+
+void AnariUsdClient::benchmarkNoteReceive() {
+    const uint64_t now = benchmarkSteadyNowNs();
+    benchmarkState.chunkMessages.fetch_add(1, std::memory_order_relaxed);
+    // First receive: store-if-empty (benign race, value is identical)
+    uint64_t expected = 0;
+    benchmarkState.firstReceiveSteadyNs.compare_exchange_strong(expected, now);
+    benchmarkState.lastReceiveSteadyNs.store(now);
+}
+
+void AnariUsdClient::benchmarkNoteRequestBatch(uint64_t filesRequested, uint64_t filesUnique) {
+    benchmarkState.filesRequested.fetch_add(filesRequested, std::memory_order_relaxed);
+    benchmarkState.filesUnique.fetch_add(filesUnique, std::memory_order_relaxed);
+}
+
+void AnariUsdClient::benchmarkNoteFileCompleted(bool success) {
+    benchmarkState.filesCompleted.fetch_add(1, std::memory_order_relaxed);
+    if (!success) {
+        benchmarkState.filesFailed.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+std::string AnariUsdClient::buildBenchmarkReportJson() const {
+    const ConnectionStats::Snapshot stats = connectionStats.getSnapshot();
+    const uint64_t connectStartSteady = benchmarkState.connectStartSteadyNs.load();
+    const uint64_t connectStartSystem = benchmarkState.connectStartSystemMs.load();
+    const uint64_t firstReceive = benchmarkState.firstReceiveSteadyNs.load();
+    const uint64_t lastReceive = benchmarkState.lastReceiveSteadyNs.load();
+
+    auto toMs = [](uint64_t a, uint64_t b) -> double {
+        return (b > a) ? static_cast<double>(b - a) / 1.0e6 : 0.0;
+    };
+
+    json report;
+    report["side"] = "client";
+    report["client"] = "juync-middleware";
+    report["generated_unix_ms"] = benchmarkSystemNowMs();
+    report["endpoint"] = brokerEndpoint.empty() ? std::string("") : brokerEndpoint;
+    report["connected"] = isConnected();
+
+    json total;
+    total["requests_sent"] = stats.totalRequestsSent;
+    total["responses_received"] = stats.totalResponsesReceived;
+    total["bytes_received"] = stats.totalBytesReceived;
+    total["failed_requests"] = stats.failedRequests;
+    total["chunk_messages"] = benchmarkState.chunkMessages.load();
+    total["files_requested"] = benchmarkState.filesRequested.load();
+    total["files_unique"] = benchmarkState.filesUnique.load();
+    total["files_completed"] = benchmarkState.filesCompleted.load();
+    total["files_failed"] = benchmarkState.filesFailed.load();
+    report["total"] = total;
+
+    json timing;
+    timing["connect_start_unix_ms"] = connectStartSystem;
+    timing["connect_to_first_byte_ms"] = (connectStartSteady && firstReceive) ? toMs(connectStartSteady, firstReceive) : 0.0;
+    timing["first_to_last_byte_ms"] = (firstReceive && lastReceive) ? toMs(firstReceive, lastReceive) : 0.0;
+    timing["connect_to_last_byte_ms"] = (connectStartSteady && lastReceive) ? toMs(connectStartSteady, lastReceive) : 0.0;
+    report["timing_ms"] = timing;
+
+    return report.dump(2);
 }
 
 void AnariUsdClient::setMaxMessageSize(size_t maxSizeBytes) {
@@ -1422,7 +1493,7 @@ bool AnariUsdClient::requestWorkerListString(std::vector<std::tuple<int32_t, std
         // Send GET_WORKERS string using HPC broker protocol
         // DEALER sends: [empty delimiter] + "GET_WORKERS" (2 frames)
         // ROUTER receives: [identity] + [empty delimiter] + "GET_WORKERS" (3 frames)
-        // ✅ FIX: Lock only for send, release before blocking receive
+        // Lock only for the send; release before the blocking receive.
         {
             std::lock_guard<std::recursive_mutex> lock(requestMutex);
 
@@ -1447,7 +1518,7 @@ bool AnariUsdClient::requestWorkerListString(std::vector<std::tuple<int32_t, std
             }
 
             connectionStats.totalRequestsSent.fetch_add(1);
-        } // ✅ Lock released here before blocking receive
+        }
 
         // Wait for the raw-string response via the dispatcher-backed index.
         // The GET_WORKERS reply carries no ANARI magic/request_id, so it is routed
@@ -1539,8 +1610,6 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
 
         MIDDLEWARE_LOG_DEBUG("Requesting worker count via binary property 'totalWorkerCount' (request_id: %u)",
                              request.request_id);
-
-        // ✅ FIX: Removed outer requestMutex lock - sendRequest() handles its own locking
 
         // Send binary struct (276 bytes) using existing sendRequest method
         if (!sendRequest(&request, sizeof(request), request.request_id)) {
@@ -1648,8 +1717,6 @@ bool AnariUsdClient::requestWorkerStatus(int32_t targetRank, WorkerStatusCallbac
 
         MIDDLEWARE_LOG_INFO("Requesting worker status for rank %d using 'workerList' property (request_id: %u)",
                             targetRank, request.request_id);
-
-        // ✅ FIX: Removed outer requestMutex lock - sendRequest() handles its own locking
 
         // Send request
         if (!sendRequest(&request, sizeof(request), request.request_id)) {
@@ -1819,7 +1886,7 @@ bool AnariUsdClient::getWorkerStatusSync(int32_t targetRank,
 }
 
 bool AnariUsdClient::getTotalWorkerCountSync(uint32_t& totalCount, int timeoutMs) {
-    MIDDLEWARE_LOG_DEBUG("=== getTotalWorkerCountSync ENTERED (timeout=%d ms) ===", timeoutMs);
+    MIDDLEWARE_LOG_DEBUG("getTotalWorkerCountSync: timeout=%d ms", timeoutMs);
     
     // Use binary protocol instead of legacy string protocol
     std::promise<uint32_t> promise;
@@ -1843,7 +1910,7 @@ bool AnariUsdClient::getTotalWorkerCountSync(uint32_t& totalCount, int timeoutMs
     }
     
     totalCount = future.get();
-    MIDDLEWARE_LOG_DEBUG("=== getTotalWorkerCountSync COMPLETE: totalCount=%u ===", totalCount);
+    MIDDLEWARE_LOG_DEBUG("getTotalWorkerCountSync: totalCount=%u", totalCount);
     return true;
 }
 
@@ -1854,23 +1921,9 @@ bool AnariUsdClient::requestFilesParallel(
     std::function<void()> completion_callback,
     std::function<void(const std::string&, const std::string&)> error_callback,
     int timeout_ms) {
-    
-    // Extreme crash protection - check for stack corruption
-    try {
-        MIDDLEWARE_LOG_DEBUG("=== ENTERING requestFilesParallel ===");
-    } catch (...) {
-        // If logging fails, we have serious memory corruption
-        return false;
-    }
-    MIDDLEWARE_LOG_INFO("Filenames: %zu, TargetRanks: %zu", filenames.size(), target_ranks.size());
-    
-    #ifdef _WIN32
-    char debug_msg[512];
-    snprintf(debug_msg, sizeof(debug_msg), "[ANARI] requestFilesParallel: %zu files, first: %s\n", 
-             filenames.size(), filenames.empty() ? "(none)" : filenames[0].c_str());
-    OutputDebugStringA(debug_msg);
-    #endif
-    
+    MIDDLEWARE_LOG_DEBUG("requestFilesParallel: %zu files, %zu target ranks",
+                         filenames.size(), target_ranks.size());
+
     if (!isConnected()) {
         MIDDLEWARE_LOG_ERROR("Cannot start parallel downloads: client not connected");
         if (error_callback) {
@@ -1880,16 +1933,12 @@ bool AnariUsdClient::requestFilesParallel(
         }
         return false;
     }
-    
-    MIDDLEWARE_LOG_DEBUG("Client is connected");
-    
+
     if (filenames.size() != target_ranks.size()) {
         MIDDLEWARE_LOG_ERROR("Filename count (%zu) doesn't match target_ranks count (%zu)",
                            filenames.size(), target_ranks.size());
         return false;
     }
-    
-    MIDDLEWARE_LOG_DEBUG("Input validation passed");
 
     MIDDLEWARE_LOG_DEBUG("Starting parallel download of %zu files using same logic as async node", filenames.size());
     
@@ -1948,7 +1997,7 @@ bool AnariUsdClient::requestFilesParallel(
             };
         
         std::function<void(const std::string&, uint64_t)> complete_callback = 
-            [file_state, state, spawn_callback, total_files, completion_callback](
+            [this, file_state, state, spawn_callback, total_files, completion_callback](
                 const std::string& fname, uint64_t total_size) {
                 
                 file_state->complete = true;
@@ -1965,7 +2014,8 @@ bool AnariUsdClient::requestFilesParallel(
                 // Update completion state
                 size_t completed = state->completed_files.fetch_add(1) + 1;
                 size_t successful = state->successful_files.fetch_add(1) + 1;
-                
+                benchmarkNoteFileCompleted(true);
+
                 MIDDLEWARE_LOG_DEBUG("Parallel progress: %zu/%zu files", completed, total_files);
                 
                 // Check if all files are done
@@ -1980,7 +2030,7 @@ bool AnariUsdClient::requestFilesParallel(
             };
         
         std::function<void(const std::string&)> error_callback_wrapper = 
-            [filename, error_callback, state, total_files](const std::string& error_msg) {
+            [this, filename, error_callback, state, total_files](const std::string& error_msg) {
                 
                 MIDDLEWARE_LOG_ERROR("Parallel download error for %s: %s", filename.c_str(), error_msg.c_str());
                 
@@ -1990,6 +2040,7 @@ bool AnariUsdClient::requestFilesParallel(
                 
                 // Update completion state (with error)
                 size_t completed = state->completed_files.fetch_add(1) + 1;
+                benchmarkNoteFileCompleted(false);
                 
                 // Check if all files are done (including errors)
                 if (completed >= total_files) {
@@ -2017,6 +2068,7 @@ bool AnariUsdClient::requestFilesParallel(
                 }
                 // Count as completed (with error)
                 state->completed_files.fetch_add(1);
+                benchmarkNoteFileCompleted(false);
             }
         };
 

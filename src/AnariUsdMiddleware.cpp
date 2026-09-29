@@ -6,6 +6,8 @@
 #include "UsdProcessor.h"
 #include "MiddlewareLogging.h"
 
+#include "../../external/nlohmann/single_include/nlohmann/json.hpp"
+
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -35,9 +37,9 @@ class AnariUsdMiddleware::Impl {
 public:
     // Core components
     ZmqConnector zmqConnector;
-    std::shared_ptr<AnariUsdClient> anariUsdClient;  // ✅ FIX: shared_ptr for safe capture in async threads
+    std::shared_ptr<AnariUsdClient> anariUsdClient;  // shared_ptr so async threads can capture it safely
     std::unique_ptr<UsdProcessor> usdProcessor;
-    std::unique_ptr<CollisionProcessor> collisionProcessor;  // ✅ NEW: Collision processor
+    std::unique_ptr<CollisionProcessor> collisionProcessor;
 
     // Callback management
     std::map<int, FileUpdateCallback> updateCallbacks;
@@ -49,7 +51,7 @@ public:
     std::thread receiverThread;
     std::atomic<bool> running{false};
     std::atomic<bool> shutdownRequested{false};
-    // ✅ FIX: Track async background threads to prevent use-after-free on destruction
+    // Tracked so destruction/shutdown can detach them (prevents use-after-free).
     std::vector<std::thread> asyncThreads;
     std::mutex asyncThreadsMutex;
 
@@ -58,17 +60,16 @@ public:
     std::atomic<bool> initialized{false};
     std::chrono::steady_clock::time_point initializationTime;
 
-    // ✅ Gradient/colormap texture caching (for point cloud color baking)
+    // Gradient/colormap texture cache (point cloud color baking).
     std::map<std::string, std::vector<uint8_t>> cachedTextures;
     std::mutex textureCacheMutex;
 
-    // ✅ NEW: Collision configuration
     std::atomic<ECollisionComplexity> defaultCollisionComplexity{ECollisionComplexity::Complex};
     std::mutex collisionConfigMutex;
 
 public:
     Impl() : nextCallbackId(1), running(false), shutdownRequested(false) {
-        MIDDLEWARE_LOG_INFO("AnariUsdMiddleware::Impl created with collision support");
+        MIDDLEWARE_LOG_INFO("AnariUsdMiddleware::Impl created");
         initializationTime = std::chrono::steady_clock::now();
     }
 
@@ -77,7 +78,7 @@ public:
         shutdownRequested.store(true);
         stopReceiving();
         zmqConnector.disconnect();
-        // ✅ FIX: Join tracked async threads with timeout, detach any remaining
+        // Detach tracked async threads.
         {
             std::lock_guard<std::mutex> lock(asyncThreadsMutex);
             for (auto& t : asyncThreads) {
@@ -97,31 +98,26 @@ public:
             return true;
         }
 
-        MIDDLEWARE_LOG_INFO("Initializing AnariUsdMiddleware with collision support...");
+        MIDDLEWARE_LOG_INFO("Initializing AnariUsdMiddleware...");
         try {
-            // Initialize USD processor with error handling
             usdProcessor = std::make_unique<UsdProcessor>();
             if (!usdProcessor) {
                 MIDDLEWARE_LOG_ERROR("Failed to create USD processor");
                 return false;
             }
 
-            // Configure USD processor with safe defaults
             usdProcessor->setMaxRecursionDepth(50);
             usdProcessor->setMemoryLimit(1024);
             usdProcessor->setReferenceResolutionEnabled(true);
-            MIDDLEWARE_LOG_INFO("USD processor initialized successfully");
 
-            // ✅ NEW: Initialize collision processor
             collisionProcessor = std::make_unique<CollisionProcessor>();
             if (!collisionProcessor) {
                 MIDDLEWARE_LOG_ERROR("Failed to create collision processor");
                 usdProcessor.reset();
                 return false;
             }
-            MIDDLEWARE_LOG_INFO("Collision processor initialized successfully");
 
-            // Initialize ZMQ connection with enhanced error handling
+            // Initialize ZMQ connection
             bool zmqResult = zmqConnector.initialize(endpoint, 5000);
             if (!zmqResult) {
                 MIDDLEWARE_LOG_ERROR("Failed to initialize ZMQ connector");
@@ -129,11 +125,11 @@ public:
                 return false;
             }
 
-            // Set safe message size limits
+            // Cap message size.
             zmqConnector.setMaxMessageSize(safety::MAX_BUFFER_SIZE);
 
             initialized.store(true);
-            MIDDLEWARE_LOG_INFO("AnariUsdMiddleware with collision support initialized successfully");
+            MIDDLEWARE_LOG_INFO("AnariUsdMiddleware initialized");
             return true;
         } catch (const std::exception& e) {
             MIDDLEWARE_LOG_ERROR("Exception during initialization: %s", e.what());
@@ -143,11 +139,11 @@ public:
     }
 
     void shutdown() {
-        MIDDLEWARE_LOG_INFO("Shutting down AnariUsdMiddleware with collision support...");
+        MIDDLEWARE_LOG_INFO("Shutting down AnariUsdMiddleware...");
         shutdownRequested.store(true);
         stopReceiving();
 
-        // ✅ FIX: Signal shutdown first, then detach tracked async threads (they check shutdownRequested)
+        // Detach tracked async threads (they check shutdownRequested).
         {
             std::lock_guard<std::mutex> athrLock(asyncThreadsMutex);
             for (auto& t : asyncThreads) {
@@ -155,15 +151,14 @@ public:
                     t.detach();
                 }
             }
+            MIDDLEWARE_LOG_INFO("Detached %zu async threads during shutdown", asyncThreads.size());
             asyncThreads.clear();
-            MIDDLEWARE_LOG_INFO("Detached %d async threads during shutdown", asyncThreads.size());
         }
 
         std::lock_guard<std::mutex> lock(initMutex);
         try {
             zmqConnector.disconnect(1000);
 
-            // ✅ NEW: Disconnect ANARI USD client
             if (anariUsdClient) {
                 anariUsdClient->disconnect(1000);
                 anariUsdClient.reset();
@@ -179,10 +174,8 @@ public:
                 usdProcessor.reset();
             }
 
-            // ✅ NEW: Cleanup collision processor
             if (collisionProcessor) {
                 collisionProcessor.reset();
-                MIDDLEWARE_LOG_INFO("Collision processor cleaned up");
             }
 
             // Clear all callbacks
@@ -205,7 +198,6 @@ public:
         return initialized.load() && !shutdownRequested.load();
     }
 
-    // ✅ NEW: Collision configuration methods
     void setDefaultCollisionComplexity(ECollisionComplexity complexity) {
         std::lock_guard<std::mutex> lock(collisionConfigMutex);
         defaultCollisionComplexity.store(complexity);
@@ -334,7 +326,6 @@ public:
         MIDDLEWARE_LOG_INFO("Receiver stopped (DEALER-only mode)");
     }
 
-    // Enhanced USD loading methods with collision support
     bool LoadUSDBuffer(const std::vector<uint8_t>& buffer, const std::string& fileName,
                       std::vector<MeshData>& outMeshData) {
         // Use default collision complexity (None for legacy compatibility)
@@ -346,7 +337,6 @@ public:
         return LoadUSDFromDiskWithCollision(filePath, ECollisionComplexity::None, outMeshData);
     }
 
-    // ✅ NEW: Enhanced USD loading methods WITH collision support
     bool LoadUSDBufferWithCollision(const std::vector<uint8_t>& buffer, const std::string& fileName,
                                    ECollisionComplexity complexity, std::vector<MeshData>& outMeshData) {
         if (!usdProcessor) {
@@ -360,7 +350,6 @@ public:
         }
 
         try {
-            // Load USD data using existing processor
             std::vector<UsdProcessor::MeshData> processorMeshData;
 
             auto progressCallback = [this](float progress, const std::string& status) {
@@ -378,7 +367,7 @@ public:
                 return false;
             }
 
-            // Convert to public API format with collision generation
+            // Convert to the public API format.
             outMeshData.clear();
             outMeshData.reserve(processorMeshData.size());
 
@@ -392,7 +381,7 @@ public:
                 outMeshData.push_back(std::move(publicMesh));
             }
 
-            MIDDLEWARE_LOG_INFO("Successfully loaded USD with collision: %zu meshes converted", outMeshData.size());
+            MIDDLEWARE_LOG_INFO("Loaded %s: %zu meshes", fileName.c_str(), outMeshData.size());
             return true;
 
         } catch (const std::exception& e) {
@@ -403,21 +392,18 @@ public:
 
     bool LoadUSDFromDiskWithCollision(const std::string& filePath, ECollisionComplexity complexity,
                                      std::vector<MeshData>& outMeshData) {
-        MIDDLEWARE_LOG_INFO("Loading USD from disk with collision: %s", filePath.c_str());
+        MIDDLEWARE_LOG_INFO("Loading USD from disk: %s", filePath.c_str());
 
         try {
-            // Validate file path
             if (!validateFilePath(filePath)) {
                 return false;
             }
 
-            // Read file to buffer
             std::vector<uint8_t> buffer;
             if (!readFileToBuffer(filePath, buffer)) {
                 return false;
             }
 
-            // Use buffer processing with collision
             return LoadUSDBufferWithCollision(buffer, filePath, complexity, outMeshData);
 
         } catch (const std::exception& e) {
@@ -427,7 +413,6 @@ public:
         }
     }
 
-    // Enhanced texture creation with comprehensive validation
     TextureData CreateTextureFromBuffer(const std::vector<uint8_t>& buffer) {
         if (!usdProcessor) {
             MIDDLEWARE_LOG_ERROR("USD processor not initialized");
@@ -442,14 +427,13 @@ public:
         try {
             UsdProcessor::TextureData processorTexData = usdProcessor->CreateTextureFromBuffer(buffer);
 
-            // Convert to public API structure with validation
+            // Convert to the public API structure.
             TextureData result;
             result.width = processorTexData.width;
             result.height = processorTexData.height;
             result.channels = processorTexData.channels;
             result.data = std::move(processorTexData.data);
 
-            // Validate converted data
             if (!result.isValid()) {
                 MIDDLEWARE_LOG_ERROR("Converted texture data failed validation");
                 result.clear();
@@ -462,7 +446,6 @@ public:
         }
     }
 
-    // Enhanced gradient processing methods
     bool WriteGradientLineAsPNG(const std::vector<uint8_t>& buffer, const std::string& outPath) {
         try {
             if (buffer.empty()) {
@@ -475,10 +458,9 @@ public:
                 return false;
             }
 
-            // Create texture from buffer
             TextureData texData = CreateTextureFromBuffer(buffer);
 
-            // Validate gradient data (should be 1 row high)
+            // A gradient is exactly one row high.
             if (!texData.isValid() || texData.height != 1) {
                 MIDDLEWARE_LOG_ERROR("Invalid gradient data for PNG writing: width=%d, height=%d",
                                    texData.width, texData.height);
@@ -507,7 +489,7 @@ public:
                 return false;
             }
 
-            MIDDLEWARE_LOG_INFO("Gradient line PNG written successfully to %s (%dx%d, %d channels)",
+            MIDDLEWARE_LOG_INFO("Gradient PNG written: %s (%dx%d, %d ch)",
                                outPath.c_str(), texData.width, texData.height, texData.channels);
             return true;
         } catch (const std::exception& e) {
@@ -525,7 +507,6 @@ public:
 
             TextureData texData = CreateTextureFromBuffer(buffer);
 
-            // Validate gradient data
             if (!texData.isValid() || texData.height != 1) {
                 MIDDLEWARE_LOG_ERROR("Invalid gradient data for PNG encoding: width=%d, height=%d",
                                    texData.width, texData.height);
@@ -545,7 +526,7 @@ public:
                 return false;
             }
 
-            MIDDLEWARE_LOG_INFO("Gradient line encoded as PNG buffer: %zu bytes (%dx%d, %d channels)",
+            MIDDLEWARE_LOG_INFO("Gradient PNG encoded: %zu bytes (%dx%d, %d ch)",
                                outPngBuffer.size(), texData.width, texData.height, texData.channels);
             return true;
         } catch (const std::exception& e) {
@@ -557,16 +538,14 @@ public:
     bool GetCachedGradientTexture(std::vector<uint8_t>& outData, int& outWidth, int& outHeight) {
         try {
             std::lock_guard<std::mutex> lock(textureCacheMutex);
-            // Get the most recently cached texture (last in map by insertion order)
             if (cachedTextures.empty()) {
                 MIDDLEWARE_LOG_INFO("No cached gradient texture available");
                 return false;
             }
-            // std::map preserves insertion order, get the last element
+            // std::map is ordered by key, so this takes the last key lexicographically.
             auto it = cachedTextures.end();
             --it;
             outData = it->second;
-            // Decode the PNG to get dimensions
             TextureData texData = CreateTextureFromBuffer(outData);
             if (!texData.isValid()) {
                 // Fallback: estimate dimensions if texture decode fails
@@ -586,12 +565,12 @@ public:
     }
 
 private:
-    // ✅ NEW: Enhanced mesh conversion with collision support
+    // Convert a processed mesh to the public API format, generating collision data.
     bool convertMeshDataWithCollision(UsdProcessor::MeshData& processorMeshData,
                                       ECollisionComplexity complexity,
                                       MeshData& publicMeshData) {
         try {
-            // Convert basic mesh data — move strings (source consumed after conversion)
+            // Move the names (the processor data is consumed after conversion).
             publicMeshData.elementName = std::move(processorMeshData.elementName);
             publicMeshData.typeName = std::move(processorMeshData.typeName);
 
@@ -605,7 +584,6 @@ private:
                 out[0] = p.x; out[1] = p.y; out[2] = p.z;
             }
 
-            // Direct copy for indices
             publicMeshData.indices = processorMeshData.indices;
 
             // Convert normals (glm::vec3 → flat float array)
@@ -640,12 +618,11 @@ private:
                 bool isVertexInterp = (colorCount == pointCount);
                 bool isUniformInterp = (colorCount == faceCount);
 
-                MIDDLEWARE_LOG_INFO("Color conversion: %zu colors, %zu vertices, %zu faces - Mode: %s",
+                MIDDLEWARE_LOG_DEBUG("Color conversion: %zu colors, %zu vertices, %zu faces - Mode: %s",
                                    colorCount, pointCount, faceCount,
                                    isVertexInterp ? "VERTEX" : (isUniformInterp ? "UNIFORM" : "UNKNOWN"));
 
                 if (isVertexInterp) {
-                    // Direct per-vertex mapping
                     publicMeshData.vertex_colors.resize(colorCount * 4);
                     for (size_t i = 0; i < colorCount; ++i) {
                         const auto& c = processorMeshData.vertex_colors[i];
@@ -665,7 +642,6 @@ private:
                         if (i1 < pointCount) vertexColors[i1] = faceColor;
                         if (i2 < pointCount) vertexColors[i2] = faceColor;
                     }
-                    // Flatten to float array (direct index writes)
                     publicMeshData.vertex_colors.resize(pointCount * 4);
                     for (size_t i = 0; i < pointCount; ++i) {
                         const auto& c = vertexColors[i];
@@ -689,7 +665,6 @@ private:
                 }
             }
 
-            // ✅ NEW: Generate collision data if requested
             if (complexity != ECollisionComplexity::None && collisionProcessor) {
                 MIDDLEWARE_LOG_INFO("Generating %s collision for mesh: %s",
                                    CollisionProcessor::getComplexityName(complexity).c_str(),
@@ -701,20 +676,18 @@ private:
                 if (!collisionResult || !publicMeshData.collision.isValid()) {
                     MIDDLEWARE_LOG_WARNING("Failed to generate collision for mesh: %s",
                                          publicMeshData.elementName.c_str());
-                    publicMeshData.collision.clear(); // Clear failed collision data
+                    publicMeshData.collision.clear();
                 }
             } else {
-                // No collision requested
                 publicMeshData.collision.clear();
             }
 
-            // Validate the converted mesh data
             bool isValid = publicMeshData.isValid();
             if (!isValid) {
                 MIDDLEWARE_LOG_ERROR("Converted mesh data failed validation for: %s",
                                    processorMeshData.elementName.c_str());
             } else {
-                MIDDLEWARE_LOG_INFO("Successfully converted mesh with collision: %s (%zu vertices, %zu faces, %zu colors)",
+                MIDDLEWARE_LOG_DEBUG("Converted mesh: %s (%zu vertices, %zu faces, %zu colors)",
                                    processorMeshData.elementName.c_str(), pointCount,
                                    processorMeshData.indices.size() / 3,
                                    publicMeshData.vertex_colors.size() / 4);
@@ -727,13 +700,12 @@ private:
         }
     }
 
-    // Helper methods implementation
     void cleanup() {
         try {
             stopReceiving();
             zmqConnector.disconnect();
             usdProcessor.reset();
-            collisionProcessor.reset();  // ✅ NEW: Cleanup collision processor
+            collisionProcessor.reset();
 
             std::lock_guard<std::mutex> lock(callbackMutex);
             updateCallbacks.clear();
@@ -824,7 +796,7 @@ bool AnariUsdMiddleware::isConnected() const {
     return pImpl->isConnected();
 }
 
-// ✅ NEW: Collision configuration methods
+// Collision configuration methods
 void AnariUsdMiddleware::setDefaultCollisionComplexity(ECollisionComplexity complexity) {
     pImpl->setDefaultCollisionComplexity(complexity);
 }
@@ -862,7 +834,6 @@ void AnariUsdMiddleware::stopReceiving() {
     pImpl->stopReceiving();
 }
 
-// Enhanced USD processing methods
 TextureData AnariUsdMiddleware::CreateTextureFromBuffer(const std::vector<uint8_t>& buffer) {
     return pImpl->CreateTextureFromBuffer(buffer);
 }
@@ -876,7 +847,6 @@ bool AnariUsdMiddleware::LoadUSDFromDisk(const std::string& filePath, std::vecto
     return pImpl->LoadUSDFromDisk(filePath, outMeshData);
 }
 
-// ✅ NEW: USD processing methods WITH collision support
 bool AnariUsdMiddleware::LoadUSDBufferWithCollision(const std::vector<uint8_t>& buffer, const std::string& fileName,
                                                    ECollisionComplexity complexity, std::vector<MeshData>& outMeshData) {
     return pImpl->LoadUSDBufferWithCollision(buffer, fileName, complexity, outMeshData);
@@ -900,7 +870,7 @@ bool AnariUsdMiddleware::GetCachedGradientTexture(std::vector<uint8_t>& outData,
     return pImpl->GetCachedGradientTexture(outData, outWidth, outHeight);
 }
 
-// ✅ NEW: ANARI USD DEALER client methods
+// Broker client (DEALER socket) methods
 bool AnariUsdMiddleware::connectToBroker(const char* brokerEndpoint, int timeoutMs) {
     if (!pImpl->anariUsdClient) {
         pImpl->anariUsdClient = std::make_shared<AnariUsdClient>();
@@ -914,6 +884,19 @@ void AnariUsdMiddleware::disconnectFromBroker() {
     }
 }
 
+std::string AnariUsdMiddleware::getBenchmarkReportJson() const {
+    if (pImpl && pImpl->anariUsdClient) {
+        return pImpl->anariUsdClient->buildBenchmarkReportJson();
+    }
+    // No client yet: emit a minimal valid report so callers never get empty
+    nlohmann::json minimal;
+    minimal["side"] = "client";
+    minimal["client"] = "juync-middleware";
+    minimal["connected"] = false;
+    minimal["note"] = "no broker client created";
+    return minimal.dump(2);
+}
+
 bool AnariUsdMiddleware::isBrokerConnected() const {
     return pImpl->anariUsdClient && pImpl->anariUsdClient->isConnected();
 }
@@ -921,37 +904,34 @@ bool AnariUsdMiddleware::isBrokerConnected() const {
 bool AnariUsdMiddleware::requestFileList(int32_t targetRank, std::vector<std::string>& outFiles, int timeoutMs) {
     if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
         MIDDLEWARE_LOG_WARNING("ANARI USD client not connected - returning empty file list (non-MPI mode)");
-        outFiles.clear();  // Return empty list
-        return true;  // Return success with empty list
+        outFiles.clear();
+        return true;
     }
     
     bool success = pImpl->anariUsdClient->getFileListSync(targetRank, outFiles, timeoutMs);
     if (!success) {
         MIDDLEWARE_LOG_WARNING("Failed to get file list from broker - returning empty file list (non-MPI fallback)");
-        outFiles.clear();  // Return empty list on failure
-        return true;  // Return success with empty list
+        outFiles.clear();
+        return true;
     }
     return success;
 }
 
 bool AnariUsdMiddleware::requestFileListWithSizes(int32_t targetRank, std::vector<FileInfo>& outFiles, int timeoutMs) {
-    MIDDLEWARE_LOG_INFO("=== requestFileListWithSizes ENTERED ===");
-    MIDDLEWARE_LOG_INFO("targetRank=%d, timeoutMs=%d", targetRank, timeoutMs);
-    
+    MIDDLEWARE_LOG_DEBUG("requestFileListWithSizes: targetRank=%d, timeoutMs=%d", targetRank, timeoutMs);
+
     if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
         MIDDLEWARE_LOG_ERROR("ANARI USD client not connected - cannot request file list");
-        outFiles.clear();  // Return empty list
-        return false;  // Return FAILURE to indicate the request did not succeed
+        outFiles.clear();
+        return false;
     }
-    
-    MIDDLEWARE_LOG_INFO("Client IS connected, calling getFileListWithSizesSync...");
-    MIDDLEWARE_LOG_INFO("Calling getFileListWithSizesSync with targetRank=%d, timeoutMs=%d", targetRank, timeoutMs);
+
     bool success = pImpl->anariUsdClient->getFileListWithSizesSync(targetRank, outFiles, timeoutMs);
-    MIDDLEWARE_LOG_INFO("getFileListWithSizesSync returned: success=%d, fileCount=%zu", success, outFiles.size());
+    MIDDLEWARE_LOG_DEBUG("getFileListWithSizesSync returned: success=%d, fileCount=%zu", success, outFiles.size());
     if (!success) {
         MIDDLEWARE_LOG_ERROR("Failed to get file list from broker");
-        outFiles.clear();  // Return empty list on failure
-        return false;  // Return FAILURE to indicate the request did not succeed
+        outFiles.clear();
+        return false;
     }
     return success;
 }
@@ -1136,7 +1116,6 @@ void AnariUsdMiddleware::requestWorkerCountAsync(int timeoutMs, WorkerCountCallb
         return;
     }
     
-    // ✅ FIX: Use shared_ptr for lifetime safety, track thread to prevent use-after-free
     auto client = pImpl->anariUsdClient;
     std::thread t([client, timeoutMs, callback, errorCallback]() {
         if (!client || client->isShutdownRequested()) return;
@@ -1171,7 +1150,6 @@ void AnariUsdMiddleware::requestTotalWorkerCountAsync(int timeoutMs, WorkerCount
         return;
     }
     
-    // ✅ FIX: Use shared_ptr for lifetime safety, track thread to prevent use-after-free
     auto client = pImpl->anariUsdClient;
     std::thread t([client, timeoutMs, callback, errorCallback]() {
         if (!client || client->isShutdownRequested()) return;
@@ -1204,7 +1182,6 @@ void AnariUsdMiddleware::requestWorkerStatusAsync(int32_t targetRank, int timeou
         return;
     }
     
-    // ✅ FIX: Use shared_ptr for lifetime safety, track thread to prevent use-after-free
     auto client = pImpl->anariUsdClient;
     std::thread t([client, targetRank, timeoutMs, callback, errorCallback]() {
         if (!client || client->isShutdownRequested()) return;
@@ -1232,7 +1209,6 @@ void AnariUsdMiddleware::requestFileListAsync(int32_t targetRank, int timeoutMs,
         return;
     }
     
-    // ✅ FIX: Use shared_ptr for lifetime safety, track thread to prevent use-after-free
     auto client = pImpl->anariUsdClient;
     std::thread t([client, targetRank, timeoutMs, callback, errorCallback]() {
         if (!client || client->isShutdownRequested()) return;
@@ -1260,7 +1236,6 @@ void AnariUsdMiddleware::requestFileListWithSizesAsync(int32_t targetRank, int t
         return;
     }
     
-    // ✅ FIX: Use shared_ptr for lifetime safety, track thread to prevent use-after-free
     auto client = pImpl->anariUsdClient;
     std::thread t([client, targetRank, timeoutMs, callback, errorCallback]() {
         if (!client || client->isShutdownRequested()) return;
@@ -1286,27 +1261,11 @@ void AnariUsdMiddleware::requestFilesParallelAsync(
     std::function<void(const std::string&, const std::vector<uint8_t>&)> fileReceivedCallback,
     std::function<void()> completionCallback,
     std::function<void(const std::string&, const std::string&)> errorCallback) {
-    
-    // Debug logging to verify we entered the function
-    #ifdef _WIN32
-    OutputDebugStringA("[ANARI] requestFilesParallelAsync: Entering function\n");
-    #endif
-    
-    // Basic parameter validation (no __try/__except due to C++ object unwinding)
-    // We'll rely on the fact that if parameters are invalid, the function won't be called
-    // or will crash before reaching here (which is what we're trying to prevent)
-    
-    // Note: Cannot use __try/__except here because function has C++ objects with destructors
-    // The crash protection is now in the C API wrapper instead
-    
-    #ifdef _WIN32
-    char debug_msg[256];
-    snprintf(debug_msg, sizeof(debug_msg), "[ANARI] requestFilesParallelAsync: %zu files, timeout %d ms\n", 
-             filenames.size(), timeoutMs);
-    OutputDebugStringA(debug_msg);
-    #endif
-    
-    // Validate input
+    // No __try/__except here: the function holds C++ objects with destructors.
+    // Crash protection lives in the C API wrapper.
+    MIDDLEWARE_LOG_DEBUG("requestFilesParallelAsync: %zu files, timeout %d ms",
+                         filenames.size(), timeoutMs);
+
     if (filenames.empty()) {
         MIDDLEWARE_LOG_ERROR("Empty filename list for parallel download");
         if (errorCallback) {
@@ -1340,7 +1299,6 @@ void AnariUsdMiddleware::requestFilesParallelAsync(
         return;
     }
     
-    // ✅ FIX: Use shared_ptr for lifetime safety, track thread to prevent use-after-free
     auto client = pImpl->anariUsdClient;
     std::thread t([client, filenames, targetRanks, timeoutMs, fileReceivedCallback, completionCallback, errorCallback]() {
         try {

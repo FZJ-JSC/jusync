@@ -41,7 +41,7 @@ enum class ECollisionComplexity : uint8_t {
 
 /**
  * Collision data structure compatible with Unreal Engine
- * Designed to integrate seamlessly with RealtimeMeshComponent and Physics System
+ * (RealtimeMeshComponent / physics system).
  */
 struct ANARI_USD_MIDDLEWARE_API CollisionData {
     ECollisionComplexity collisionType = ECollisionComplexity::None;
@@ -60,7 +60,6 @@ struct ANARI_USD_MIDDLEWARE_API CollisionData {
     std::vector<float> convexVertices;
     std::vector<uint32_t> convexIndices;
 
-    // Enhanced validation with comprehensive safety checks
     bool isValid() const {
         return collisionType != ECollisionComplexity::None &&
                (vertices.size() % 3 == 0) &&
@@ -70,7 +69,7 @@ struct ANARI_USD_MIDDLEWARE_API CollisionData {
                validateFiniteValues();
     }
 
-    // Clear all collision data safely
+    // Clear all collision data
     void clear() {
         collisionType = ECollisionComplexity::None;
         vertices.clear();
@@ -127,12 +126,9 @@ private:
     }
 };
 
-/**
- * Enhanced mesh data structure that includes collision information
- * Seamlessly integrates with your existing JUSYNC pipeline
- */
+/** Visual mesh data plus generated collision. */
 struct ANARI_USD_MIDDLEWARE_API MeshDataWithCollision {
-    // Original visual mesh data (unchanged from your existing structure)
+    // Visual mesh data
     std::string elementName;
     std::string typeName;
     std::vector<float> points;
@@ -141,10 +137,9 @@ struct ANARI_USD_MIDDLEWARE_API MeshDataWithCollision {
     std::vector<float> uvs;
     std::vector<float> vertex_colors;
 
-    // NEW: Collision data
+    // Generated collision data
     CollisionData collisionData;
 
-    // Enhanced validation
     bool isValid() const {
         return !elementName.empty() &&
                !points.empty() &&
@@ -176,31 +171,26 @@ struct ANARI_USD_MIDDLEWARE_API MeshDataWithCollision {
     }
 };
 
-/**
- * Main collision processor class with proper DLL export decoration
- * Thread-safe and optimized for real-time collision generation
- */
+/** Collision data generator for visual meshes. */
 class ANARI_USD_MIDDLEWARE_API CollisionProcessor {
 public:
-    // Constructor/Destructor with enhanced safety
     CollisionProcessor();
     ~CollisionProcessor();
 
-    // Disable copy/move for safety and resource management
+    // Non-copyable, non-movable
     CollisionProcessor(const CollisionProcessor&) = delete;
     CollisionProcessor& operator=(const CollisionProcessor&) = delete;
     CollisionProcessor(CollisionProcessor&&) = delete;
     CollisionProcessor& operator=(CollisionProcessor&&) = delete;
 
     /**
-     * Generate collision data from visual mesh
-     * Main function for collision generation with comprehensive error handling
+     * Generate collision data from a visual mesh.
      *
      * @param vertices Input visual mesh vertices (flat array x,y,z,x,y,z...)
      * @param indices Input visual mesh triangle indices
      * @param complexity Desired collision complexity
      * @param outCollisionData Output collision data structure
-     * @return True if generation succeeded, false otherwise
+     * @return true if generation succeeded
      */
     bool generateCollision(const std::vector<float>& vertices,
                           const std::vector<uint32_t>& indices,
@@ -208,49 +198,38 @@ public:
                           CollisionData& outCollisionData);
 
     /**
-     * Generate collision for multiple meshes (batch processing)
-     * Optimized for processing multiple meshes from USD files
+     * Generate collision for multiple meshes in one call.
      *
-     * @param meshes Input/output mesh array with collision data populated
-     * @param complexity Collision complexity to apply to all meshes
-     * @return True if all collisions generated successfully
+     * @param meshes In/out mesh array; collision data populated on success
+     * @param complexity Collision complexity applied to all meshes
+     * @return true if all collisions were generated
      */
     bool generateCollisionForMeshes(std::vector<MeshDataWithCollision>& meshes,
                                    ECollisionComplexity complexity);
 
     /**
-     * Generate collision for single enhanced mesh structure
-     * Convenience function for single mesh processing
+     * Generate collision for a single mesh.
      *
-     * @param mesh Input/output mesh with collision data populated
+     * @param mesh In/out mesh; collision data populated on success
      * @param complexity Collision complexity to apply
-     * @return True if collision generated successfully
+     * @return true if the collision was generated
      */
     bool generateCollisionForMesh(MeshDataWithCollision& mesh,
                                  ECollisionComplexity complexity);
 
     /**
-     * ✅ FIXED: Remove redundant export decoration from static functions
-     * The class-level ANARI_USD_MIDDLEWARE_API export covers all public members
+     * Whether a collision complexity value is valid.
+     * (No per-method export macro: the class-level ANARI_USD_MIDDLEWARE_API covers it.)
      */
     static bool isValidComplexity(ECollisionComplexity complexity);
 
-    /**
-     * ✅ FIXED: Get string name for collision complexity
-     * Essential for Unreal Engine Blueprint integration and debugging
-     */
+    /** Short name of a collision complexity (for Blueprint display). */
     static std::string getComplexityName(ECollisionComplexity complexity);
 
-    /**
-     * ✅ FIXED: Get detailed description for collision complexity
-     * Useful for tooltips and documentation in Unreal Editor
-     */
+    /** Human-readable description of a collision complexity. */
     static std::string getComplexityDescription(ECollisionComplexity complexity);
 
-    /**
-     * ✅ FIXED: Get recommended use case for collision complexity
-     * Helps users choose appropriate complexity for their needs
-     */
+    /** Recommended use case for a collision complexity. */
     static std::string getComplexityRecommendation(ECollisionComplexity complexity);
 
     /**
@@ -324,7 +303,7 @@ private:
                                     const std::vector<uint32_t>& indices,
                                     CollisionData& outCollisionData);
 
-    // Enhanced helper methods
+    // Helper methods
     void calculateBoundingBox(const std::vector<float>& vertices,
                              glm::vec3& minBounds,
                              glm::vec3& maxBounds);

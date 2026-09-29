@@ -78,7 +78,7 @@ bool ZmqConnector::initialize(const char* endpoint, int timeoutMs) {
         connectionStatus.store(ConnectionStatus::Connected);
         shutdownRequested.store(false);
 
-        MIDDLEWARE_LOG_INFO("ZmqConnector initialized successfully on %s", currentEndpoint.c_str());
+        MIDDLEWARE_LOG_INFO("ZmqConnector initialized on %s", currentEndpoint.c_str());
         return true;
 
     } catch (const zmq::error_t& e) {
@@ -132,7 +132,7 @@ void ZmqConnector::disconnect(int gracefulTimeoutMs) {
 
     currentEndpoint.clear();
     connectionStatus.store(ConnectionStatus::Disconnected);
-    MIDDLEWARE_LOG_INFO("ZmqConnector disconnected successfully");
+    MIDDLEWARE_LOG_INFO("ZmqConnector disconnected");
 }
 
 void ZmqConnector::setMaxMessageSize(size_t maxSizeBytes) {
