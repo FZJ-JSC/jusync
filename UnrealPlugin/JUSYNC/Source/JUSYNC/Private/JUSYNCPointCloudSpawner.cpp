@@ -359,7 +359,10 @@ ULidarPointCloud* FJUSYNCPointCloudSpawner::GetOrCreateCloudForComponent(ULidarP
         Comp->SetPointCloud(Cloud);
     }
 
-    Cloud->SetOptimizedForDynamicData(true);
+    // Static (non-dynamic) optimization builds the octree LOD hierarchy, which gives distance-
+    // based decimation: far nodes render a coarse LOD, close nodes the full-resolution LOD.
+    // Dynamic optimization skips the LOD pipeline entirely (no granular density control).
+    Cloud->SetOptimizedForDynamicData(false);
     return Cloud;
 }
 #endif
@@ -381,6 +384,23 @@ void FJUSYNCPointCloudSpawner::ApplyVisualSettings(ULidarPointCloudComponent* Co
     if (Comp->GetPointShape() != PointShape)
     {
         Comp->SetPointShape(PointShape);
+    }
+}
+
+void FJUSYNCPointCloudSpawner::ApplyPointShapeToActiveActors(ELidarPointCloudSpriteShape InShape)
+{
+    PointShape = InShape;
+    for (AActor* Actor : ActiveActors)
+    {
+        if (ALidarPointCloudActor* LidarActor = Cast<ALidarPointCloudActor>(Actor))
+        {
+            if (ULidarPointCloudComponent* Comp = LidarActor->GetPointCloudComponent())
+            {
+                // SetPointShape re-derives the material but does not dirty the render state.
+                Comp->SetPointShape(InShape);
+                Comp->MarkRenderStateDirty();
+            }
+        }
     }
 }
 
@@ -448,6 +468,7 @@ AActor* FJUSYNCPointCloudSpawner::AllocateActor()
 #ifdef WITH_ANARI_USD_MIDDLEWARE
             ApplyVisualSettingsToActor(Actor);
 #endif
+            ApplyTransformToActor(Actor);
             ActiveActors.Add(Actor);
             return Actor;
         }
@@ -465,6 +486,7 @@ AActor* FJUSYNCPointCloudSpawner::AllocateActor()
 #ifdef WITH_ANARI_USD_MIDDLEWARE
                 ApplyVisualSettingsToActor(Oldest);
 #endif
+                ApplyTransformToActor(Oldest);
                 ActiveActors.Add(Oldest);
                 return Oldest;
             }
@@ -495,14 +517,16 @@ AActor* FJUSYNCPointCloudSpawner::AllocateActor()
             Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
             Comp->ColorSource = ELidarPointCloudColorationMode::Data;
             ApplyVisualSettings(Comp);
+            // LOD streaming: full depth range, but render only nodes within the view frustum.
+            // r.LidarPointBudget (adaptive) then decimates far nodes to hold the target FPS.
             Comp->MinDepth = 0;
             Comp->MaxDepth = -1;
-            Comp->bUseFrustumCulling = false;
+            Comp->bUseFrustumCulling = true;
         }
 
         SpawnedActor->SetActorHiddenInGame(true);
         SpawnedActor->SetActorTickEnabled(false);
-        SpawnedActor->SetActorScale3D(FVector(SpawnScale));
+        ApplyTransformToActor(SpawnedActor);
     }
 
     ActiveActors.Add(SpawnedActor);
@@ -565,6 +589,17 @@ void FJUSYNCPointCloudSpawner::ReleaseActor(AActor* Actor)
 void FJUSYNCPointCloudSpawner::SetSpawnLocation(const FVector& In)
 {
     SpawnLocation = In;
+}
+
+void FJUSYNCPointCloudSpawner::ApplyTransformToActor(AActor* Actor)
+{
+    if (!Actor || !Actor->IsValidLowLevel())
+    {
+        return;
+    }
+
+    Actor->SetActorLocation(SpawnLocation);
+    Actor->SetActorScale3D(FVector(SpawnScale));
 }
 
 void FJUSYNCPointCloudSpawner::Tick(float DeltaTime)
@@ -632,6 +667,10 @@ void FJUSYNCPointCloudSpawner::DrainReadyQueueLocked()
                 break;
             }
         }
+
+        // Pooled/in-place actors keep whatever transform they were created with, so re-apply the
+        // spawner's current location/scale here; otherwise extent changes never resize them.
+        ApplyTransformToActor(Actor);
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
         bool bPointCloudUpdateFailed = false;

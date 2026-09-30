@@ -44,6 +44,44 @@ public:
     // Extract cached gradient from middleware and apply to spawner LUT
     void ApplyCachedGradientToSpawner();
 
+    // ========== LiDAR point cloud rendering tuning ==========
+    // These mirror the r.Lidar* console variables. Change at runtime (Blueprint/console/
+    // debugger) and call ApplyLidarPerformanceCvars() to push them into the renderer -
+    // no recompile needed for A/B testing. Defaults are applied in Initialize().
+
+    /** r.LidarPointBudget: points drawn on screen at once. 0 = let the target-FPS cvar decide. */
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "JUSYNC|LiDAR", meta = (ClampMin = "0"))
+    int32 LidarPointBudget = 2500000;
+
+    /** r.LidarIncrementalBudget: grow the budget past LidarPointBudget while the camera is still. */
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "JUSYNC|LiDAR")
+    bool bLidarIncrementalBudget = true;
+
+    /** r.LidarScreenCenterImportance: spend the budget on what the camera looks at first. */
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "JUSYNC|LiDAR", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float LidarScreenCenterImportance = 0.5f;
+
+    /** r.LidarBaseLODImportance: keep the coarsest LOD of far assets visible (prevents holes). */
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "JUSYNC|LiDAR", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float LidarBaseLODImportance = 0.5f;
+
+    /** Pushes the four Lidar* properties above into their console variables. */
+    UFUNCTION(BlueprintCallable, Category = "JUSYNC|LiDAR")
+    void ApplyLidarPerformanceCvars() const;
+
+    // ========== Dataset mesh interaction ==========
+
+    /**
+     * Creates complex (full-mesh) collision for spawned dataset meshes so VR
+     * raycasts / line traces hit them instead of passing through. Applies to
+     * meshes created after this is set (default: enabled).
+     */
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "JUSYNC|Mesh")
+    bool bEnableSpawnedMeshCollision = true;
+
+    /** Enables component + RealtimeMesh collision on a spawned mesh; call after its sections exist. */
+    void EnableSpawnedMeshCollision(URealtimeMeshComponent* RealtimeMeshComponent, URealtimeMeshSimple* RealtimeMesh) const;
+
     // Core Connection Management
     UFUNCTION(BlueprintCallable, Category = "JUSYNC")
     bool InitializeMiddleware(const FString& Endpoint = TEXT(""));

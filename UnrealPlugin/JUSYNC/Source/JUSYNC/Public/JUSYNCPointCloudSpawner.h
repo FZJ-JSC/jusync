@@ -73,6 +73,9 @@ public:
     void SetPointOrientation(ELidarPointCloudSpriteOrientation InOrientation) { PointOrientation = InOrientation; }
     void SetPointScaling(ELidarPointCloudScalingMethod InScaling) { PointScaling = InScaling; }
     void ApplyVisualSettingsToComponent(ULidarPointCloudComponent* Comp) { ApplyVisualSettings(Comp); }
+
+    /** Sets the sprite shape and re-applies it to every actor this spawner currently owns. */
+    void ApplyPointShapeToActiveActors(ELidarPointCloudSpriteShape InShape);
     void RequestNormalCalculation(ULidarPointCloud* Cloud, AActor* Actor, int32 PointCount) { MaybeCalculateNormals(Cloud, Actor, PointCount); }
 #endif
 
@@ -157,6 +160,9 @@ private:
     TArray<FPendingNoColorCloud> PendingNoColorClouds;
 
     void UntrackActorElement(AActor* Actor);
+
+    /** Applies the current SpawnLocation / SpawnScale to an actor, including pooled/reused ones. */
+    void ApplyTransformToActor(AActor* Actor);
 
     AActor* AllocateActor();
     void ReleaseActor(AActor*);
