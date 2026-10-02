@@ -68,6 +68,62 @@ jobs:
             build/compile_commands.json
           retention-days: 1
 
+  build-windows:
+    name: Build & Smoke Tests (Windows MSVC)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Only OpenSSL + zstd come from vcpkg; ZMQ/LightUSD/glm/xxhash are bundled
+      # and statically linked by CMake. TBB is optional and simply skipped.
+      - name: Install dependencies (vcpkg)
+        shell: bash
+        run: |
+          "${VCPKG_INSTALLATION_ROOT}/vcpkg.exe" install openssl:x64-windows zstd:x64-windows
+
+      - name: Configure CMake
+        shell: bash
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DBUILD_TESTS=ON \
+            -DENABLE_CUDA=OFF \
+            -DBUILD_JUSYNC_Receiver_GUI=OFF \
+            -DENABLE_ZSTD=ON \
+            -DLIGHTUSD_NO_WERROR=ON \
+            -DTINYUSDZ_BUILD_TESTS=OFF \
+            -DTINYUSDZ_BUILD_EXAMPLES=OFF \
+            -DTINYUSDZ_BUILD_BENCHMARKS=OFF \
+            -DGLM_BUILD_TESTS=OFF
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --config Release --parallel
+
+      # vcpkg DLLs are not next to the exe by default; copy the runtime deps in.
+      - name: Copy runtime DLLs
+        shell: bash
+        run: cp "${VCPKG_INSTALLATION_ROOT}/installed/x64-windows/bin/"{libssl-3-x64,libcrypto-3-x64,zstd}.dll build/Release/
+
+      - name: Run smoke tests
+        shell: bash
+        run: ctest --test-dir build -C Release -R '^(build_verification|binary_static_check)$' --output-on-failure
+
+      - name: Upload Windows payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: jusync-windows-payload
+          path: |
+            build/Release/anari_usd_middleware.dll
+            build/Release/anari_usd_middleware.lib
+            build/Release/usd_validation_tool.exe
+            build/Release/*.dll
+          retention-days: 14
+
   static-analysis:
     name: Static Analysis
     needs: build
