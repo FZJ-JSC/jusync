@@ -1,4 +1,4 @@
-﻿#include "JUSYNCPointCloudTestActor.h"
+#include "JUSYNCPointCloudTestActor.h"
 #include "JUSYNCPointCloudSpawner.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -39,7 +39,7 @@ void AJUSYNCPointCloudTestActor::BeginPlay()
         return;
     }
 
-    UE_LOG(LogTemp, Log, TEXT("[TestActor] Middleware initialized successfully"));
+    UE_LOG(LogTemp, Log, TEXT("[TestActor] Middleware initialized"));
 
     if (bAutoLoadOnBegin && (UsdFilePaths.Num() > 0 || !UsdFilePath.IsEmpty()))
     {
@@ -227,7 +227,7 @@ void AJUSYNCPointCloudTestActor::SpawnFromParsedData(const FString& Filename, bo
             }
         }
 
-        // Point clouds — use budgeted async spawner to avoid thread explosion
+        // Point clouds - use budgeted async spawner to avoid thread explosion
         if (bSpawnPointClouds && PointCloudData.Num() > 0)
         {
             for (const FJUSYNCPointCloudData& PC : PointCloudData)
@@ -358,7 +358,7 @@ TArray<FColor> AJUSYNCPointCloudTestActor::BuildGradientLUTFromPng(const TArray<
         OutLUT.Add(FColor(R[x] / Rows, G[x] / Rows, B[x] / Rows, A[x] / Rows));
     }
 
-    UE_LOG(LogTemp, Display, TEXT("[TestActor] Built Gradient LUT from PNG: %d x %d → %d colors"), W, H, LUTSize);
+    UE_LOG(LogTemp, Display, TEXT("[TestActor] Built Gradient LUT from PNG: %d x %d -> %d colors"), W, H, LUTSize);
     return OutLUT;
 }
 

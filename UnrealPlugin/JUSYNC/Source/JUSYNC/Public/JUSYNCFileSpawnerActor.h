@@ -205,6 +205,43 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Animation", meta = (EditCondition = "bEnableTimeStepAnimation", EditConditionHides))
     bool bLoopTimeStepAnimation;
 
+    // Automatic benchmark session. When enabled, a pipeline run auto-records
+    // one benchmark result: TTF (connect -> first frame / full scene) is
+    // stamped by the pipeline, an interactive window opens once the initial
+    // spawn completes, and the result + client report are written (CSV/JSON)
+    // shortly after the window closes, or when the session/PIE ends. Nothing
+    // is synthesised: an unmeasured FPS is reported as 0 with fps_measured
+    // false, per benchmark/RUNNER_PROTOCOL.md.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Benchmark")
+    bool bEnableBenchmarking;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Benchmark", meta = (EditCondition = "bEnableBenchmarking", EditConditionHides))
+    FString BenchmarkTestName;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Benchmark", meta = (EditCondition = "bEnableBenchmarking", EditConditionHides))
+    FString BenchmarkOutputDirectory;
+
+    // 0 = CSV only, 1 = JSON only, 2 = CSV + JSON
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Benchmark", meta = (EditCondition = "bEnableBenchmarking", EditConditionHides))
+    int32 BenchmarkOutputFormat;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Benchmark", meta = (EditCondition = "bEnableBenchmarking", EditConditionHides))
+    bool bBenchmarkAppendTimestamp;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Benchmark", meta = (EditCondition = "bEnableBenchmarking", EditConditionHides, ClampMin = "1.0", ClampMax = "300.0"))
+    float BenchmarkInteractiveWindowSeconds;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Benchmark", meta = (EditCondition = "bEnableBenchmarking", EditConditionHides))
+    bool bBenchmarkColdStart;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Benchmark", meta = (EditCondition = "bEnableBenchmarking", EditConditionHides))
+    bool bExportClientBenchmarkReport;
+
+    // Fetch the cluster-side (ANARI-USD) benchmark summary live from the broker
+    // at finalize and fold it (per-worker + combined totals) into the result.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Benchmark", meta = (EditCondition = "bEnableBenchmarking", EditConditionHides))
+    bool bIncludeClusterBenchmark;
+
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Spawner|State")
     EJUSYNCSpawnerState CurrentState;
 
@@ -277,6 +314,13 @@ private:
     UMaterialInstanceDynamic* GetOrCreateSenderMID(URealtimeMeshComponent* Comp, UTexture2D* SenderTex);
     void PipelineDownloadNext(UJUSYNCSubsystem* Subsystem);
     void ApplyPointCloudSettingsToSpawner(FJUSYNCPointCloudSpawner* Spawner);
+
+    // Benchmark session helpers
+    void MaybeStartBenchmarkSession();
+    void ScheduleBenchmarkInteractiveWindow();
+    void FinalizeBenchmarkSession();
+    void ApplyClientReportCounters(const FString& OutDir, FJUSYNCBenchmarkResult& Result);
+    void FetchClusterBenchmarkReport(FJUSYNCBenchmarkResult& Result);
 
     int32 CalculateDynamicTimeout(int64 FileSizeBytes) const;
     void LoadFileThroughPipeline(const FString& Filename, int32 Rank, int64 Size, uint64 HashLo, uint64 HashHi, int32 FileIndex, bool bIsInitial);
@@ -388,6 +432,17 @@ private:
     double LastCommitCompleteTime;
     bool bSceneDiffInFlight;
     bool bInitialSpawnDone;
+
+    // Benchmark session state
+    bool bBenchmarkSessionActive = false;
+    bool bBenchmarkWindowScheduled = false;
+    bool bBenchmarkFinalized = false;
+    double BenchmarkSessionWallStart = 0.0;
+    int64 BenchmarkRAMStartBytes = 0;
+    int64 BenchmarkVRAMStartBytes = 0;
+    int64 BenchmarkSceneVertices = 0;
+    int64 BenchmarkSceneTriangles = 0;
+    FTimerHandle BenchmarkFinalizeTimerHandle;
 
     // Persistent V2-seen file→rank map.
     TMap<FString, int32> SeenV2Files;

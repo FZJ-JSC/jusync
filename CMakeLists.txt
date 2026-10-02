@@ -197,10 +197,10 @@ else()
     message(STATUS "Debug logging: ENABLED (Debug build)")
 endif()
 
-# zstd (detection done earlier; linked here where the target exists)
+# zstd (detection done earlier; include dirs + define here, the library itself
+# is linked further below AFTER lightusd — see comment there)
 if(JUSYNC_HAS_ZSTD)
     target_include_directories(${PROJECT_NAME} PRIVATE ${ZSTD_INCLUDE_DIR})
-    target_link_libraries(${PROJECT_NAME} PRIVATE ${ZSTD_LIBRARY})
     target_compile_definitions(${PROJECT_NAME} PRIVATE JUSYNC_HAS_ZSTD=1)
 endif()
 
@@ -259,6 +259,18 @@ target_link_libraries(${PROJECT_NAME}
         glm::glm
         ${TBB_LIB}
 )
+
+# Link the system zstd AFTER lightusd on purpose: LightUSD vendors a zstd
+# amalgamation (zstd.c) that already defines the decompression API we use.
+# If libzstd.a were scanned first (or as the only provider on a strict
+# static link), its members would collide with the vendored object — two
+# static definitions = "multiple definition of ZSTD_*" on MinGW. Placed
+# last, the archive is only consulted for symbols still genuinely missing.
+# (On Linux the system libzstd is a shared object, which is why the old
+# order linked without complaint.)
+if(JUSYNC_HAS_ZSTD)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${ZSTD_LIBRARY})
+endif()
 
 # Link CUDA runtime if enabled
 if(ENABLE_CUDA AND CUDA_FOUND)

@@ -39,6 +39,10 @@
 // self-describing). JUSYNC_HAS_ZSTD is defined by CMake when libzstd was found.
 #if defined(JUSYNC_HAS_ZSTD)
 #include <zstd.h>
+// ZSTD_getErrorCode() and the ZSTD_error_* enum live in zstd_errors.h; older
+// libzstd releases (<= 1.5.5, e.g. Ubuntu's libzstd-dev) do not expose them
+// via zstd.h, so include it explicitly for portable comparisons.
+#include <zstd_errors.h>
 #endif
 
 // Include TinyUSDZ (LightUSD dev) with error handling
@@ -136,6 +140,48 @@ const std::vector<lightusd::value::normal3f>* JusyncGetMeshNormalsZeroCopy(
     }
 
     return nullptr;
+}
+
+// Resolves VTK's face-varying (per-corner) float2 primvar arrays - exported
+// WITHOUT an accompanying :indices attribute - into per-vertex UVs by taking
+// the first UV each vertex appears with in faceVertexIndices. Returns false
+// when the array length does not match the corner count, e.g. texture coords
+// exported from a different pipeline stage than the triangulated points, so
+// the caller can drop the channel instead of poisoning the whole mesh.
+bool JusyncResolveFaceVaryingUVs(
+    lightusd::GeomMesh& mesh,
+    const std::vector<lightusd::value::texcoord2f>& cornerUVs,
+    size_t pointCount,
+    std::vector<glm::vec2>& outUVs)
+{
+    if (cornerUVs.empty() || pointCount == 0) {
+        return false;
+    }
+
+    std::vector<int32_t> fviCopy;
+    const std::vector<int32_t>* fviPtr = JusyncGetStaticVector<int32_t>(mesh.faceVertexIndices);
+    if (!fviPtr) {
+        fviCopy = mesh.get_faceVertexIndices();
+        fviPtr = &fviCopy;
+    }
+    const auto& faceVertexIndices = *fviPtr;
+    if (faceVertexIndices.empty() || faceVertexIndices.size() != cornerUVs.size()) {
+        return false;
+    }
+
+    std::vector<uint8_t> seen(pointCount, 0);
+    outUVs.assign(pointCount, glm::vec2(0.0f, 0.0f));
+    for (size_t corner = 0; corner < faceVertexIndices.size(); ++corner) {
+        const int64_t vi = faceVertexIndices[corner];
+        if (vi < 0 || static_cast<size_t>(vi) >= pointCount) {
+            return false;
+        }
+        if (!seen[static_cast<size_t>(vi)]) {
+            seen[static_cast<size_t>(vi)] = 1;
+            outUVs[static_cast<size_t>(vi)] = glm::vec2(cornerUVs[corner].s, cornerUVs[corner].t);
+        }
+    }
+    return true;
 }
 
 } // namespace
@@ -2713,6 +2759,33 @@ void UsdProcessor::extractUVCoordinates(lightusd::GeomMesh* mesh, MeshData& mesh
                 }
             }
             if (!uvs) {
+                continue;
+            }
+
+            // VTK's ANARI pass can export face-varying texture coordinates as a
+            // bare float2[] primvar WITHOUT :indices (one tuple per face corner,
+            // not per vertex). Such an array cannot drive per-vertex UVs, and
+            // keeping it makes MeshData::validateGeometry() reject the WHOLE mesh
+            // (uvs.size() != points.size()), dropping the actor entirely. Resolve
+            // per-corner arrays to per-vertex by taking the first UV seen for
+            // each vertex via faceVertexIndices; anything else is dropped.
+            if (meshData.points.empty() || uvs->size() != meshData.points.size()) {
+                std::vector<glm::vec2> resolved;
+                if (!meshData.points.empty() &&
+                    JusyncResolveFaceVaryingUVs(*mesh, *uvs, meshData.points.size(), resolved)) {
+                    MIDDLEWARE_LOG_WARNING(
+                        "UV primvar '%s' is face-varying (%zu corners for %zu vertices) - "
+                        "resolved to per-vertex via face indices",
+                        name.c_str(), uvs->size(), meshData.points.size());
+                    normalizeUVCoordinatesParallel(resolved);
+                    meshData.uvSets.push_back(std::move(resolved));
+                    meshData.uvSetNames.push_back(name);
+                    continue;
+                }
+                MIDDLEWARE_LOG_WARNING(
+                    "Skipping UV primvar '%s': size %zu does not match vertex count %zu "
+                    "(per-corner data without indices cannot be used; mesh kept, UVs dropped)",
+                    name.c_str(), uvs->size(), meshData.points.size());
                 continue;
             }
 
