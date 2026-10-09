@@ -39,6 +39,12 @@ bool AnariUsdClient::connect(const char* brokerEndpoint, int timeoutMs) {
     MIDDLEWARE_LOG_INFO("Connecting to ANARI USD broker: %s (timeout %dms)", 
                         brokerEndpoint ? brokerEndpoint : "default", timeoutMs);
     connectionStatus.store(ConnectionStatus::Connecting);
+    // Reconnect requested (first time or after a dead-link auto-reconnect):
+    // re-arm heartbeat recovery and remember the timeout for it.
+    explicitDisconnect.store(false);
+    if (timeoutMs > 0 && timeoutMs <= 30000) {
+        connectTimeoutMs = timeoutMs;
+    }
 
     try {
         // Validate timeout
@@ -134,6 +140,7 @@ void AnariUsdClient::disconnect(int gracefulTimeoutMs) {
     }
 
     MIDDLEWARE_LOG_INFO("Disconnecting from ANARI USD broker (graceful timeout: %dms)", gracefulTimeoutMs);
+    explicitDisconnect.store(true); // heartbeat must NOT auto-reconnect a deliberate close
     connectionStatus.store(ConnectionStatus::ShuttingDown);
     shutdownRequested.store(true);
 
@@ -2081,12 +2088,87 @@ void AnariUsdClient::dispatcherThread() {
 
     zmq::pollitem_t items[] = {{ zmqSocket->handle(), 0, ZMQ_POLLIN, 0 }};
 
+    // Idle heartbeat (P2): the broker is a ROUTER that pushes notifications
+    // only to identities it has recently HEARD from. When an idle SSH tunnel
+    // drops the TCP connection and libzmq transparently reconnects, the new
+    // pipe is unknown to the ROUTER and notifications are dropped until the
+    // client sends something again — that is the silent "20 s poll backstop"
+    // lag seen in the streaming journal. A lightweight periodic property ping
+    // keeps the tunnel warm, re-registers the identity, and proves liveness
+    // (any inbound frame, including ping replies, resets the dead timer).
+    const auto IDLE_MS = std::chrono::milliseconds(5000);
+    const auto DEAD_MS = std::chrono::milliseconds(20000);
+    auto lastInbound = std::chrono::steady_clock::now();
+    auto lastPing = lastInbound;
+    bool deadReported = false;
+
     while (dispatcherActive.load()) {
         try {
             // Poll with 100ms timeout so we wake up promptly on activity but
             // also check dispatcherActive periodically.
             int pollResult = zmq::poll(items, 1, std::chrono::milliseconds(100));
-            if (pollResult <= 0) continue;
+            if (pollResult <= 0) {
+                const auto now = std::chrono::steady_clock::now();
+                if (connectionStatus.load() == ConnectionStatus::Connected) {
+                    if (now - lastInbound >= DEAD_MS) {
+                        if (!deadReported) {
+                            deadReported = true;
+                            MIDDLEWARE_LOG_ERROR(
+                                "No inbound broker traffic for %lld ms - marking connection dead "
+                                "(idle SSH tunnel?)", (long long)DEAD_MS.count());
+                            emitProtocolDiagnostics("connection_dead",
+                                                    "heartbeat: no inbound traffic",
+                                                    static_cast<uint64_t>(DEAD_MS.count()), 0);
+                            connectionStatus.store(ConnectionStatus::Disconnected);
+                            // Fail any stalled waiters immediately so the
+                            // consumer retries instead of hanging to timeout.
+                            wakeResponseWaiters();
+
+                            // Recovery: UE never re-calls ConnectToBroker on its own,
+                            // and connect() from this thread would join() itself — so
+                            // run the full teardown + re-handshake on one detached
+                            // thread. cleanup() joins THIS dispatcher once we return;
+                            // the loop above must not send more pings meanwhile, which
+                            // is why deadReported latches until (re)connect resets it.
+                            if (!explicitDisconnect.load() &&
+                                !reconnectInProgress.exchange(true)) {
+                                const std::string endpoint = brokerEndpoint;
+                                const int timeout = connectTimeoutMs;
+                                // shared_from_this(): the thread owns a reference
+                                // for its lifetime, so a mid-reconnect client
+                                // destruction can never dangle 'this'.
+                                std::thread([self = shared_from_this(),
+                                             endpoint, timeout]() {
+                                    for (int attempt = 1; attempt <= 3; ++attempt) {
+                                        if (self->explicitDisconnect.load()) {
+                                            break;
+                                        }
+                                        MIDDLEWARE_LOG_INFO(
+                                            "Heartbeat auto-reconnect attempt %d/3 -> %s",
+                                            attempt, endpoint.c_str());
+                                        self->cleanup(); // joins this old dispatcher
+                                        if (self->explicitDisconnect.load()) {
+                                            break; // deliberate close during teardown
+                                        }
+                                        if (self->connect(endpoint.c_str(), timeout)) {
+                                            MIDDLEWARE_LOG_INFO(
+                                                "Heartbeat auto-reconnect succeeded (attempt %d)",
+                                                attempt);
+                                            break;
+                                        }
+                                        std::this_thread::sleep_for(std::chrono::seconds(5));
+                                    }
+                                    self->reconnectInProgress.store(false);
+                                }).detach();
+                            }
+                        }
+                    } else if (now - lastInbound >= IDLE_MS && now - lastPing >= IDLE_MS) {
+                        lastPing = now;
+                        sendIdlePing();
+                    }
+                }
+                continue;
+            }
 
             // Poll said data available — receive the complete pair under recvMutex
             zmq::message_t delimMsg, dataMsg;
@@ -2104,6 +2186,9 @@ void AnariUsdClient::dispatcherThread() {
             // response index (previously two full memcpys per message here).
             enqueueResponseFrame(std::move(delimMsg), std::move(dataMsg));
 
+            lastInbound = std::chrono::steady_clock::now();
+            deadReported = false;
+
         } catch (const zmq::error_t& e) {
             if (e.num() != EINVAL) { // EINVAL = context terminated on purpose
                 MIDDLEWARE_LOG_WARNING("Dispatcher ZMQ error: %s (errno: %d)",
@@ -2115,6 +2200,40 @@ void AnariUsdClient::dispatcherThread() {
     }
 
     MIDDLEWARE_LOG_INFO("Dispatcher thread stopped");
+}
+
+// ---------------------------------------------------------------------------
+// sendIdlePing — fire-and-forget property request for the dispatcher's idle
+// heartbeat (see dispatcherThread). Nobody consumes the reply: the request id
+// is registered as abandoned right after sending, so the dispatcher discards
+// the response frame on arrival. The value is the round trip itself.
+// ---------------------------------------------------------------------------
+
+void AnariUsdClient::sendIdlePing() {
+    if (!zmqSocket || connectionStatus.load() != ConnectionStatus::Connected) {
+        return;
+    }
+    try {
+        ZmqFileRequest request;
+        request.magic = ANARI_USD_MAGIC;
+        request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_GET_PROPERTY);
+        request.request_id = generateRequestId();
+        request.target_rank = -1;
+        request.setFilename("totalWorkerCount"); // broker always answers this cheaply
+        request.chunk_size = 0;
+
+        if (!sendRequest(&request, sizeof(request), request.request_id)) {
+            MIDDLEWARE_LOG_WARNING("Idle heartbeat ping send failed");
+            return;
+        }
+        abandonRequestFrames(request.request_id);
+        connectionStats.totalRequestsSent.fetch_add(1);
+        MIDDLEWARE_LOG_DEBUG("Idle heartbeat ping sent (request_id %u)", request.request_id);
+    } catch (const std::exception& e) {
+        MIDDLEWARE_LOG_WARNING("Idle heartbeat ping failed: %s", e.what());
+    } catch (...) {
+        MIDDLEWARE_LOG_WARNING("Idle heartbeat ping failed: unknown error");
+    }
 }
 
 // ---------------------------------------------------------------------------

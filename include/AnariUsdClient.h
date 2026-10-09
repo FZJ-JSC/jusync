@@ -35,7 +35,10 @@ namespace anari_usd_middleware {
  * ANARI USD ZMQ DEALER Client
  * Connects to ANARI USD broker to request files from HPC workers
  */
-class AnariUsdClient {
+// Owned exclusively via std::shared_ptr (middleware pImpl) — the heartbeat
+// auto-reconnect thread keeps the client alive through shared_from_this() so
+// a mid-reconnect shutdown can never free the object under it.
+class AnariUsdClient : public std::enable_shared_from_this<AnariUsdClient> {
 public:
     // Connection status enumeration
     enum class ConnectionStatus {
@@ -331,6 +334,14 @@ private:
     std::thread dispatchThread;
     std::atomic<bool> dispatcherActive{false};
 
+    // Idle-heartbeat auto-reconnect (P2): the dispatcher spawns ONE detached
+    // teardown+reconnect thread when the dead-link timer fires; a deliberate
+    // disconnectFromBroker() sets explicitDisconnect so the thread never
+    // resurrects a connection the user closed on purpose.
+    std::atomic<bool> reconnectInProgress{false};
+    std::atomic<bool> explicitDisconnect{false};
+    int connectTimeoutMs{5000}; // last connect() timeout, reused by auto-reconnect
+
     // Bounded parallel-download worker pool used by requestFilesParallel.
     // Owned by the client and torn down in cleanup() BEFORE the socket closes,
     // so in-flight download threads are always joined and cannot outlive the
@@ -349,6 +360,12 @@ private:
     // Dedicated background dispatcher: continuously polls the ZMQ socket
     // and enqueues every incoming frame pair into responseQueue.
     void dispatcherThread();
+
+    // Idle heartbeat (P2): fire-and-forget property ping sent by the
+    // dispatcher when the wire has been quiet; keeps the SSH tunnel warm and
+    // re-registers this client's ROUTER identity so notifications resume
+    // immediately after a silent reconnect.
+    void sendIdlePing();
 
     // Statistics and monitoring
     ConnectionStats connectionStats;

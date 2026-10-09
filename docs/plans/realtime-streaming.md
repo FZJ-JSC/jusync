@@ -40,7 +40,7 @@
 - [ ] Live-update priority queue > initial spawn; remove `bInitialSpawnDone` gate for live path (`JUSYNCFileSpawnerActor.cpp:3193`).
 - [x] Poll sleeps: production path (`waitForMatchingFrames`) was already condvar-driven; the 10 ms sleeps lived in the dead `ParallelDownloader.cpp` (untouched, guarded). New abort wake path uses `wakeResponseWaiters()` (lock+notify_all), no polling.
 - [x] Dispatcher already routes zero-copy `FramePairPtr` shared_ptrs; chunk payload lands straight in the UE buffer via the in-situ callback (no dispatcher memcpy).
-- [ ] Notification socket: heartbeat + auto-resubscribe on reconnect (kills silent 20 s backstop lag mode).
+- [x] Notification keepalive (supersedes "heartbeat + auto-resubscribe": the broker has no SUBSCRIBE - it is a ROUTER pushing to recently-HEARD identities, which is exactly why a silently reconnected tunnel drops notifications until the next 20 s poll). Dispatcher's 100 ms idle tick now: sends a fire-and-forget `REQ_GET_PROPERTY totalWorkerCount` ping after 5 s of silence (reply discarded via the abandoned-request set; keeps the SSH tunnel warm AND re-registers our ROUTER identity so NOTIFY_* resumes instantly), and after 20 s with zero inbound marks the link dead (diagnostics event + fails waiters immediately) and runs teardown+reconnect on one detached thread (3 attempts, 5 s apart; guarded by `explicitDisconnect` so a deliberate close is never resurrected; thread owns a `shared_from_this()` reference so no use-after-free).
 - [ ] Knobs: chunk size (4→8/16 MB), SO_RCVBUF, ZMQ HWM; surface in subsystem details/cvars.
 - [ ] `CommitCompleteCooldownSeconds`/`LiveUpdatePollInterval` defaults revisited with Phase 0 data.
 - Accept: bursty commit stream → lag stays bounded (~1 service time), never grows.
