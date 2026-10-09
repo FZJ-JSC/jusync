@@ -17,7 +17,11 @@
 #include "TimerManager.h"
 
 // Middleware C API used to fetch the cluster-side (ANARI-USD) benchmark files
-// live over the broker at benchmark finalize.
+// live over the broker at benchmark finalize. With the middleware enabled the
+// declarations come from AnariUsdMiddleware_C.h (with the correct dllimport
+// linkage); re-declaring them there too causes C4273 inconsistent dll linkage.
+// The fallback block only provides them for no-middleware builds.
+#if !WITH_ANARI_USD_MIDDLEWARE
 extern "C"
 {
 int IsBrokerConnected_C(void);
@@ -25,6 +29,7 @@ int RequestTotalWorkerCount_C(unsigned int* out_total_count, int timeout_ms);
 int RequestFile_C(const char* filename, int32_t target_rank, unsigned char** out_data, size_t* out_size, int timeout_ms);
 void FreeBuffer_C(unsigned char* buffer);
 }
+#endif
 
 static bool JUSYNCRequestFileToString(const FString& Filename, int32 Rank, FString& OutBody)
 {

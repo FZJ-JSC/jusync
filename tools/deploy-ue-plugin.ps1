@@ -28,8 +28,12 @@ $roboArgs = @($srcPlugin, $dstPlugin, '/E', '/NJH', '/NDL', '/NFL',
 if ($WhatIf) { $roboArgs += '/L' }
 
 Write-Host "== Sync plugin sources ==" -ForegroundColor Cyan
-& robocopy @roboArgs | Out-Host
-if ($LASTEXITCODE -ge 8) { throw "robocopy failed with code $LASTEXITCODE" }
+# Robocopy output goes to a log file, not the console host: piping it through
+# Out-Host deadlocks when this script runs under a non-interactive shell.
+$roboLog = Join-Path $env:TEMP 'jusync-deploy-robocopy.log'
+& robocopy @roboArgs "/LOG:$roboLog" | Out-Null
+if ($LASTEXITCODE -ge 8) { throw "robocopy failed with code $LASTEXITCODE (log: $roboLog)" }
+Write-Host "robocopy ok (exit $LASTEXITCODE), log: $roboLog" -ForegroundColor Green
 
 # Middleware DLL (Phase 0+1 API incl. JusyncDiag* exports) into the plugin's
 # Binaries next to the UE module DLLs. Prefer the newest build available.
@@ -45,10 +49,20 @@ $dll = if ($DllConfig -eq 'Diagnostics') {
 }
 if (-not $dll) { throw 'no built anari_usd_middleware.dll found - build the middleware first (see docs/plans or build-diag)' }
 $dstDll = Join-Path $dstPlugin 'Binaries\Win64\anari_usd_middleware.dll'
+# UBT LINKS against Source\ThirdParty\AnariUsdMiddleware\Lib\Win64\anari_usd_middleware.lib
+# (JUSYNC.Build.cs PublicAdditionalLibraries) and stages the DLL from the same dir, so the
+# import lib + exp must ship with the DLL or new C API exports fail to resolve.
+$buildDir = Split-Path $dll -Parent
+$dstLibDir = Join-Path $dstPlugin 'Source\ThirdParty\AnariUsdMiddleware\Lib\Win64'
 if ($WhatIf) {
     Write-Host "== [dry-run] would copy $dll -> $dstDll ==" -ForegroundColor Yellow
+    Write-Host "== [dry-run] would copy lib/exp/dll from $buildDir -> $dstLibDir ==" -ForegroundColor Yellow
 } else {
     Copy-Item $dll $dstDll -Force
-    Write-Host "== Middleware DLL: $dll -> $dstDll ==" -ForegroundColor Green
+    foreach ($bin in 'anari_usd_middleware.lib', 'anari_usd_middleware.exp', 'anari_usd_middleware.dll') {
+        $binSrc = Join-Path $buildDir $bin
+        if (Test-Path $binSrc) { Copy-Item $binSrc (Join-Path $dstLibDir $bin) -Force }
+    }
+    Write-Host "== Middleware binaries: $buildDir -> Binaries\Win64 + ThirdParty Lib\Win64 ==" -ForegroundColor Green
 }
 Write-Host "Next: open the sample project (or Build.bat) so UBT recompiles UnrealEditor-JUSYNC from the synced sources." -ForegroundColor Cyan

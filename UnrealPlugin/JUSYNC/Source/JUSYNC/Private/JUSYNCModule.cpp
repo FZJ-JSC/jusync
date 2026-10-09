@@ -243,7 +243,7 @@ void FJUSYNCModule::RegisterModuleSystems() {
                     UE_LOG(LogJUSYNC, Display, TEXT("%s"), *Line);
                 }
             }),
-            EConsoleVariableFlags::ECVF_CodeOnly);
+            ECVF_Default); // user-typable diag command (UE 5.7 removed ECVF_CodeOnly, which would have hidden it anyway)
     }
 #endif
 }

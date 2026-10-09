@@ -694,6 +694,54 @@ struct JUSYNC_API FJUSYNCBenchmarkResult
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	FString ClusterReport;
 
+	// ----- Pipeline stage timings (written by AJUSYNCBenchmarkActor) -----
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float ConnectTimeMs;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float FileListTimeMs;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float DownloadTimeMs;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float ParseTimeMs;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float MeshSpawnTimeMs;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float PointCloudSpawnTimeMs;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float MaterialTimeMs;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float TeardownTimeMs;
+
+	// ----- Network / data metrics -----
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	float NetworkThroughput_MBps;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int32 FilesDownloaded;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int64 TotalBytesDownloaded;
+
+	// ----- Parse / spawn counts -----
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int32 MeshCount;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int32 PointCloudCount;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int32 PointCloudPointsSpawned;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
+	int32 MaterialsCreated;
+
 	FJUSYNCBenchmarkResult()
 	{
 		TestName = TEXT("");
@@ -739,6 +787,21 @@ struct JUSYNC_API FJUSYNCBenchmarkResult
 		ClusterSerializeMsTotal = 0.0f;
 		ClusterStoreMsTotal = 0.0f;
 		ClusterReport = TEXT("");
+		ConnectTimeMs = 0.0f;
+		FileListTimeMs = 0.0f;
+		DownloadTimeMs = 0.0f;
+		ParseTimeMs = 0.0f;
+		MeshSpawnTimeMs = 0.0f;
+		PointCloudSpawnTimeMs = 0.0f;
+		MaterialTimeMs = 0.0f;
+		TeardownTimeMs = 0.0f;
+		NetworkThroughput_MBps = 0.0f;
+		FilesDownloaded = 0;
+		TotalBytesDownloaded = 0;
+		MeshCount = 0;
+		PointCloudCount = 0;
+		PointCloudPointsSpawned = 0;
+		MaterialsCreated = 0;
 	}
 };
 
