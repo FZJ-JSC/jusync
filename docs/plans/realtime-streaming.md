@@ -49,13 +49,30 @@
 - [x] **stream_perf middleware harness (`tests/stream_perf/`, lives under BUILD_TESTS in the root CMakeLists):** drives the same C API order UE uses (Initialize→ConnectToBroker→register→StartReceiving); reports connect/list/download ms, crate-vs-ASCII magic sniff, abort-token responsiveness, notification counts by type, diag journal. Local rig (loopback, KB-scale tutorial clips): connect 7–11 ms, list 7.9 ms for 53 files, 0.4–0.7 ms per download, aborts: pre-fired rc=-1 @0.0 ms / in-flight abort @0.1 ms / post-completion triggers harmless. **Loopback upper bound ≈ 3–4 MB/s on tiny files (per-request overhead dominated) — NOT a JURECA tunnel estimate.**
 - Accept: bursty commit stream → lag stays bounded (~1 service time), never grows.
 
-## Phase 3 — RawGeo channel (flagship; mostly jusync, one ANARI PR)
-- [ ] Protocol v4 (`AnariUsdProtocol.h`): `RESP_GEO_CHUNK {magic, type, request_id, source_rank, filename[256], prim_path[256], kind(points|tri_mesh), seq, tile_id, count, dtype(fp32|fp16|int16_norm+u8col), stride, total_size, offset, chunk_size}` + REQ_GET_GEO(104).
-- [ ] ANARI `UsdBridge`: rawgeo emitter in the TrackStageMemory/export step for GeomPoints/meshes → memcpy of pxr VtArrays → zstd-framed store (`UsdBridgeMemoryStore` reuse) → inherits DiffCapture hashes/notify.
-- [ ] Middleware: rawgeo demuxer (no USD involved) → `CPointCloudDataFill.lidar_points` / compact mesh fill — existing API paths, callbacks unchanged.
-- [ ] UE plugin: handle rawgeo-backed fills natively (LiDAR path today; GPU path Phase 6).
-- [ ] usda/usdc retained for scene structure/materials/hierarchy only.
-- Accept: 10M-pt update = ~130 MB binary (35 MB @ stride 4), demux+fill < 0.5 s.
+## Phase 3 — RawGeo channel (SHIPPED 2026-10-09 — store-key side channel, no wire change)
+Implemented as a **file-store side channel**, not a new protocol: the sender mirrors instancer float
+arrays into the in-memory store under `clips/<name>__<time>.geo` with a self-describing
+`JusyncRawGeoHeader` ('JSG1' magic, prim name, counts, color/attr descriptors) + raw float sections
+(pack-1, AnariUsdProtocol.h). Broker/notify/diff-capture/file-list are key-generic → **zero wire or
+middleware-DLL changes**.
+- ANARI-USD (`feat/rawgeo-streaming`): `JUSYNC_RAWGEO=1` → `UsdBridgeUsdWriter::TryStoreRawGeo`
+  memcpy-blobs positions(+colors+per-vertex float attrs); `SetGeometryDataTemplate` returns before
+  `UpdateUsdGeometry`/`TrackStageMemory`, removing the per-frame pxr crate export (~1 s at 10M).
+  USD clip twins stay registered but empty (~923 B) → auto-ignored by the client's
+  `MinimumFileSizeBytes=1000` gate. `.geo` twin purged in `RemoveStoreEntriesForFile`.
+  Example lesson: the SDK swallows no-op re-commits → anariBigCloudUsd must re-`anariSetParameter`
+  the position array each frame (objects retained → prim names stay stable).
+- jusync (UE plugin only): `JUSYNCIsLiveUpdateGeometryFile` + FilterFileList accept `clips/*.geo`;
+  `LoadUSDFullCompactFromBuffer` sniffs JSG1 magic BEFORE any USD call → `JUSYNCParseRawGeoBuffer`
+  fills `FJUSYNCPointCloudData.LidarPoints` directly (same (x,z,-y) swap, colors 0..1,
+  attribute0.x→Widths, origin-inclusive bbox quirk as the middleware direct fill).
+- Measured 10M/1 Hz loopback: sender commit→flush 1014→**226 ms**; parse+fill 770→**154 ms**;
+  transfer ~440 ms (~272 MB/s); spawn ~3.5 s (octree → milestone 2 raw VF renderer); end cycle
+  7.9→~5 s. At 2 Hz the 120 MB download is latest-wins-aborted nearly always (queue 770–920 ms)
+  → run 10M at 1 fps until transfer + spawn shrink (chunk-size knob P2 + point renderer).
+- Accept: ✅ met — 10M update = 120 MB wire, demux+fill 154 ms < 0.5 s.
+- Original sketch (superseded, kept for context): REQ_GET_GEO(104)/RESP_GEO_CHUNK protocol v4 with
+  dtype/stride/LOD fields — tiling (Phase 4) can still layer onto the `.geo` key scheme unchanged.
 
 ## Phase 4 — Tiling + LOD (ANARI device side, zero middleware change)
 - [ ] Rawgeo emitter: voxel-hash point indices into K³ tiles (default 4³=64) → independent MemoryStore files+hashes.

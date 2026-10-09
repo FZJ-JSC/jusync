@@ -42,6 +42,7 @@
 #ifdef WITH_ANARI_USD_MIDDLEWARE
 extern "C" {
 #include "AnariUsdMiddleware_C.h"
+#include "AnariUsdProtocol.h" // anari_usd_protocol::JusyncRawGeoHeader (raw point stream wire format)
 }
 #include <cstdint>
 #endif
@@ -1598,6 +1599,128 @@ bool UJUSYNCSubsystem::LoadUSDFullFromBufferNoCopy(const TArray<uint8>& Buffer, 
 #endif
 }
 
+// JUSYNC RawGeo (sender JUSYNC_RAWGEO=1): fill FJUSYNCPointCloudData straight
+// from a JSG1 payload — same conversions as the middleware direct LiDAR fill
+// (USD (x,y,z) -> UE (x,z,-y), colors 0..1, attribute0.x -> widths), but with
+// no tinyusdz parse anywhere.
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, FJUSYNCPointCloudRef& OutCloud)
+{
+    using namespace anari_usd_protocol;
+
+    if (Buffer.Num() < (int32)sizeof(JusyncRawGeoHeader))
+        return false;
+
+    const uint8* Src = Buffer.GetData();
+    JusyncRawGeoHeader Hdr;
+    FMemory::Memcpy(&Hdr, Src, sizeof(Hdr));
+    if (!Hdr.valid((size_t)Buffer.Num()))
+        return false;
+    if (Hdr.num_points == 0 || Hdr.num_points > (uint64)MAX_int32 || Hdr.num_attributes > 16)
+        return false;
+
+    const int64 N = (int64)Hdr.num_points;
+    const int64 AttrTableBytes = (int64)Hdr.num_attributes * (int64)sizeof(JusyncRawGeoAttrDesc);
+    const JusyncRawGeoAttrDesc* Descs = reinterpret_cast<const JusyncRawGeoAttrDesc*>(Src + sizeof(Hdr));
+
+    uint64 Expected = sizeof(Hdr) + (uint64)AttrTableBytes + (uint64)N * 3 * sizeof(float);
+    if (Hdr.color_components)
+        Expected += (uint64)N * Hdr.color_components * sizeof(float);
+    for (uint32 a = 0; a < Hdr.num_attributes; ++a)
+    {
+        if (Descs[a].components == 0 || Descs[a].components > 4)
+            return false;
+        Expected += (uint64)Hdr.attr_uniform_count * Descs[a].components * sizeof(float);
+    }
+    if ((uint64)Buffer.Num() < Expected)
+        return false;
+
+    const float* PosF = reinterpret_cast<const float*>(Src + sizeof(Hdr) + AttrTableBytes);
+    const float* ColF = nullptr;
+    const float* AttrF = nullptr;
+    if (Hdr.color_components)
+    {
+        ColF = PosF + N * 3;
+        AttrF = ColF + N * Hdr.color_components;
+    }
+    else
+    {
+        AttrF = PosF + N * 3;
+    }
+
+    // attribute0 (gradient-LUT scalar channel), when the sender emitted one.
+    const float* WidthF = nullptr;
+    int32 WidthComps = 0;
+    int64 WidthCount = 0;
+    {
+        const float* Section = AttrF;
+        for (uint32 a = 0; a < Hdr.num_attributes; ++a)
+        {
+            const int64 Count = FMath::Min<int64>((int64)Hdr.attr_uniform_count, N);
+            if (strcmp(Descs[a].name, "attribute0") == 0)
+            {
+                WidthF = Section;
+                WidthComps = (int32)Descs[a].components;
+                WidthCount = Count;
+                break;
+            }
+            Section += Count * Descs[a].components;
+        }
+    }
+
+    auto PC = MakeShared<FJUSYNCPointCloudData, ESPMode::ThreadSafe>();
+    PC->ElementName = UTF8_TO_TCHAR(Hdr.prim_name);
+    PC->TypeName = TEXT("GeomPoints");
+    PC->PointCount = (int32)N;
+    PC->bHasColors = Hdr.color_components != 0;
+    PC->bHasNormals = false;
+
+    static_assert(sizeof(FLidarPointCloudPoint) == sizeof(CPointCloudLidarPoint_v1),
+        "FLidarPointCloudPoint layout no longer matches CPointCloudLidarPoint_v1");
+    PC->bHasLidarPoints = true;
+    PC->LidarPoints.SetNumUninitialized(N);
+
+    if (WidthF && WidthCount > 0)
+        PC->Widths.SetNumUninitialized((int32)WidthCount);
+
+    // Bounding box mirrors the legacy quirk: the box always contains the
+    // origin in USD space, then the (x, z, -y) transform is applied to it.
+    float MinU[3] = { 0.f, 0.f, 0.f };
+    float MaxU[3] = { 0.f, 0.f, 0.f };
+
+    for (int64 i = 0; i < N; ++i)
+    {
+        const float x = PosF[i * 3 + 0];
+        const float y = PosF[i * 3 + 1];
+        const float z = PosF[i * 3 + 2];
+
+        MinU[0] = FMath::Min(MinU[0], x); MaxU[0] = FMath::Max(MaxU[0], x);
+        MinU[1] = FMath::Min(MinU[1], y); MaxU[1] = FMath::Max(MaxU[1], y);
+        MinU[2] = FMath::Min(MinU[2], z); MaxU[2] = FMath::Max(MaxU[2], z);
+
+        float r = 1.f, g = 1.f, b = 1.f, a = 1.f;
+        if (ColF)
+        {
+            const float* c = ColF + i * Hdr.color_components;
+            r = c[0]; g = c[1]; b = c[2];
+            if (Hdr.color_components == 4) a = c[3];
+        }
+
+        PC->LidarPoints[i] = FLidarPointCloudPoint(
+            (double)x, (double)z, (double)(-y), r, g, b, a);
+
+        if (WidthF && i < WidthCount)
+            PC->Widths[(int32)i] = WidthF[i * WidthComps];
+    }
+
+    PC->BoundingBoxMin = FVector(MinU[0], MinU[2], -MinU[1]);
+    PC->BoundingBoxMax = FVector(MaxU[0], MaxU[2], -MaxU[1]);
+
+    OutCloud = MoveTemp(PC);
+    return true;
+}
+#endif // WITH_ANARI_USD_MIDDLEWARE
+
 bool UJUSYNCSubsystem::LoadUSDFullCompactFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCCompactMeshRef>& OutMeshes, TArray<FJUSYNCPointCloudRef>& OutPointCloudData)
 {
 #ifdef WITH_ANARI_USD_MIDDLEWARE
@@ -1614,6 +1737,27 @@ bool UJUSYNCSubsystem::LoadUSDFullCompactFromBuffer(const TArray<uint8>& Buffer,
     {
         UE_LOG(LogTemp, Warning, TEXT("JUSYNC: LoadUSDFullCompactFromBuffer called with empty buffer"));
         return false;
+    }
+
+    // JUSYNC RawGeo: a JSG1-magic payload fills the cloud struct straight
+    // from the raw float arrays — no USD parse at any stage.
+    {
+        uint32 MaybeMagic = 0;
+        FMemory::Memcpy(&MaybeMagic, Buffer.GetData(), sizeof(MaybeMagic));
+        if (MaybeMagic == anari_usd_protocol::JUSYNC_RAWGEO_MAGIC)
+        {
+            FJUSYNCPointCloudRef Cloud;
+            if (JUSYNCParseRawGeoBuffer(Buffer, Cloud))
+            {
+                OutPointCloudData.Add(MoveTemp(Cloud));
+                UE_LOG(LogTemp, Log, TEXT("JUSYNC: RawGeo payload: 1 point cloud (%d points) from '%s'"),
+                    OutPointCloudData[0]->PointCount, *Filename);
+                return true;
+            }
+            UE_LOG(LogTemp, Warning, TEXT("JUSYNC: RawGeo magic but malformed payload for '%s' (%d bytes)"),
+                *Filename, Buffer.Num());
+            return false;
+        }
     }
 
     FTCHARToUTF8 FilenameConverter(*Filename);
@@ -4624,7 +4768,18 @@ bool UJUSYNCSubsystem::RequestFileSized(const FString& Filename, int32 TargetRan
                 }
                 else
                 {
-                    UE_LOG(LogJUSYNC, Error, TEXT("In-situ download failed for '%s'"), *Filename);
+                    // rc <= 0: timeout, transport error, OR a latest-wins cancel
+                    // (ChangeTracker aborted this download because newer data
+                    // arrived). Aborts are routine at high update rates, so keep
+                    // them quiet when the request was abortable.
+                    if (AbortHandle != 0)
+                    {
+                        UE_LOG(LogJUSYNC, Verbose, TEXT("In-situ download of '%s' ended early (aborted/failed)"), *Filename);
+                    }
+                    else
+                    {
+                        UE_LOG(LogJUSYNC, Error, TEXT("In-situ download failed for '%s'"), *Filename);
+                    }
                     return false;
                 }
             }

@@ -379,6 +379,62 @@ struct ZmqFileNotification
     }
 };
 
+// ---------------------------------------------------------------------------
+// RawGeo: self-describing binary point-cloud payload streamed under the same
+// "clips/<name>_Geom__<time>" key as the USD crate, but with ".geo" extension.
+// Written by UsdBridge alongside (or instead of) USD clip exports when
+// JUSYNC_RAWGEO=1, so a streaming client can skip USD parsing entirely.
+// Clients sniff Magic — never the filename — mirroring the crate-vs-ASCII
+// content sniffing convention.
+//
+// File layout (all little-endian, packed):
+//   [JusyncRawGeoHeader]
+//   [JusyncRawGeoAttrDesc] * numAttributes
+//   positions : float3  * numPoints          (positionComponents == 3)
+//   colors    : float3/4 * numPoints         (only if colorComponents != 0)
+//   attr data : float * (attrUniformCount * components) per desc, in order
+// ---------------------------------------------------------------------------
+inline constexpr uint32_t JUSYNC_RAWGEO_MAGIC   = 0x3147534A; // "JSG1"
+inline constexpr uint32_t JUSYNC_RAWGEO_VERSION = 1;
+
+struct JusyncRawGeoAttrDesc
+{
+    char     name[32];            // e.g. "attribute0"
+    uint32_t components;          // 1..4 floats per element
+    uint32_t pad;                 // keep 40-byte struct
+};
+
+struct JusyncRawGeoHeader
+{
+    uint32_t magic;               // JUSYNC_RAWGEO_MAGIC
+    uint32_t version;             // JUSYNC_RAWGEO_VERSION
+    char     prim_name[64];       // element name, NUL-padded ("bigCloud")
+    uint64_t num_points;
+    double   time;                // timestep this payload samples
+    uint32_t position_components; // always 3 (float3) in v1
+    uint32_t color_components;    // 0 = absent, 3 = rgb, 4 = rgba (float)
+    uint32_t num_attributes;      // descs following the header
+    uint32_t attr_uniform_count;  // per-attribute element count (== num_points)
+    uint64_t payload_bytes;       // total bytes of the three data sections
+
+    bool valid(size_t totalBytes) const
+    {
+        if (magic != JUSYNC_RAWGEO_MAGIC || version != JUSYNC_RAWGEO_VERSION)
+            return false;
+        if (position_components != 3 || color_components > 4)
+            return false;
+        const size_t table = total_header_and_table_bytes();
+        return totalBytes >= table && totalBytes - table >= payload_bytes;
+    }
+
+private:
+    size_t total_header_and_table_bytes() const
+    {
+        return sizeof(JusyncRawGeoHeader) +
+               static_cast<size_t>(num_attributes) * sizeof(JusyncRawGeoAttrDesc);
+    }
+};
+
 struct ZmqWorkerReady
 {
     uint32_t magic;

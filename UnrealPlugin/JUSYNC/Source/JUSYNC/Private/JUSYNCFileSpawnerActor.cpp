@@ -72,6 +72,16 @@ static bool JUSYNCRequestFileToString(const FString& Filename, int32 Rank, FStri
 
 static bool JUSYNCIsLiveUpdateGeometryFile(const FString& Filename)
 {
+    // JUSYNC RawGeo channel (JUSYNC_RAWGEO=1 on the sender): raw float3
+    // payloads stored under "clips/<name>__<time>.geo". The parser sniffs the
+    // JSG1 magic in the bytes, never the filename — extension acceptance here
+    // only routes the download.
+    if (Filename.EndsWith(TEXT(".geo")))
+    {
+        return Filename.StartsWith(TEXT("clips/")) &&
+               !Filename.Contains(TEXT("manifest"));
+    }
+
     // Per-prim geometry clips arrive as ASCII (.usda) OR binary crate (.usd/.usdc/.usdz)
     // depending on the sender's usd::serialize.outputBinary. Accept any USD extension;
     // the parser sniffs content (zstd magic, then PXR-USDC header), never the filename.
@@ -935,7 +945,9 @@ void AJUSYNCFileSpawnerActor::FilterFileList(const TArray<FString>& InFiles, con
         if (bFilterUSDOnly)
         {
             FString Ext = FPaths::GetExtension(Fname).ToLower();
-            if (Ext != TEXT("usd") && Ext != TEXT("usda") && Ext != TEXT("usdc") && Ext != TEXT("usdz"))
+            // ".geo" = JUSYNC RawGeo binary point payload (JUSYNC_RAWGEO sender mode)
+            if (Ext != TEXT("usd") && Ext != TEXT("usda") && Ext != TEXT("usdc") &&
+                Ext != TEXT("usdz") && Ext != TEXT("geo"))
                 continue;
         }
 
