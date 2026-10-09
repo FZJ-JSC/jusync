@@ -383,6 +383,25 @@ if(BUILD_TESTS)
 
     # Set C++17 standard for the test tool
     target_compile_features(usd_validation_tool PRIVATE cxx_std_17)
+    # stream_perf — middleware-level performance harness for P1/P2 streaming:
+    # connect/list/download timing with crate sniff, abort-token responsiveness,
+    # notification flow over an idle window. Drives the same C API as the UE
+    # plugin. Run against a live broker:  stream_perf.exe tcp://localhost:5556 [idle-s]
+    add_executable(stream_perf
+        tests/stream_perf/stream_perf.cpp
+    )
+
+    target_link_libraries(stream_perf
+        PRIVATE
+            ${PROJECT_NAME}
+    )
+
+    target_include_directories(stream_perf PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    target_compile_features(stream_perf PRIVATE cxx_std_17)
 
     # Create test data and reports directory structure
     file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/test_data/usd_samples)

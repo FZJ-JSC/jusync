@@ -172,6 +172,21 @@ bool AnariUsdClient::configureSocket(int timeoutMs) {
         zmqSocket->set(zmq::sockopt::rcvtimeo, timeoutMs);
         zmqSocket->set(zmq::sockopt::maxmsgsize, static_cast<int64_t>(maxMessageSize.load()));
 
+        // Pin a stable ROUTER identity so broker-side notification targeting
+        // (client_ids_) survives TCP reconnects; the broker registers this
+        // id on every request it serves, including heartbeat pings.
+        if (clientRoutingId.empty())
+        {
+            const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            static std::atomic<uint64_t> idSeq{0};
+            char idBuf[48];
+            std::snprintf(idBuf, sizeof(idBuf), "jusync-%llx-%llx",
+                          (unsigned long long)nanos, (unsigned long long)(++idSeq));
+            clientRoutingId = idBuf;
+        }
+        zmqSocket->set(zmq::sockopt::routing_id, clientRoutingId);
+
 #if PLATFORM_WINDOWS
         return configureWindowsSocket();
 #elif PLATFORM_LINUX
