@@ -1685,32 +1685,65 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, FJUSYNCPointClo
 
     // Bounding box mirrors the legacy quirk: the box always contains the
     // origin in USD space, then the (x, z, -y) transform is applied to it.
-    float MinU[3] = { 0.f, 0.f, 0.f };
-    float MaxU[3] = { 0.f, 0.f, 0.f };
+    // Fill runs ParallelFor'd (Milestone-2 Task C): point writes are
+    // index-independent, only the bbox reduces - done per chunk, merged
+    // serially with 0-init to keep the origin-in-bbox semantics.
+    struct FChunkBox { float Min[3]; float Max[3]; };
+    const int64 Per = FMath::DivideAndRoundUp<int64>(N, 64);
+    const int32 NumChunks = (int32)FMath::Clamp<int64>(
+        (N + Per - 1) / Per, 1, (N > 0) ? FMath::Min<int64>(64, N) : 1);
+    const int64 ChunkStride = FMath::DivideAndRoundUp<int64>(N, NumChunks);
+    TArray<FChunkBox> Boxes;
+    Boxes.SetNumUninitialized(NumChunks);
 
-    for (int64 i = 0; i < N; ++i)
+    ParallelFor(NumChunks, [&](int32 c)
     {
-        const float x = PosF[i * 3 + 0];
-        const float y = PosF[i * 3 + 1];
-        const float z = PosF[i * 3 + 2];
+        const int64 Begin = (int64)c * ChunkStride;
+        const int64 End = FMath::Min<int64>(N, Begin + ChunkStride);
+        float MinC[3] = { TNumericLimits<float>::Max(), TNumericLimits<float>::Max(), TNumericLimits<float>::Max() };
+        float MaxC[3] = { TNumericLimits<float>::Lowest(), TNumericLimits<float>::Lowest(), TNumericLimits<float>::Lowest() };
 
-        MinU[0] = FMath::Min(MinU[0], x); MaxU[0] = FMath::Max(MaxU[0], x);
-        MinU[1] = FMath::Min(MinU[1], y); MaxU[1] = FMath::Max(MaxU[1], y);
-        MinU[2] = FMath::Min(MinU[2], z); MaxU[2] = FMath::Max(MaxU[2], z);
-
-        float r = 1.f, g = 1.f, b = 1.f, a = 1.f;
-        if (ColF)
+        for (int64 i = Begin; i < End; ++i)
         {
-            const float* c = ColF + i * Hdr.color_components;
-            r = c[0]; g = c[1]; b = c[2];
-            if (Hdr.color_components == 4) a = c[3];
+            const float x = PosF[i * 3 + 0];
+            const float y = PosF[i * 3 + 1];
+            const float z = PosF[i * 3 + 2];
+
+            MinC[0] = FMath::Min(MinC[0], x); MaxC[0] = FMath::Max(MaxC[0], x);
+            MinC[1] = FMath::Min(MinC[1], y); MaxC[1] = FMath::Max(MaxC[1], y);
+            MinC[2] = FMath::Min(MinC[2], z); MaxC[2] = FMath::Max(MaxC[2], z);
+
+            float r = 1.f, g = 1.f, b = 1.f, a = 1.f;
+            if (ColF)
+            {
+                const float* cc = ColF + i * Hdr.color_components;
+                r = cc[0]; g = cc[1]; b = cc[2];
+                if (Hdr.color_components == 4) a = cc[3];
+            }
+
+            PC->LidarPoints[i] = FLidarPointCloudPoint(
+                (double)x, (double)z, (double)(-y), r, g, b, a);
+
+            if (WidthF && i < WidthCount)
+                PC->Widths[(int32)i] = WidthF[i * WidthComps];
         }
 
-        PC->LidarPoints[i] = FLidarPointCloudPoint(
-            (double)x, (double)z, (double)(-y), r, g, b, a);
+        for (int32 k = 0; k < 3; ++k)
+        {
+            Boxes[c].Min[k] = MinC[k];
+            Boxes[c].Max[k] = MaxC[k];
+        }
+    });
 
-        if (WidthF && i < WidthCount)
-            PC->Widths[(int32)i] = WidthF[i * WidthComps];
+    float MinU[3] = { 0.f, 0.f, 0.f };
+    float MaxU[3] = { 0.f, 0.f, 0.f };
+    for (const FChunkBox& B : Boxes)
+    {
+        for (int32 k = 0; k < 3; ++k)
+        {
+            MinU[k] = FMath::Min(MinU[k], B.Min[k]);
+            MaxU[k] = FMath::Max(MaxU[k], B.Max[k]);
+        }
     }
 
     PC->BoundingBoxMin = FVector(MinU[0], MinU[2], -MinU[1]);

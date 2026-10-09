@@ -194,7 +194,8 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
 
                 if (LocalLUT.Num() > 0)
                 {
-                    for (int64 i = 0; i < Points.Num(); ++i)
+                    // ParallelFor'd: per-point LUT lookup writes only Points[i].
+                    ParallelFor(static_cast<int32>(Points.Num()), [&](int32 i)
                     {
                         const float Attr0 = (i < Widths.Num()) ? Widths[i] : 0.0f;
                         const int32 LUTIdx = FMath::Clamp(
@@ -203,7 +204,7 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
                             LocalLUT.Num() - 1
                         );
                         Points[i].Color = LocalLUT[LUTIdx];
-                    }
+                    });
                 }
             }
 
@@ -285,10 +286,11 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
         }
         bool bUseGradient = LocalLUT.Num() > 0;
 
-        // Build LiDAR points on background thread
+        // Build LiDAR points on background thread (parallel: every index
+        // reads its own input slots and writes its own output slot).
         TArray64<FLidarPointCloudPoint> Points;
         Points.SetNum(PointCount);
-        for (int32 i = 0; i < PointCount; ++i)
+        ParallelFor(PointCount, [&](int32 i)
         {
             FVector3f Pos(Positions[i].X, Positions[i].Y, Positions[i].Z);
             FColor Col;
@@ -308,7 +310,7 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
                 Col = FColor::White;
             }
             Points[i] = FLidarPointCloudPoint(Pos.X, Pos.Y, Pos.Z, Col.R / 255.f, Col.G / 255.f, Col.B / 255.f, Col.A / 255.f);
-        }
+        });
 
         // Marshal to game thread
         FPointCloudReadyEntry Entry;
