@@ -712,6 +712,7 @@ void AJUSYNCFileSpawnerActor::StartSpawning()
     // TTF benchmark: wall-clock origin for this session (connect start)
     FJUSYNCBenchmarkTiming::Get().MarkConnectStart();
     if (ChangeTracker) ChangeTracker->Clear();
+    AbortAllInFlightDownloads();
     DeferredSpawns.Empty();
     FilenameToPCActors.Empty();
     PCElementToFilename.Empty();
@@ -743,6 +744,7 @@ void AJUSYNCFileSpawnerActor::CancelSpawning()
     PipelineActive = 0;
     bSceneDiffInFlight = false;
     if (ChangeTracker) ChangeTracker->Clear();
+    AbortAllInFlightDownloads();
     DeferredSpawns.Empty();
     GradientDeferredMeshes.Empty();
     GradientDeferredReplacementActors.Empty();
@@ -1222,21 +1224,56 @@ void AJUSYNCFileSpawnerActor::LoadFileThroughPipeline(const FString& Filename, i
     const int32 DynamicTimeout = CalculateDynamicTimeout(Size);
     const uint64 ExpectedSize = static_cast<uint64>(FMath::Max<int64>(0, Size));
 
-    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, WeakThis, Filename, Rank, Size, HashLo, HashHi, FileIndex, bIsInitial, DynamicTimeout, ExpectedSize, FileData = MoveTemp(FileData)]() mutable
+    // P2 latest-wins: give live-update downloads a middleware abort token so a
+    // superseding notification can cancel the transfer mid-stream instead of
+    // completing a GB-scale stale download + wasted parse. Registered here on
+    // the game thread; released in the game-thread completion below.
+    uint64 AbortHandle = 0;
+#if WITH_ANARI_USD_MIDDLEWARE
+    if (!bIsInitial && ChangeTracker && ExpectedSize > 0)
+    {
+        AbortHandle = JusyncAbortCreate_C();
+        if (AbortHandle != 0)
+        {
+            ActiveDownloadAborts.Add(Filename, AbortHandle);
+        }
+    }
+#endif
+
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, WeakThis, Filename, Rank, Size, HashLo, HashHi, FileIndex, bIsInitial, DynamicTimeout, ExpectedSize, AbortHandle, FileData = MoveTemp(FileData)]() mutable
     {
         if (!WeakSubsystem.IsValid() || !WeakThis.IsValid())
         {
+#if WITH_ANARI_USD_MIDDLEWARE
+            if (AbortHandle != 0)
+            {
+                JusyncAbortRelease_C(AbortHandle); // teardown race: free the token anyway
+            }
+#endif
             return;
         }
 
-        bool bSuccess = WeakSubsystem->RequestFileSized(Filename, Rank, DynamicTimeout, *FileData, ExpectedSize);
+        bool bSuccess = WeakSubsystem->RequestFileSized(Filename, Rank, DynamicTimeout, *FileData, ExpectedSize, AbortHandle);
 
         FFunctionGraphTask::CreateAndDispatchWhenReady(
-            [WeakThis, Filename, Rank, Size, HashLo, HashHi, FileIndex, bIsInitial, FileData = MoveTemp(FileData), bSuccess]() mutable
+            [WeakThis, Filename, Rank, Size, HashLo, HashHi, FileIndex, bIsInitial, AbortHandle, FileData = MoveTemp(FileData), bSuccess]() mutable
             {
                 if (!WeakThis.IsValid()) return;
                 AJUSYNCFileSpawnerActor* Self = WeakThis.Get();
                 Self->PipelineActive = FMath::Max(0, Self->PipelineActive - 1);
+
+                // The transfer is over: retire the abort token.
+                if (AbortHandle != 0)
+                {
+                    uint64* Current = Self->ActiveDownloadAborts.Find(Filename);
+                    if (Current && *Current == AbortHandle)
+                    {
+                        Self->ActiveDownloadAborts.Remove(Filename);
+                    }
+#if WITH_ANARI_USD_MIDDLEWARE
+                    JusyncAbortRelease_C(AbortHandle);
+#endif
+                }
 
                 if (!bSuccess || !FileData || FileData->Num() == 0)
                 {
@@ -1258,6 +1295,23 @@ void AJUSYNCFileSpawnerActor::LoadFileThroughPipeline(const FString& Filename, i
                         Self->ChainRefreshNext();
                     }
                     return;
+                }
+
+                // P2 latest-wins: if a newer notification superseded this
+                // file while bytes were in flight (e.g. the transfer
+                // completed before the abort could fire), do not pay for a
+                // stale parse - MarkFailed re-queues the fresh content and
+                // ChainRefreshNext starts it immediately.
+                if (!bIsInitial && Self->ChangeTracker)
+                {
+                    const FJUSYNCFileChangeRequest* Req = Self->ChangeTracker->Find(Filename);
+                    if (Req && Req->bSuperseded)
+                    {
+                        UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: [LATEST-WINS] '%s' superseded during download - skipping stale parse"), *Filename);
+                        Self->ChangeTracker->MarkFailed(Filename);
+                        Self->ChainRefreshNext();
+                        return;
+                    }
                 }
 
                 if (bIsInitial && !Self->bInitialSpawnDone)
@@ -3273,6 +3327,18 @@ void AJUSYNCFileSpawnerActor::HandleFileUpdateNotification(const FString& Filena
         else
         {
             UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Superseded in-flight update for '%s'"), *Filename);
+#if WITH_ANARI_USD_MIDDLEWARE
+            // P2 latest-wins: cancel the stale transfer mid-stream so the
+            // fresh download starts right away instead of queueing behind a
+            // full GB-scale tail that would be discarded after parsing.
+            if (const uint64* AbortHandle = ActiveDownloadAborts.Find(Filename))
+            {
+                if (JusyncAbortTrigger_C(*AbortHandle))
+                {
+                    UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Aborted in-flight download of '%s' (newer data requested)"), *Filename);
+                }
+            }
+#endif
         }
         return;
     }
@@ -3846,6 +3912,18 @@ int32 AJUSYNCFileSpawnerActor::DestroyFileActors(const FString& Filename)
     }
 
     return Destroyed;
+}
+
+void AJUSYNCFileSpawnerActor::AbortAllInFlightDownloads()
+{
+    for (const TPair<FString, uint64>& Pair : ActiveDownloadAborts)
+    {
+#if WITH_ANARI_USD_MIDDLEWARE
+        JusyncAbortTrigger_C(Pair.Value);
+        JusyncAbortRelease_C(Pair.Value);
+#endif
+    }
+    ActiveDownloadAborts.Reset();
 }
 
 void AJUSYNCFileSpawnerActor::ChainRefreshNext()

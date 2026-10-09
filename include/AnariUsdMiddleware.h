@@ -131,9 +131,23 @@ public:
                      std::vector<uint8_t>& outFileData, int timeoutMs = 30000);
     // In-situ variant: download straight into a caller buffer (no middleware
     // intermediate). outStatus: 1 = ok, 0 = failure, -1 = overflow.
+    // abortHandle (0 = not abortable): a token from createAbortToken(); while
+    // the download is in flight, triggerAbortToken() cancels it immediately
+    // (returns as failure "superseded") so a stale transfer never blocks a
+    // fresher one behind it in the pipeline.
     bool requestFileIntoBuffer(const std::string& filename, int32_t targetRank,
                                uint8_t* outBuffer, size_t outCapacity,
-                               size_t& outSize, int& outStatus, int timeoutMs = 30000);
+                               size_t& outSize, int& outStatus, int timeoutMs = 30000,
+                               uint64_t abortHandle = 0);
+
+    // ---- Abort tokens (P2 latest-wins mid-transfer cancellation) ----
+    // Opaque handles backed by a process-wide registry. Create on the game
+    // thread before starting an interruptible download, trigger when a newer
+    // notification supersedes the in-flight one, release when the download
+    // returns. Thread-safe; triggering after release is a harmless no-op.
+    uint64_t createAbortToken();
+    bool triggerAbortToken(uint64_t handle);
+    void releaseAbortToken(uint64_t handle);
     bool requestFrame(int32_t frameNumber, int32_t targetRank,
                       std::vector<std::pair<std::string, std::vector<uint8_t>>>& outFrameFiles,
                       int timeoutMs = 60000);

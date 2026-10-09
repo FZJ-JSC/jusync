@@ -769,7 +769,8 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
                                   FileChunkCallback chunkCallback,
                                   FileCompleteCallback completeCallback,
                                   ErrorCallback errorCallback,
-                                  int timeoutMs) {
+                                  int timeoutMs,
+                                  const std::atomic<bool>* abortFlag) {
     if (connectionStatus.load() != ConnectionStatus::Connected || !zmqSocket) {
         MIDDLEWARE_LOG_ERROR("AnariUsdClient not connected");
         return false;
@@ -812,9 +813,25 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
         uint32_t myRequestId = request.request_id;
 
         while (!fileComplete && !shutdownRequested.load()) {
+            // Latest-wins abort (P2): consumer flagged this transfer as
+            // superseded — stop consuming, drop buffered + future frames of
+            // our request id and free the pipeline for the fresh download.
+            if (abortFlag && abortFlag->load(std::memory_order_acquire)) {
+                MIDDLEWARE_LOG_INFO("Download of '%s' (request_id %u) aborted: superseded by newer update",
+                                    filename.c_str(), myRequestId);
+                abandonRequestFrames(myRequestId);
+                if (errorCallback) {
+                    errorCallback("Download aborted: superseded");
+                }
+                return false;
+            }
+
             // Receive delimiter + data frames, filtered by request_id
             FrameMsg dummyDelim, dataFrame;
-            if (!waitForMatchingFrames(myRequestId, timeoutMs, dummyDelim, dataFrame)) {
+            if (!waitForMatchingFrames(myRequestId, timeoutMs, dummyDelim, dataFrame, abortFlag)) {
+                if (abortFlag && abortFlag->load(std::memory_order_acquire)) {
+                    continue; // woke on abort; handled at loop top
+                }
                 MIDDLEWARE_LOG_ERROR("Timeout waiting for file chunk (request_id %u)", myRequestId);
                 if (errorCallback) {
                     errorCallback("Timeout waiting for file chunk");
@@ -2149,6 +2166,19 @@ void AnariUsdClient::enqueueResponseFrame(zmq::message_t delimiter,
 
     {
         std::lock_guard<std::mutex> lock(responseQueueMutex);
+
+        // Superseded download (P2 abort): discard this consumer's remaining
+        // frames instead of buffering them forever with nobody to dequeue.
+        if (requestId != 0) {
+            auto ab = abandonedRequests.find(requestId);
+            if (ab != abandonedRequests.end()) {
+                if (ab->second > std::chrono::steady_clock::now()) {
+                    return;
+                }
+                abandonedRequests.erase(ab);
+            }
+        }
+
         if (requestId == 0) {
             // Raw-string response (e.g. GET_WORKERS) carrying no ANARI magic/id.
             noIdResponseQueue.push_back(std::move(entry));
@@ -2213,13 +2243,56 @@ bool AnariUsdClient::tryDequeueMatchingLocked(uint32_t requestId,
 }
 
 // ---------------------------------------------------------------------------
+// abandonRequestFrames — mid-transfer abort cleanup (P2 latest-wins).
+// Drops frames already buffered for a request whose consumer gave up, and
+// records the id so the dispatcher discards the broker's remaining frames.
+// ---------------------------------------------------------------------------
+
+void AnariUsdClient::abandonRequestFrames(uint32_t requestId) {
+    std::lock_guard<std::mutex> lock(responseQueueMutex);
+
+    auto it = responseByRequest.find(requestId);
+    if (it != responseByRequest.end()) {
+        totalQueuedFrames.fetch_sub(it->second.size(), std::memory_order_relaxed);
+        responseByRequest.erase(it);
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    for (auto e = abandonedRequests.begin(); e != abandonedRequests.end();) {
+        if (e->second < now) {
+            e = abandonedRequests.erase(e);
+        } else {
+            ++e;
+        }
+    }
+    // Expiry covers the slowest remaining transfer (chunk stream ends well
+    // within 5 min at tunnel rates for our tile sizes); set stays tiny since
+    // we prune here and on first stale hit in enqueueResponseFrame.
+    abandonedRequests[requestId] = now + std::chrono::minutes(5);
+}
+
+// ---------------------------------------------------------------------------
+// wakeResponseWaiters — re-evaluate wait predicates (abort flags).
+// The brief lock closes the lost-wakeup window between a waiter's predicate
+// check and its cv wait.
+// ---------------------------------------------------------------------------
+
+void AnariUsdClient::wakeResponseWaiters() {
+    {
+        std::lock_guard<std::mutex> lock(responseQueueMutex);
+    }
+    responseQueueCv.notify_all();
+}
+
+// ---------------------------------------------------------------------------
 // waitForMatchingFrames — blocks on condition_variable until matching frame
 // arrives or timeout expires.  Game threads NEVER call recv().
 // ---------------------------------------------------------------------------
 
 bool AnariUsdClient::waitForMatchingFrames(uint32_t requestId, int timeoutMs,
                                             FrameMsg& outDelimiter,
-                                            FrameMsg& outData) {
+                                            FrameMsg& outData,
+                                            const std::atomic<bool>* abortFlag) {
     // Fast path: frame already in the index
     if (tryDequeueMatching(requestId, outDelimiter, outData)) return true;
 
@@ -2231,6 +2304,11 @@ bool AnariUsdClient::waitForMatchingFrames(uint32_t requestId, int timeoutMs,
     while (true) {
         if (shutdownRequested.load() ||
             connectionStatus.load() != ConnectionStatus::Connected) {
+            return false;
+        }
+        // Mid-transfer abort: the trigger sets the flag then calls
+        // wakeResponseWaiters(), so we land here on the next wakeup.
+        if (abortFlag && abortFlag->load(std::memory_order_acquire)) {
             return false;
         }
 

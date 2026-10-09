@@ -452,6 +452,15 @@ private:
     TUniquePtr<FJUSYNCFileChangeTracker> ChangeTracker;
     TUniquePtr<FJUSYNCAnimationController> AnimationController;
 
+    // P2 latest-wins: middleware abort tokens for in-flight live-update
+    // downloads (filename -> JusyncAbortCreate_C handle). Game thread only.
+    // A superseding notification triggers the token so the stale transfer is
+    // dropped mid-stream instead of downloading + parsing old bytes.
+    TMap<FString, uint64> ActiveDownloadAborts;
+
+    // Cancel + free every registered token (pipeline restart / cancel).
+    void AbortAllInFlightDownloads();
+
     struct FDeferredSpawnEntry
     {
         TArray<FJUSYNCCompactMeshRef> Meshes;

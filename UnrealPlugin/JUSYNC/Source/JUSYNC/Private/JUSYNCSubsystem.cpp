@@ -4579,7 +4579,7 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
 }
 
 bool UJUSYNCSubsystem::RequestFileSized(const FString& Filename, int32 TargetRank, int32 TimeoutMs,
-                                        TArray<uint8>& OutData, uint64 ExpectedFileSize)
+                                        TArray<uint8>& OutData, uint64 ExpectedFileSize, uint64 AbortHandle)
 {
     if (Filename.IsEmpty())
     {
@@ -4603,9 +4603,12 @@ bool UJUSYNCSubsystem::RequestFileSized(const FString& Filename, int32 TargetRan
             if (OutData.Num() == static_cast<int32>(ExpectedFileSize))
             {
                 size_t Written = 0;
-                const int64_t rc = RequestFileIntoBuffer_C(
+                // Abortable export: AbortHandle 0 behaves exactly like the old
+                // blocking RequestFileIntoBuffer_C.
+                const int64_t rc = RequestFileIntoBufferAbort_C(
                     FilenameCStr, TargetRank, TimeoutMs,
-                    OutData.GetData(), static_cast<size_t>(OutData.Num()), &Written);
+                    OutData.GetData(), static_cast<size_t>(OutData.Num()), &Written,
+                    static_cast<uint64_t>(AbortHandle));
 
                 if (rc > 0)
                 {

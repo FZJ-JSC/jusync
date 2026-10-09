@@ -1093,6 +1093,37 @@ ANARI_USD_MIDDLEWARE_C_API int64_t RequestFileIntoBuffer_C(
     size_t out_capacity,
     size_t* out_size);
 
+/**
+ * Abortable variant of RequestFileIntoBuffer_C (P2 latest-wins).
+ *
+ * Pass an abort_handle from JusyncAbortCreate_C() (0 = plain blocking
+ * download). If JusyncAbortTrigger_C(handle) is called from another thread
+ * while this download is in flight, it wakes within one frame delivery and
+ * returns -1 (failure), dropping the broker's remaining frames for the
+ * superseded transfer.
+ */
+ANARI_USD_MIDDLEWARE_C_API int64_t RequestFileIntoBufferAbort_C(
+    const char* filename,
+    int32_t target_rank,
+    int timeout_ms,
+    unsigned char* out_buffer,
+    size_t out_capacity,
+    size_t* out_size,
+    uint64_t abort_handle);
+
+// ---- Abort tokens (P2 latest-wins mid-transfer cancellation) ----
+// Lifetime-safe opaque handles: Trigger after Release is a no-op, and an
+// in-flight download keeps the flag alive via internal refcount.
+
+/** Create a new abort token. Returns a nonzero handle. */
+ANARI_USD_MIDDLEWARE_C_API uint64_t JusyncAbortCreate_C(void);
+
+/** Signal cancellation. Returns 1 if a live token was found, 0 otherwise. */
+ANARI_USD_MIDDLEWARE_C_API int32_t JusyncAbortTrigger_C(uint64_t handle);
+
+/** Drop the registry reference (safe to call after the download returns). */
+ANARI_USD_MIDDLEWARE_C_API void JusyncAbortRelease_C(uint64_t handle);
+
 // ============================================================================
 // ASYNC FILE DOWNLOAD (Non-Blocking)
 // ============================================================================

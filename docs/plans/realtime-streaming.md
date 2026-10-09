@@ -35,11 +35,11 @@
 - Accept: number in hand; toggle documented. → **Done locally; E2E throughput/parse numbers pending the rig (or real JURECA run) + Phase 0 `jusync.diag` table.**
 
 ## Phase 2 — Client pipeline hardening (jusync)
-- [ ] Latest-wins: per-filename epoch; superseded in-flight → stop assembling, drop arriving chunks, free buffers (AnariUsdClient + ParallelDownloader).
-- [ ] Optional `REQ_CANCEL` (type 103) sent on supersede; broker ignores if unknown (ship client-side first).
+- [x] Latest-wins mid-transfer ABORT (supersedes the "epoch in ParallelDownloader" sketch — that class is dead code, `#error`-guarded): `AnariUsdClient::requestFile` takes an `abortFlag`; on fire it stops consuming, `abandonRequestFrames()` purges buffered frames and makes the dispatcher DISCARD the broker's remaining chunks for that request id (5-min expiry). Middleware: abort-token registry + C API `JusyncAbortCreate/Trigger/Release_C` + `RequestFileIntoBufferAbort_C`. UE: `ActiveDownloadAborts` map in the spawner; supersede branch triggers the token; completion path skips the stale parse when `bSuperseded`; restart/cancel call `AbortAllInFlightDownloads()`.
+- [ ] Optional `REQ_CANCEL` (type 103) on the wire so the BROKER stops sending (reclaims SSH-tunnel bandwidth; the local abort above still lets the fresh download start immediately). Ship client-side first: done; broker-side is a P5-adjacent follow-up.
 - [ ] Live-update priority queue > initial spawn; remove `bInitialSpawnDone` gate for live path (`JUSYNCFileSpawnerActor.cpp:3193`).
-- [ ] Replace 10 ms poll sleeps with condvar/zmq poll (`ParallelDownloader.cpp:196,281,336`).
-- [ ] Dispatcher thread: route frame pointers; move chunk memcpy off dispatcher (`AnariUsdClient` single-recv design).
+- [x] Poll sleeps: production path (`waitForMatchingFrames`) was already condvar-driven; the 10 ms sleeps lived in the dead `ParallelDownloader.cpp` (untouched, guarded). New abort wake path uses `wakeResponseWaiters()` (lock+notify_all), no polling.
+- [x] Dispatcher already routes zero-copy `FramePairPtr` shared_ptrs; chunk payload lands straight in the UE buffer via the in-situ callback (no dispatcher memcpy).
 - [ ] Notification socket: heartbeat + auto-resubscribe on reconnect (kills silent 20 s backstop lag mode).
 - [ ] Knobs: chunk size (4→8/16 MB), SO_RCVBUF, ZMQ HWM; surface in subsystem details/cvars.
 - [ ] `CommitCompleteCooldownSeconds`/`LiveUpdatePollInterval` defaults revisited with Phase 0 data.

@@ -724,6 +724,56 @@ int64_t RequestFileIntoBuffer_C(const char* filename,
     }
 }
 
+int64_t RequestFileIntoBufferAbort_C(const char* filename,
+                                     int32_t target_rank,
+                                     int timeout_ms,
+                                     unsigned char* out_buffer,
+                                     size_t out_capacity,
+                                     size_t* out_size,
+                                     uint64_t abort_handle) {
+    if (out_size) *out_size = 0;
+    if (!g_middleware || !filename) {
+        return -1;
+    }
+    try {
+        size_t size = 0;
+        int status = 0;
+        if (!g_middleware->requestFileIntoBuffer(filename, target_rank,
+                                                 out_buffer, out_capacity,
+                                                 size, status, timeout_ms,
+                                                 abort_handle)) {
+            return -1; // failure / timeout / aborted
+        }
+        if (out_size) *out_size = size;
+        if (status == -1) return -2; // overflow
+        return static_cast<int64_t>(size);
+    } catch (...) {
+        MIDDLEWARE_LOG_ERROR("RequestFileIntoBufferAbort_C: exception for '%s'", filename);
+        return -1;
+    }
+}
+
+uint64_t JusyncAbortCreate_C(void) {
+    if (!g_middleware) {
+        return 0;
+    }
+    return g_middleware->createAbortToken();
+}
+
+int32_t JusyncAbortTrigger_C(uint64_t handle) {
+    if (!g_middleware || handle == 0) {
+        return 0;
+    }
+    return g_middleware->triggerAbortToken(handle) ? 1 : 0;
+}
+
+void JusyncAbortRelease_C(uint64_t handle) {
+    if (!g_middleware || handle == 0) {
+        return;
+    }
+    g_middleware->releaseAbortToken(handle);
+}
+
 // ============================================================================
 // IN-SITU (TWO-PHASE) PARSE API
 // ============================================================================

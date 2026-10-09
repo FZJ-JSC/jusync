@@ -161,11 +161,22 @@ public:
     // File request methods
     bool requestFileList(int32_t targetRank, FileListCallback callback, int timeoutMs = 10000);
     bool requestFileListWithSizes(int32_t targetRank, FileListWithSizesCallback callback, int timeoutMs = 10000);
+    // abortFlag (P2 latest-wins): if set externally while the transfer is in
+    // flight, requestFile stops consuming frames, drops buffered + future
+    // frames for its request id and returns false with the "superseded" error.
     bool requestFile(const std::string& filename, int32_t targetRank,
                      FileChunkCallback chunkCallback,
                      FileCompleteCallback completeCallback,
                      ErrorCallback errorCallback = nullptr,
-                     int timeoutMs = 30000);
+                     int timeoutMs = 30000,
+                     const std::atomic<bool>* abortFlag = nullptr);
+
+    // Drops buffered frames for an aborted request id and makes the dispatcher
+    // discard its remaining frames (broker keeps streaming after an abort).
+    void abandonRequestFrames(uint32_t requestId);
+    // Wakes threads blocked in waitForMatchingFrames so they re-check their
+    // abort flag immediately (call AFTER setting the flag).
+    void wakeResponseWaiters();
     bool requestFrame(int32_t frameNumber, int32_t targetRank,
                       FileChunkCallback chunkCallback,
                       FileCompleteCallback completeCallback,
@@ -309,6 +320,13 @@ private:
     std::atomic<size_t> totalQueuedFrames{0};
     std::atomic<int64_t> lastQueueWarnMs{0};
 
+    // Mid-transfer abort support (P2 latest-wins): when a download is aborted
+    // the broker keeps streaming the rest of its file, but nobody will ever
+    // dequeue the abandoned request id — without this the dispatcher would
+    // buffer those frames forever. Entries map id -> expiry; guarded by
+    // responseQueueMutex (checked by the dispatcher on every enqueue).
+    std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> abandonedRequests;
+
     // Dispatcher thread — owns ALL ZMQ recv operations.
     std::thread dispatchThread;
     std::atomic<bool> dispatcherActive{false};
@@ -368,7 +386,8 @@ private:
     // Blocks until a matching frame arrives or timeout expires.
     bool waitForMatchingFrames(uint32_t requestId, int timeoutMs,
                                FrameMsg& outDelimiter,
-                               FrameMsg& outData);
+                               FrameMsg& outData,
+                               const std::atomic<bool>* abortFlag = nullptr);
 
     // Attempt to dequeue a matching message (non-blocking).
     bool tryDequeueMatching(uint32_t requestId,

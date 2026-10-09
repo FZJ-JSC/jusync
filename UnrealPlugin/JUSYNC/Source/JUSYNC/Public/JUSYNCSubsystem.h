@@ -348,8 +348,11 @@ public:
     // In-situ variant: when ExpectedFileSize > 0 (the wire size from the file
     // list) the file is downloaded directly into OutData with no middleware
     // intermediate allocation/copy; otherwise falls back to the legacy path.
+    // AbortHandle: token from JusyncAbortCreate_C(); lets the game thread
+    // cancel this transfer mid-stream when a newer update supersedes it
+    // (0 = plain blocking download).
     bool RequestFileSized(const FString& Filename, int32 TargetRank, int32 TimeoutMs,
-                          TArray<uint8>& OutData, uint64 ExpectedFileSize);
+                          TArray<uint8>& OutData, uint64 ExpectedFileSize, uint64 AbortHandle = 0);
 
     // Parallel download functions
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker", DisplayName = "Request Files Parallel (Sync)")

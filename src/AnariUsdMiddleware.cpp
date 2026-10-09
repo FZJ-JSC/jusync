@@ -21,6 +21,7 @@
 #include <shared_mutex>
 #include <sstream>
 #include <map>
+#include <unordered_map>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
@@ -965,9 +966,58 @@ bool AnariUsdMiddleware::requestFile(const std::string& filename, int32_t target
     return pImpl->anariUsdClient->getFileSync(filename, targetRank, outFileData, timeoutMs);
 }
 
+// ============================================================================
+// Abort-token registry (P2 latest-wins)
+//
+// A token is a shared_ptr-owned atomic<bool>: the download thread holds its
+// own copy while blocked in requestFile, so triggering/erasing from the game
+// thread stays safe for the whole transfer lifetime.
+// ============================================================================
+namespace {
+struct JusyncAbortRegistry {
+    std::mutex mutex;
+    std::unordered_map<uint64_t, std::shared_ptr<std::atomic<bool>>> tokens;
+    std::atomic<uint64_t> nextHandle{1};
+};
+JusyncAbortRegistry g_abortRegistry;
+} // namespace
+
+uint64_t AnariUsdMiddleware::createAbortToken() {
+    auto flag = std::make_shared<std::atomic<bool>>(false);
+    const uint64_t handle = g_abortRegistry.nextHandle.fetch_add(1);
+    std::lock_guard<std::mutex> lock(g_abortRegistry.mutex);
+    g_abortRegistry.tokens[handle] = std::move(flag);
+    return handle;
+}
+
+bool AnariUsdMiddleware::triggerAbortToken(uint64_t handle) {
+    std::shared_ptr<std::atomic<bool>> flag;
+    {
+        std::lock_guard<std::mutex> lock(g_abortRegistry.mutex);
+        auto it = g_abortRegistry.tokens.find(handle);
+        if (it == g_abortRegistry.tokens.end()) {
+            return false; // released or never existed
+        }
+        flag = it->second;
+    }
+    flag->store(true, std::memory_order_release);
+    // Unblock the download thread sitting in waitForMatchingFrames so it
+    // observes the flag without waiting for the next chunk/timeout.
+    if (pImpl->anariUsdClient) {
+        pImpl->anariUsdClient->wakeResponseWaiters();
+    }
+    return true;
+}
+
+void AnariUsdMiddleware::releaseAbortToken(uint64_t handle) {
+    std::lock_guard<std::mutex> lock(g_abortRegistry.mutex);
+    g_abortRegistry.tokens.erase(handle);
+}
+
 bool AnariUsdMiddleware::requestFileIntoBuffer(const std::string& filename, int32_t targetRank,
                                                 uint8_t* outBuffer, size_t outCapacity,
-                                                size_t& outSize, int& outStatus, int timeoutMs) {
+                                                size_t& outSize, int& outStatus, int timeoutMs,
+                                                uint64_t abortHandle) {
     outSize = 0;
     outStatus = 0;
     if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
@@ -977,6 +1027,20 @@ bool AnariUsdMiddleware::requestFileIntoBuffer(const std::string& filename, int3
     if (!outBuffer && outCapacity > 0) {
         MIDDLEWARE_LOG_ERROR("RequestFileIntoBuffer: null buffer with nonzero capacity");
         return false;
+    }
+
+    // Resolve the abort token once; the shared_ptr copy keeps the flag alive
+    // even if the game thread releases the handle concurrently.
+    std::shared_ptr<std::atomic<bool>> abortFlag;
+    if (abortHandle != 0) {
+        std::lock_guard<std::mutex> lock(g_abortRegistry.mutex);
+        auto it = g_abortRegistry.tokens.find(abortHandle);
+        if (it != g_abortRegistry.tokens.end()) {
+            abortFlag = it->second;
+        } else {
+            MIDDLEWARE_LOG_WARNING("RequestFileIntoBuffer: unknown abort handle %llu for '%s'",
+                                   static_cast<unsigned long long>(abortHandle), filename.c_str());
+        }
     }
 
     size_t written = 0;
@@ -1013,7 +1077,7 @@ bool AnariUsdMiddleware::requestFileIntoBuffer(const std::string& filename, int3
 
     if (!pImpl->anariUsdClient->requestFile(filename, targetRank,
                                             chunkCallback, completeCallback,
-                                            nullptr, timeoutMs)) {
+                                            nullptr, timeoutMs, abortFlag.get())) {
         outSize = 0;
         outStatus = 0;
         return false;
