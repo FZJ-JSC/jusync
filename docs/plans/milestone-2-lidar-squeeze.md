@@ -161,7 +161,21 @@ Rework `JUSYNCPointCloudSpawner` direct-LiDAR path:
 - graphify update. Final whole-branch review (fresh subagent, both repos).
 - Commits to jusync.
 
-### Task 8 — H: MPI multi-rank RawGeo streaming (user scope-add 2026-10-10)
+### Task 8 — H: MPI multi-rank RawGeo streaming (user scope-add 2026-10-10) ✅ DONE (ANARI-USD 20a6c0b)
+
+**Outcome:** client side needed ZERO changes (list broadcast, V2 relay, and the
+rank→download→`%s_r%d` spawn chain were all already in place, verified
+line-by-line). Two real sender-side bugs found by the live `mpirun -n 2` rig
+and fixed in the broker: (1) `GetBrokerAddress` called `MPI_Bcast` before
+`MPI_Init` — non-MPI-aware apps abort on both ranks under mpirun; fixed with a
+lazy `EnsureMpiInitialized()` guard. (2) MPI mode derived its BIND address from
+the worker-facing broadcast address (forced `127.0.0.1`) so the client ROUTER
+was unreachable through docker -p port-forwarding; fixed by splitting
+`bind_ip` (wildcard / `DIFFCAPTURE_BIND_IP`) from the advertised worker IP.
+Verified: both ranks store+V2-notify `clips/*_r{0,1}*.geo`, client downloads
+91-from-r0/90-from-r1, 44 swaps on BOTH `bigCloud_r0/_r1`, steady notify→got
+152–164 ms; single-rank regression 44/43/0-drop. Rig:
+`docker/jusync-sender/run-sender-mpi.sh` + `run-rank.sh`.
 
 Requirement: the whole RawGeo path must work when ANARI-USD runs under
 mpirun (N>1), and the jusync UE client must fetch `.geo` from the OWNING
@@ -245,43 +259,34 @@ Independent visual validation of what the wire actually carries, without UE.
   and doubles as a second consumer for the Task 8 MPI check (worker-rank keys
   must also snapshot).
 
-## Success bar (user-visible)
+### Task 11 — Idle→full-res burst (closing feature, user-approved 2026-10-10) ✅ DONE (ANARI-USD 05fec09)
 
-Task 11 (closing feature, user-approved 2026-10-10): idle→full-res burst.
-While the scene is live the sender streams stride-decimated frames; when the
-geometry goes QUIET the sender emits one stride=1 frame so UE always settles
-at full density.
+**Result (live, mpirun -n 2 @ 2 Hz/stride4/FREEZE=45):** last stride payload
+23:48:18 → sender logs `RawGeo idle burst: full-res 10000000 points (114.4 MB)`
+per rank → client parses 10,000,000 pts at +20.7/+21.4 s → 10 M builds
+4278/5776 ms, swaps 0.21/0.12 ms → **zero stride payloads for the remaining
+~60 s** while commits keep flowing (idle geometry streams no bytes); the cloud
+the user stares at after a pause is always full density.
 
-- Idle detection (generic, middleware side, UsdBridgeUsdWriter::TryStoreRawGeo):
-  cheap change-detect per commit — compare the sampled positions block of this
-  frame against the previous frame's (memcmp of the packed payload is bounded;
-  on first mismatch or hash env change, reset counter). After
-  JUSYNC_RAWGEO_IDLE_FRAMES (default 6) identical commits → next store ignores
-  stride (full num_points), log `[UsdBridge] RawGeo idle burst: full-res`, then
-  wait for the next real change to resume striding. One burst only per idle
-  period.
-- Test rig: anariBigCloudUsd dev-env ANARI_BIG_FREEZE_SEC=N — after N seconds
-  positions stop updating but commits continue at ANARI_BIG_FPS (models
-  "sim paused / user inspecting" while keeping commits alive, which is what the
-  writer's idle detector needs).
-- Client side: zero changes (header self-describes 10M; async build path +
-  latest-wins already handle a big frame: ~0.5 s transfer loopback, ~5 s bg
-  build, 0.1 ms swap; no newer frames arrive while idle so the burst sticks).
-- Verify (one headless run, FREEZE=60): stride frames for ~60 s, then log
-  shows burst, client retrieves 120,000,112 B, one 10M build completes, live
-  cloud = full density; then FREEZE ends? no — resume via second env
-  ANARI_BIG_FREEZE_UNFREEZE? not needed: burst stickiness is proven by the
-  final frame count in spawn log.
+Mechanism:
+- `UsdBridgeUsdWriter::TryStoreRawGeo` byte-compares each commit's sampled
+  payload against the previous frame's (baseline stays the STRIDED payload so
+  the burst never re-arms the detector). After `JUSYNC_RAWGEO_IDLE_FRAMES`
+  (default 6, 0 disables) identical commits it re-packs ONE full-resolution
+  frame (new `packRawGeo(effStride)` lambda), logs the burst, then suppresses
+  further identical stores until the geometry changes again.
+- Idle suppression also saves bandwidth on paused sims (zero `.geo` traffic,
+  commits/CommitComplete keep flowing so client dedup state stays healthy).
+- Test rig: `ANARI_BIG_FREEZE_SEC=N` in anariBigCloudUsd — positions stop
+  updating, commits continue (models "sim paused / user inspecting").
+- Client: zero changes — the burst is just a newer frame with a bigger count;
+  latest-wins + async build handle it; nothing newer arrives while idle so it
+  sticks.
 - Bandwidth note for JURECA: burst costs one 120 MB transfer (~10-12 s over
   the thin link) — acceptable because it only fires when the scene is static,
   exactly when the user is looking at detail.
 
-## Deferred to milestone 3
-
-- Progressive refinement (#3): stream complementary stride subsets so the
-  client merges 2.5M batches into a growing 10M octree incrementally
-  (remote-desktop style quality ramp). Real client+middleware work; the
-  stride mechanism built in Task 5 is its foundation.
+## Success bar (user-visible)
 
 Interactive: 10M-pt cloud at JURECA-scale bandwidth with ≤ ~2 s notify→pixel
 at 2 Hz, game thread never stalls ≥ 50 ms, no custom renderer, zero protocol
@@ -289,3 +294,10 @@ changes, all wins inside Epic-maintained APIs + our middleware plumbing.
 MPI: the same RawGeo fast path works with the sender running under mpirun
 (multi-rank), client fetching from the owning rank — JURECA's real launch
 mode.
+
+## Deferred to milestone 3
+
+- Progressive refinement (#3): stream complementary stride subsets so the
+  client merges 2.5M batches into a growing 10M octree incrementally
+  (remote-desktop style quality ramp). Real client+middleware work; the
+  stride mechanism built in Task 5 is its foundation.
