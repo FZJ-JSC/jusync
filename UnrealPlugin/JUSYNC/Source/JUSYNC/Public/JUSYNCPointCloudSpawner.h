@@ -130,6 +130,8 @@ private:
     float PointSizeBias = 0.035f;
     float GapFillingStrength = 0.0f;
     bool bPerfLogging = false;
+    int32 ReplacementsSinceGC = 0;
+    static constexpr int32 GCSwapInterval = 16;
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     ELidarPointCloudSpriteShape PointShape = ELidarPointCloudSpriteShape::Circle;
     ELidarPointCloudSpriteOrientation PointOrientation = ELidarPointCloudSpriteOrientation::PreferFacingCamera;

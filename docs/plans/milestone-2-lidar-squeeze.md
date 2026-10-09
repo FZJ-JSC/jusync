@@ -223,7 +223,65 @@ Verification = the mpirun -n2 headless run (numbers + greps in ledger)
 AND a regression single-rank run (unchanged behavior). Commits: ANARI-USD
 (fixes), jusync (client rank fix if needed), both feature branches.
 
+## Task 10 — ParaView time-series cross-check (future test asset)
+
+Independent visual validation of what the wire actually carries, without UE.
+
+- Sender-side dump (already implemented, opt-in): `JUSYNC_RAWGEO_SNAPSHOT_DIR`
+  + `JUSYNC_RAWGEO_SNAPSHOT_EVERY=N` write `cloud_%08llu.ply` (binary,
+  float x/y/z [+ float rgb]) built from the EXACT packed JSG1 payload after
+  stride sampling → ParaView sees byte-identical geometry to the UE client.
+  With the dev sender, `JUSYNC_RAWGEO_SNAPSHOT_DIR=/opt/sender/snaps` lands
+  files at `ANARI-USD/build-out/snaps/` on the host.
+- Sanity check without ParaView: `docker exec jusync-sender python3 /opt/sender/parse_ply.py`
+  (script in build-out) → per-file vertex count (must equal 10M/stride) + byte size.
+- ParaView in Docker (future): `docker run -it --rm -p 8080:8080
+  -v D:/JSC_Github/ANARI-USD/build-out/snaps:/data
+  kitware/paraview:5.13.0-egl glxinfo`-style EGL images expose ParaView; open
+  `/data/cloud_*.ply` with reader "File Reader" pattern `%08d` → automatic
+  time-series animation of the sampled cloud (verify stride lattice integrity:
+  decimated cloud should look like the full one, just sparser).
+- Value: catches wire-corruption/ordering/stride bugs no UE log would show,
+  and doubles as a second consumer for the Task 8 MPI check (worker-rank keys
+  must also snapshot).
+
 ## Success bar (user-visible)
+
+Task 11 (closing feature, user-approved 2026-10-10): idle→full-res burst.
+While the scene is live the sender streams stride-decimated frames; when the
+geometry goes QUIET the sender emits one stride=1 frame so UE always settles
+at full density.
+
+- Idle detection (generic, middleware side, UsdBridgeUsdWriter::TryStoreRawGeo):
+  cheap change-detect per commit — compare the sampled positions block of this
+  frame against the previous frame's (memcmp of the packed payload is bounded;
+  on first mismatch or hash env change, reset counter). After
+  JUSYNC_RAWGEO_IDLE_FRAMES (default 6) identical commits → next store ignores
+  stride (full num_points), log `[UsdBridge] RawGeo idle burst: full-res`, then
+  wait for the next real change to resume striding. One burst only per idle
+  period.
+- Test rig: anariBigCloudUsd dev-env ANARI_BIG_FREEZE_SEC=N — after N seconds
+  positions stop updating but commits continue at ANARI_BIG_FPS (models
+  "sim paused / user inspecting" while keeping commits alive, which is what the
+  writer's idle detector needs).
+- Client side: zero changes (header self-describes 10M; async build path +
+  latest-wins already handle a big frame: ~0.5 s transfer loopback, ~5 s bg
+  build, 0.1 ms swap; no newer frames arrive while idle so the burst sticks).
+- Verify (one headless run, FREEZE=60): stride frames for ~60 s, then log
+  shows burst, client retrieves 120,000,112 B, one 10M build completes, live
+  cloud = full density; then FREEZE ends? no — resume via second env
+  ANARI_BIG_FREEZE_UNFREEZE? not needed: burst stickiness is proven by the
+  final frame count in spawn log.
+- Bandwidth note for JURECA: burst costs one 120 MB transfer (~10-12 s over
+  the thin link) — acceptable because it only fires when the scene is static,
+  exactly when the user is looking at detail.
+
+## Deferred to milestone 3
+
+- Progressive refinement (#3): stream complementary stride subsets so the
+  client merges 2.5M batches into a growing 10M octree incrementally
+  (remote-desktop style quality ramp). Real client+middleware work; the
+  stride mechanism built in Task 5 is its foundation.
 
 Interactive: 10M-pt cloud at JURECA-scale bandwidth with ≤ ~2 s notify→pixel
 at 2 Hz, game thread never stalls ≥ 50 ms, no custom renderer, zero protocol

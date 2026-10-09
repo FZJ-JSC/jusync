@@ -464,6 +464,7 @@ void FJUSYNCPointCloudSpawner::OnAsyncCloudBuildFinished(const FString& Key, uin
 
         AActor* Actor = F.Actor.Get();
         bool bSwapped = false;
+        ULidarPointCloud* ReplacedCloud = nullptr;
 
         if (bSuccess && IsValid(Cloud) && IsValid(Actor) && !bShuttingDown.load()
             && FindActorByElementKey(Key) == Actor) // actor may have been released to the pool meanwhile
@@ -473,6 +474,7 @@ void FJUSYNCPointCloudSpawner::OnAsyncCloudBuildFinished(const FString& Key, uin
                 if (ULidarPointCloudComponent* Comp = LidarActor->GetPointCloudComponent())
                 {
                     const double SwapStart = FPlatformTime::Seconds();
+                    ReplacedCloud = Comp->GetPointCloud();
                     Comp->SetPointCloud(Cloud);
                     ApplyVisualSettings(Comp);
                     Actor->SetActorHiddenInGame(false);
@@ -481,8 +483,19 @@ void FJUSYNCPointCloudSpawner::OnAsyncCloudBuildFinished(const FString& Key, uin
 
                     if (bPerfLogging)
                     {
-                        UE_LOG(LogTemp, Display, TEXT("JUSYNC PERF PC async-build '%s' build %.1f ms  swap %.3f ms"),
-                               *Key, BuildMs, (FPlatformTime::Seconds() - SwapStart) * 1000.0);
+                        int32 LiveClouds = 0;
+                        for (TObjectIterator<ULidarPointCloud> It; It; ++It)
+                        {
+                            if (IsValid(*It) && !It->HasAnyFlags(RF_BeginDestroyed | RF_FinishDestroyed))
+                            {
+                                ++LiveClouds;
+                            }
+                        }
+                        const FPlatformMemoryStats Mem = FPlatformMemory::GetStats();
+                        UE_LOG(LogTemp, Display,
+                               TEXT("JUSYNC PERF PC async-build '%s' build %.1f ms  swap %.3f ms  liveClouds %d  usedPhys %.0f MB"),
+                               *Key, BuildMs, (FPlatformTime::Seconds() - SwapStart) * 1000.0,
+                               LiveClouds, (double)Mem.UsedPhysical / (1024.0 * 1024.0));
                     }
                     OnPointCloudSpawned.Broadcast(Key, Actor);
                 }
@@ -492,6 +505,22 @@ void FJUSYNCPointCloudSpawner::OnAsyncCloudBuildFinished(const FString& Key, uin
         if (!bSwapped && IsValid(Cloud))
         {
             Cloud->MarkAsGarbage();
+        }
+        else if (bSwapped && IsValid(ReplacedCloud) && ReplacedCloud != Cloud)
+        {
+            // Detached last-frame asset: nothing renders it anymore, tell GC now
+            // (soak showed unbounded transient-cloud growth waiting for the
+            // default purge interval).
+            ReplacedCloud->MarkAsGarbage();
+            ++ReplacementsSinceGC;
+            if (ReplacementsSinceGC >= GCSwapInterval)
+            {
+                const double GCStart = FPlatformTime::Seconds();
+                CollectGarbage(RF_NoFlags, true);
+                ReplacementsSinceGC = 0;
+                UE_LOG(LogTemp, Display, TEXT("JUSYNC PERF GC sweep %0.1f ms"),
+                       (FPlatformTime::Seconds() - GCStart) * 1000.0);
+            }
         }
 
         if (F.bHasPending)
