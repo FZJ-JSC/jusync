@@ -3248,7 +3248,11 @@ void AJUSYNCFileSpawnerActor::OnBrokerNotification(const FJUSYNCNotification& No
     {
         UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] File update notification: '%s' (rank %d, size=%lld)"),
                *Notification.Filename, Notification.SourceRank, (long long)Notification.FileSize);
-        if (Notification.FileSize >= 2048)
+        // Honor the same MinimumFileSizeBytes threshold as the initial load path
+        // (FilterFileList). The old hard-coded 2048-byte cutoff silently dropped
+        // legitimately small clip files (e.g. 1.3-1.4 KB tutorial clips), killing
+        // live updates entirely for them.
+        if (MinimumFileSizeBytes <= 0 || Notification.FileSize >= MinimumFileSizeBytes)
         {
             HandleFileUpdateNotification(Notification.Filename, Notification.SourceRank, Notification.FileSize, 0, 0);
         }
@@ -3261,7 +3265,8 @@ void AJUSYNCFileSpawnerActor::OnBrokerNotification(const FJUSYNCNotification& No
                *Notification.Filename, Notification.SourceRank, bHashChanged ? 1 : 0);
         if (bHashChanged)
         {
-            if (Notification.FileSize < 2048)
+            // Same threshold as the initial load path (see above).
+            if (MinimumFileSizeBytes > 0 && Notification.FileSize < MinimumFileSizeBytes)
             {
                 UE_LOG(LogTemp, Verbose, TEXT("[LiveUpdate] Skipping tiny file in V2 notification: '%s' (%lld bytes)"),
                        *Notification.Filename, (long long)Notification.FileSize);
@@ -3518,7 +3523,10 @@ void AJUSYNCFileSpawnerActor::DiffAndRefreshFileList(const TArray<FString>& NewF
         const uint64 NewHLo = NewFilteredHashLo[i];
         const uint64 NewHHi = NewFilteredHashHi[i];
 
-        if (NewSize < 2048)
+        // Same threshold as the initial load path (FilterFileList) — these files
+        // already passed it once; keep the guard consistent instead of the old
+        // hard-coded 2048 bytes that could veto the configured value.
+        if (MinimumFileSizeBytes > 0 && NewSize < MinimumFileSizeBytes)
         {
             UE_LOG(LogTemp, Verbose, TEXT("[LiveUpdate] Skipping tiny file '%s' (%lld bytes)"), *Fname, (long long)NewSize);
             continue;
