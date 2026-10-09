@@ -75,3 +75,6 @@ Thumbs.db
 # Add your project-specific temporary files here
 
 build_docker/
+
+# Superpowers inline-execution workspace (ledger, briefs, test logs)
+.superpowers/
