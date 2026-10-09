@@ -43,7 +43,10 @@ public:
 
     void EnqueuePointCloud(const FJUSYNCPointCloudData& PCData, int32 InRank = 0);
     // Rvalue overload: moves the point cloud into the async task (no copy).
-    void EnqueuePointCloud(FJUSYNCPointCloudData&& PCData, int32 InRank = 0);
+    // bAllowNoGradient: when true a missing gradient LUT does NOT defer the
+    // spawn (used by the PendingNoColorClouds expiry flush). Default false so
+    // freshly parsed clouds still wait briefly for their colors.
+    void EnqueuePointCloud(FJUSYNCPointCloudData&& PCData, int32 InRank = 0, bool bAllowNoGradient = false);
     // Shared overload: avoids an extra copy when the caller owns the payload exclusively.
     void EnqueuePointCloud(FJUSYNCPointCloudRef&& PCRef, int32 InRank = 0);
     virtual void Tick(float DeltaTime) override;

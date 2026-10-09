@@ -1,7 +1,14 @@
 #include "JUSYNCModule.h"
+#include "Containers/Ticker.h"
 #include "Engine/Engine.h"
+#include "Engine/World.h"
+#include "GameFramework/Actor.h"
 #include "HAL/PlatformFileManager.h"
 #include "HAL/IConsoleManager.h"
+#include "JUSYNCFileSpawnerActor.h"
+#include "Misc/App.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 #include "Misc/Paths.h"
 #include "HAL/FileManager.h"
 
@@ -26,6 +33,29 @@ DEFINE_LOG_CATEGORY(LogJUSYNC)
 #if WITH_ANARI_USD_MIDDLEWARE
 // jusync.diag console command object (registered in RegisterModuleSystems).
 static IConsoleObject* GJusyncDiagCmd = nullptr;
+
+// Shared table printer (console command + headless harness).
+static void JusyncLogDiagTable(int32 Rows)
+{
+    TArray<char> Buf;
+    Buf.SetNumUninitialized(128 * 1024);
+    const int32 Written = JusyncDiagDump_C(Buf.GetData(), Buf.Num(), Rows);
+    if (Written <= 0)
+    {
+        UE_LOG(LogJUSYNC, Display, TEXT("[jusync.diag] no traces recorded yet"));
+        return;
+    }
+    Buf[Written] = '\0';
+    const FString Table(UTF8_TO_TCHAR(Buf.GetData()));
+    TArray<FString> Lines;
+    Table.ParseIntoArrayLines(Lines, /*bCullEmpty=*/false);
+    UE_LOG(LogJUSYNC, Display,
+        TEXT("===== JUSYNC streaming stage latency (ms, -1 = stage not reached) ====="));
+    for (const FString& Line : Lines)
+    {
+        UE_LOG(LogJUSYNC, Display, TEXT("%s"), *Line);
+    }
+}
 #endif
 
 
@@ -224,27 +254,14 @@ void FJUSYNCModule::RegisterModuleSystems() {
                 const int32 N = (Args.Num() > 0)
                     ? FMath::Clamp(FCString::Atoi(*Args[0]), 1, 200)
                     : 20;
-                TArray<char> Buf;
-                Buf.SetNumUninitialized(128 * 1024);
-                const int32 Written = JusyncDiagDump_C(Buf.GetData(), Buf.Num(), N);
-                if (Written <= 0)
-                {
-                    UE_LOG(LogJUSYNC, Log, TEXT("[jusync.diag] no traces recorded yet"));
-                    return;
-                }
-                Buf[Written] = '\0';
-                const FString Table = FString(UTF8_TO_TCHAR(Buf.GetData()));
-                TArray<FString> Lines;
-                Table.ParseIntoArrayLines(Lines, /*bCullEmpty=*/false);
-                UE_LOG(LogJUSYNC, Display,
-                    TEXT("===== JUSYNC streaming stage latency (ms, -1 = stage not reached) ====="));
-                for (const FString& Line : Lines)
-                {
-                    UE_LOG(LogJUSYNC, Display, TEXT("%s"), *Line);
-                }
+                JusyncLogDiagTable(N);
             }),
             ECVF_Default); // user-typable diag command (UE 5.7 removed ECVF_CodeOnly, which would have hidden it anyway)
     }
+
+    // Cmdline-driven headless perf harness; inert unless -JusyncAuto* flags present
+    // (its ticker is tied to the process lifetime of the headless run).
+    MaybeStartHeadlessHarness();
 #endif
 }
 
@@ -257,6 +274,129 @@ void FJUSYNCModule::UnregisterModuleSystems() {
     }
 #endif
 }
+
+#if WITH_ANARI_USD_MIDDLEWARE
+// ---------------------------------------------------------------------------
+// Headless streaming perf harness (cmdline-only; inert in normal runs).
+//
+//   -JusyncAutoSpawner          spawn a JUSYNCFileSpawnerActor once the game
+//                               world begins play and start its pipeline
+//   -JusyncAutoDiag=SEC[,COUNT] dump the jusync.diag table every SEC seconds
+//                               (COUNT times, default: until quit)
+//   -JusyncAutoDiagRows=N       rows per dump (default 40)
+//   -JusyncAutoQuit=SEC         force-exit SEC seconds after module startup
+//
+// Intended for: UnrealEditor-Cmd.exe <uproject> <map> -game -nullrhi ...
+// ---------------------------------------------------------------------------
+namespace
+{
+    struct FJusyncHarnessState
+    {
+        double StartTime = 0.0;
+        double DiagInterval = 0.0;
+        double NextDiagAt = 0.0;
+        int32 DiagRemaining = 0;
+        int32 DiagRows = 40;
+        double QuitAt = 0.0;
+        bool bAutoSpawner = false;
+        bool bSpawnerStarted = false;
+        FTSTicker::FDelegateHandle TickerHandle;
+    };
+    FJusyncHarnessState GHarness;
+
+    bool JusyncHarnessTick(float /*DeltaTime*/)
+    {
+        const double Elapsed = FPlatformTime::Seconds() - GHarness.StartTime;
+
+        if (GHarness.bAutoSpawner && !GHarness.bSpawnerStarted && GEngine)
+        {
+            for (const FWorldContext& Context : GEngine->GetWorldContexts())
+            {
+                UWorld* World = Context.World();
+                if (!World
+                    || (Context.WorldType != EWorldType::Game && Context.WorldType != EWorldType::PIE)
+                    || !World->HasBegunPlay())
+                {
+                    continue;
+                }
+
+                FActorSpawnParameters Params;
+                Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+                if (AJUSYNCFileSpawnerActor* Spawner = World->SpawnActor<AJUSYNCFileSpawnerActor>(
+                        FVector::ZeroVector, FRotator::ZeroRotator, Params))
+                {
+                    Spawner->StartSpawning();
+                    GHarness.bSpawnerStarted = true;
+                    UE_LOG(LogJUSYNC, Display, TEXT("[jusync.harness] auto-spawner started streaming (world '%s', t=%.1fs)"),
+                        *World->GetMapName(), Elapsed);
+                }
+                break;
+            }
+        }
+
+        if (GHarness.DiagInterval > 0.0 && GHarness.DiagRemaining > 0 && Elapsed >= GHarness.NextDiagAt)
+        {
+            UE_LOG(LogJUSYNC, Display, TEXT("[jusync.harness] diag dump t=%.1fs"), Elapsed);
+            JusyncLogDiagTable(GHarness.DiagRows);
+            --GHarness.DiagRemaining;
+            GHarness.NextDiagAt += GHarness.DiagInterval;
+        }
+
+        if (GHarness.QuitAt > 0.0 && Elapsed >= GHarness.QuitAt)
+        {
+            UE_LOG(LogJUSYNC, Display, TEXT("[jusync.harness] auto-quit at t=%.1fs"), Elapsed);
+            GHarness.TickerHandle.Reset();
+            FPlatformMisc::RequestExitWithStatus(true, 0);
+            return false;
+        }
+        return true;
+    }
+}
+
+void FJUSYNCModule::MaybeStartHeadlessHarness()
+{
+    FString Spec;
+    if (FParse::Value(FCommandLine::Get(), TEXT("JusyncAutoDiag="), Spec))
+    {
+        FString IntervalStr = Spec;
+        FString CountStr;
+        if (Spec.Split(TEXT(","), &IntervalStr, &CountStr))
+        {
+            GHarness.DiagRemaining = FMath::Max(1, FCString::Atoi(*CountStr));
+        }
+        else
+        {
+            GHarness.DiagRemaining = TNumericLimits<int32>::Max();
+        }
+        GHarness.DiagInterval = FCString::Atof(*IntervalStr);
+    }
+    FString RowsStr;
+    if (FParse::Value(FCommandLine::Get(), TEXT("JusyncAutoDiagRows="), RowsStr))
+    {
+        GHarness.DiagRows = FMath::Clamp(FCString::Atoi(*RowsStr), 1, 200);
+    }
+    FString QuitStr;
+    if (FParse::Value(FCommandLine::Get(), TEXT("JusyncAutoQuit="), QuitStr))
+    {
+        GHarness.QuitAt = FCString::Atof(*QuitStr);
+    }
+    GHarness.bAutoSpawner = FParse::Param(FCommandLine::Get(), TEXT("JusyncAutoSpawner"));
+
+    if (GHarness.DiagInterval <= 0.0 && GHarness.QuitAt <= 0.0 && !GHarness.bAutoSpawner)
+    {
+        return; // nothing requested
+    }
+
+    GHarness.StartTime = FPlatformTime::Seconds();
+    GHarness.NextDiagAt = GHarness.DiagInterval;
+    UE_LOG(LogJUSYNC, Display,
+        TEXT("[jusync.harness] armed: autoSpawner=%d diagEvery=%.1fs count=%d rows=%d quitAt=%.1fs"),
+        GHarness.bAutoSpawner ? 1 : 0, GHarness.DiagInterval, GHarness.DiagRemaining,
+        GHarness.DiagRows, GHarness.QuitAt);
+    GHarness.TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
+        FTickerDelegate::CreateStatic(&JusyncHarnessTick));
+}
+#endif
 
 void FJUSYNCModule::CleanupPlatformSpecific() {
     // Nothing to free: libraries are resolved via the process DLL path.

@@ -104,3 +104,30 @@
 2. `git -C D:\JSC_Github\ANARI-USD checkout -b feat/rawgeo-streaming`
 3. Commit this plan doc into jusync `docs/plans/realtime-streaming.md`.
 4. Start Phase 0 instrumentation.
+
+---
+
+## Status notes - 2026-10-09 (headless harness + streaming fixes)
+
+### Headless perf testing (answers "can we test without opening UE?")
+- `tools/run-headless-perf.ps1`: runs the sample project via `UnrealEditor-Cmd.exe -game -nullrhi` with cmdline harness flags implemented in `FJUSYNCModule::MaybeStartHeadlessHarness` (JUSYNCModule.cpp):
+  - `-JusyncAutoSpawner` spawn AJUSYNCFileSpawnerActor + StartSpawning() once the world begins play,
+  - `-JusyncAutoDiag=SEC[,COUNT]` + `-JusyncAutoDiagRows=N` dump the jusync.diag table on a timer,
+  - `-JusyncAutoQuit=SEC` force-exit (RequestExitWithStatus) so runs are scriptable.
+- Fully automated: exit 0, log parsed by the script (harness timeline, last diag table, top errors).
+
+### Bugs found & fixed (all verified headless)
+1. **Empty viewport root cause** (0c8dd2b): hard-coded 2048-byte "tiny file" guards swallowed the 1303/1416 B tutorial clips on live-update paths; now honor MinimumFileSizeBytes (default 1000) like the initial load.
+2. **PointInstancer never extracted** (UsdProcessor.cpp): ANARI-USD writes point clouds as `def PointInstancer` with `point3f[] positions.timeSamples`; ProcessPrim only handled GeomPoints. Added ExtractPointInstancerAsCloud (static or time-sampled positions, primvars:color incl. timeSamples via GeomPrimvar, attribute0 scalars for gradient bake). Points files went `pc=0` -> `pc=1`.
+3. **Gradient deadlock**: sampler PNGs are 256x256 textures whose rows are a horizontal ramp, but the LUT loader rejected H>2 ("not a gradient") -> every gradient-colored PC parked in PendingNoColorClouds forever, PendingAsyncPCS pinned, initial spawn never completed, live updates never started. Fix: sample top scanline (BGRA8 GetRaw). Safety net: expired no-color clouds now spawn WITHOUT the gradient (bAllowNoGradient) instead of ping-ponging on the 2 s requeue.
+4. **Stale middleware DLL shadowing**: deploy-ue-plugin.ps1 now also syncs `<sample>`Binaries`Win64 (UBT stages a copy there; if stale it wins the loader search - cost a debugging cycle).
+5. `[COMPLETION] ENTRY` logged at Display per notification (2300 lines/75 s) - demoted to Verbose.
+
+### Measured (tutorial rig, loopback broker; numbers = after last NOTIFY, trace-restart semantics)
+- notify->spawn on live updates: **3.2 ms** (parse 0.3, fill 0.0, spawn 2.9) per 1.4 KB crate clip.
+- Live updates flow end-to-end: Refreshing-file x35 in 75 s, PC direct-LiDAR spawns x36 (4 pts each, correct), zero parse failures, zero delaying-PC, pipeline complete + live-update gating released.
+
+### Still open
+- Broker restarts between loop passes make the initial list sometimes tiny (3 files) - harness-side retry or sender keep-warm across passes.
+- `stream_perf` gained dev-only `[dump-substring out-path]` argv to pull broker bytes for inspection.
+- JURECA tunnel throughput test (dd) still pending - gates P3 vs P5.

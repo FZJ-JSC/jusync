@@ -2108,21 +2108,29 @@ void AJUSYNCFileSpawnerActor::DownloadGradientPng(UJUSYNCSubsystem* Subsystem)
             if (Img.IsValid() && Img->SetCompressed(PngData.GetData(), PngData.Num()))
             {
                 TArray64<uint8> RawData;
-                if (Img->GetRaw(RawData))
+                if (Img->GetRaw(ERGBFormat::BGRA, 8, RawData))
                 {
-                    int64 W = Img->GetWidth();
-                    int64 H = Img->GetHeight();
-                    if (H > 2)
-                    {
-                        UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: '%s' is a full texture (height %lld), not a gradient — skipping LUT"), *PngCopy, (long long)H);
-                    }
-                    else
+                    const int64 W = Img->GetWidth();
+                    const int64 H = Img->GetHeight();
+                    // Build the LUT from the TOP SCANLINE. Gradient strips are
+                    // 1xN/2xN; the ANARI tutorial samplers ship NxN textures
+                    // whose rows are near-identical horizontal ramps, so row 0
+                    // is a valid LUT there too. (Previously any H>2 texture was
+                    // skipped entirely, so gradient-colored point clouds stalled
+                    // forever in the no-color queue and the initial spawn never
+                    // completed.)
+                    if (W > 0 && H > 0 && RawData.Num() >= W * 4)
                     {
                         LUT.Reserve(FMath::Min(W, 256));
                         for (int64 x = 0; x < W && x < 256; ++x)
                         {
-                            const uint8* Pixel = RawData.GetData() + x * 4;
+                            const uint8* Pixel = RawData.GetData() + x * 4; // BGRA
                             LUT.Add(FColor(Pixel[2], Pixel[1], Pixel[0], 255));
+                        }
+                        if (H > 2)
+                        {
+                            UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: '%s' is %lldx%lld texture, sampled top row for LUT (%d colors)"),
+                                *PngCopy, (long long)W, (long long)H, LUT.Num());
                         }
                     }
                 }
@@ -2765,7 +2773,7 @@ void AJUSYNCFileSpawnerActor::RecolorGradientPendingMeshes()
 
 void AJUSYNCFileSpawnerActor::CheckAllDownloadsComplete()
 {
-    UE_LOG(LogTemp, Display, TEXT("[COMPLETION] ENTRY: FilesDownloaded=%d, FilesTotal=%d, PipelineActive=%d, PendingParseTasks=%d, PendingAsyncPCS=%d, Deferred=%d, bInitialSpawnDone=%d"),
+    UE_LOG(LogTemp, Verbose, TEXT("[COMPLETION] ENTRY: FilesDownloaded=%d, FilesTotal=%d, PipelineActive=%d, PendingParseTasks=%d, PendingAsyncPCS=%d, Deferred=%d, bInitialSpawnDone=%d"),
         FilesDownloaded, FilesTotal, PipelineActive, PendingParseTasks, PendingAsyncPCS, DeferredSpawns.Num(), bInitialSpawnDone ? 1 : 0);
 
     if (FilesDownloaded >= FilesTotal)

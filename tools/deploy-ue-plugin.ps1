@@ -54,15 +54,19 @@ $dstDll = Join-Path $dstPlugin 'Binaries\Win64\anari_usd_middleware.dll'
 # import lib + exp must ship with the DLL or new C API exports fail to resolve.
 $buildDir = Split-Path $dll -Parent
 $dstLibDir = Join-Path $dstPlugin 'Source\ThirdParty\AnariUsdMiddleware\Lib\Win64'
+# The project's own Binaries\Win64 also receives a staged copy (UBT dependency
+# walk); if stale it SHADOWS the plugin copy at load time (Windows DLL search).
+$dstProjBin = Join-Path $SampleRoot 'Binaries\Win64'
 if ($WhatIf) {
-    Write-Host "== [dry-run] would copy $dll -> $dstDll ==" -ForegroundColor Yellow
+    Write-Host "== [dry-run] would copy $dll -> $dstDll and $dstProjBin ==" -ForegroundColor Yellow
     Write-Host "== [dry-run] would copy lib/exp/dll from $buildDir -> $dstLibDir ==" -ForegroundColor Yellow
 } else {
     Copy-Item $dll $dstDll -Force
+    if (Test-Path $dstProjBin) { Copy-Item $dll (Join-Path $dstProjBin 'anari_usd_middleware.dll') -Force }
     foreach ($bin in 'anari_usd_middleware.lib', 'anari_usd_middleware.exp', 'anari_usd_middleware.dll') {
         $binSrc = Join-Path $buildDir $bin
         if (Test-Path $binSrc) { Copy-Item $binSrc (Join-Path $dstLibDir $bin) -Force }
     }
-    Write-Host "== Middleware binaries: $buildDir -> Binaries\Win64 + ThirdParty Lib\Win64 ==" -ForegroundColor Green
+    Write-Host "== Middleware binaries: $buildDir -> Binaries\Win64 (plugin+project) + ThirdParty Lib\Win64 ==" -ForegroundColor Green
 }
 Write-Host "Next: open the sample project (or Build.bat) so UBT recompiles UnrealEditor-JUSYNC from the synced sources." -ForegroundColor Cyan

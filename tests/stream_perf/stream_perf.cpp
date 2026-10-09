@@ -61,6 +61,11 @@ int main(int argc, char** argv)
 {
     const char* endpoint = (argc > 1) ? argv[1] : "tcp://localhost:5556";
     const int idleSeconds = (argc > 2) ? std::atoi(argv[2]) : 30;
+    // Dev-only: stream_perf.exe [endpoint] [idle] [dump-substring] [out-path]
+    // dumps the first downloaded file whose name contains the substring.
+    const std::string dumpSub = (argc > 3) ? argv[3] : std::string();
+    const std::string dumpPath = (argc > 4) ? argv[4] : std::string();
+    bool dumped = false;
     const int32_t rank = 0; // single-rank self-service rig
 
     // ---- 1. connect ----
@@ -160,6 +165,21 @@ int main(int argc, char** argv)
                 std::printf("  |");
                 for (size_t b = 0; b < (n < 24 ? n : 24); ++b) std::printf("%c", (buf[b] >= 32 && buf[b] < 127) ? buf[b] : '.');
                 std::printf("|\n");
+            }
+            if (!dumped && !dumpSub.empty() && std::strstr(names[i], dumpSub.c_str()) && !dumpPath.empty())
+            {
+                dumped = true;
+                FILE* f = std::fopen(dumpPath.c_str(), "wb");
+                if (f)
+                {
+                    std::fwrite(buf.data(), 1, n, f);
+                    std::fclose(f);
+                    std::printf("      DUMPED %zu B -> %s\n", n, dumpPath.c_str());
+                }
+                else
+                {
+                    std::printf("      dump fopen FAILED: %s\n", dumpPath.c_str());
+                }
             }
         }
         else

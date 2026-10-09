@@ -27,6 +27,12 @@ private:
     void UnregisterModuleSystems();
     void CleanupPlatformSpecific();
 
+#if WITH_ANARI_USD_MIDDLEWARE
+    // Cmdline-driven headless perf harness (-JusyncAutoSpawner / -JusyncAutoDiag /
+    // -JusyncAutoQuit). Inert when no flags are present.
+    void MaybeStartHeadlessHarness();
+#endif
+
     // Cross-platform library validation
     bool ValidateLibraries(
         const FString& LibraryPath, const TArray<FString>& RequiredLibraries, const FString& Extension

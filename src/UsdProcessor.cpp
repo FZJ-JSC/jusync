@@ -1607,6 +1607,25 @@ bool UsdProcessor::ProcessPrim(void* prim,
             }
         }
 
+        // Check for point instancer (def PointInstancer) — ANARI instanced
+        // point clouds stream as time-sampled PointInstancer positions; flatten
+        // them into a cloud (tinyusdz parses the prim but nothing consumed it).
+        const lightusd::GeomPointInstancer* inst =
+            usdPrim.as<lightusd::GeomPointInstancer>();
+        if (inst && outPointCloudData) {
+            MIDDLEWARE_LOG_INFO("Found point instancer: %s", usdPrim.element_name().c_str());
+
+            PointCloudData instData;
+            instData.elementName = usdPrim.element_name();
+            instData.typeName = usdPrim.prim_type_name();
+
+            if (ExtractPointInstancerAsCloud(inst, instData, worldTransform) && instData.isValid()) {
+                MIDDLEWARE_LOG_INFO("Extracted point cloud from PointInstancer: %s (%zu positions, %zu colors)",
+                    instData.elementName.c_str(), instData.positions.size(), instData.vertex_colors.size());
+                outPointCloudData->push_back(std::move(instData));
+            }
+        }
+
         // Check if this is a mesh primitive (skip if already handled as point cloud)
         if (!pts) {
             const lightusd::GeomMesh* mesh = usdPrim.as<lightusd::GeomMesh>();
@@ -3135,6 +3154,137 @@ bool UsdProcessor::ExtractPointCloudData(lightusd::GeomPoints* geomPoints,
 
     } catch (const std::exception& e) {
         MIDDLEWARE_LOG_ERROR("Exception in ExtractPointCloudData: %s", e.what());
+        return false;
+    }
+}
+
+bool UsdProcessor::ExtractPointInstancerAsCloud(
+    const lightusd::GeomPointInstancer* instancer,
+    PointCloudData& outData,
+    const glm::mat4& worldTransform) {
+    if (!instancer) {
+        MIDDLEWARE_LOG_ERROR("ExtractPointInstancerAsCloud: null GeomPointInstancer pointer");
+        return false;
+    }
+
+    try {
+        // ── Instance positions (zero-copy static value, timeSamples fallback) ──
+        // The ANARI-USD writer emits `point3f[] positions.timeSamples` per
+        // timestep commit; evaluate at time 0 (single-sample layers).
+        std::vector<lightusd::value::point3f> pointsCopy;
+        const std::vector<lightusd::value::point3f>* rawPoints =
+            JusyncGetStaticVector<lightusd::value::point3f>(instancer->positions);
+        if (!rawPoints) {
+            if (JusyncGetVectorAtTime<lightusd::value::point3f>(
+                    instancer->positions, 0.0, pointsCopy) &&
+                !pointsCopy.empty()) {
+                rawPoints = &pointsCopy;
+            }
+        }
+        if (!rawPoints || rawPoints->empty()) {
+            MIDDLEWARE_LOG_WARNING("Empty instancer positions for %s", outData.elementName.c_str());
+            return false;
+        }
+
+        outData.positions.resize(rawPoints->size());
+        for (size_t i = 0; i < rawPoints->size(); i++) {
+            const auto& pt = (*rawPoints)[i];
+            glm::vec4 homogeneous = glm::vec4(static_cast<float>(pt.x),
+                                              static_cast<float>(pt.y),
+                                              static_cast<float>(pt.z), 1.0f);
+            glm::vec4 transformed = worldTransform * homogeneous;
+            outData.positions[i] = glm::vec3(transformed.x / transformed.w,
+                                             transformed.y / transformed.w,
+                                             transformed.z / transformed.w);
+        }
+        MIDDLEWARE_LOG_INFO("Extracted %zu instancer positions from %s",
+            outData.positions.size(), outData.elementName.c_str());
+
+        // ── primvars:color (static value, then time-sampled via GeomPrimvar) ──
+        {
+            std::vector<lightusd::value::color4f> colors;
+            bool haveColors = false;
+            if (const lightusd::Attribute* colorAttr =
+                    JusyncFindPrimvarAttribute(*instancer, "color")) {
+                if (!colorAttr->is_blocked() && !colorAttr->is_connection()) {
+                    if (const auto* raw4 =
+                            JusyncGetAttributeVector<lightusd::value::color4f>(*colorAttr)) {
+                        colors = *raw4;
+                        haveColors = true;
+                    } else if (const auto* raw3 =
+                            JusyncGetAttributeVector<lightusd::value::color3f>(*colorAttr)) {
+                        colors.reserve(raw3->size());
+                        for (const auto& c : *raw3) {
+                            colors.push_back(lightusd::value::color4f{c.r, c.g, c.b, 1.0f});
+                        }
+                        haveColors = true;
+                    }
+                }
+            }
+            if (!haveColors) {
+                lightusd::GeomPrimvar colorPrimvar;
+                std::string err;
+                haveColors = instancer->get_primvar("color", &colorPrimvar, &err) &&
+                    colorPrimvar.get_value(0.0, &colors) && !colors.empty();
+            }
+            if (haveColors && colors.size() == outData.positions.size()) {
+                outData.vertex_colors.resize(colors.size());
+                for (size_t i = 0; i < colors.size(); i++) {
+                    outData.vertex_colors[i] = glm::vec4(
+                        static_cast<float>(colors[i].r), static_cast<float>(colors[i].g),
+                        static_cast<float>(colors[i].b), static_cast<float>(colors[i].a));
+                }
+                MIDDLEWARE_LOG_INFO("Extracted %zu instancer colors from %s",
+                    colors.size(), outData.elementName.c_str());
+            }
+        }
+
+        // ── attribute0 scalar (drives client-side gradient color bake) ──
+        outData.scalarAttributes.clear();
+        {
+            const std::vector<std::string> attrNames = {
+                "attribute0", "st", "map1"
+            };
+            for (const auto& name : attrNames) {
+                std::vector<lightusd::value::texcoord2f> uvData;
+                bool found = false;
+                if (const lightusd::Attribute* attr =
+                        JusyncFindPrimvarAttribute(*instancer, name)) {
+                    if (!attr->is_blocked() && !attr->is_connection() &&
+                        instancer->props.count("primvars:" + name + ":indices") == 0) {
+                        if (const auto* raw = JusyncGetAttributeVector<
+                                lightusd::value::texcoord2f>(*attr)) {
+                            uvData = *raw;
+                            found = true;
+                        }
+                    }
+                }
+                if (!found) {
+                    lightusd::GeomPrimvar primvar;
+                    std::string err;
+                    found = instancer->get_primvar(name, &primvar, &err) &&
+                        primvar.get_value(0.0, &uvData) && !uvData.empty();
+                }
+                if (found && uvData.size() == outData.positions.size()) {
+                    outData.scalarAttributes.resize(uvData.size());
+                    for (size_t i = 0; i < uvData.size(); i++) {
+                        outData.scalarAttributes[i] = glm::vec2(uvData[i].s, uvData[i].t);
+                    }
+                    outData.uvSetNames.push_back(name);
+                    MIDDLEWARE_LOG_INFO("Extracted %zu %s instancer attribute values from %s",
+                        outData.scalarAttributes.size(), name.c_str(), outData.elementName.c_str());
+                    break;
+                }
+            }
+        }
+
+        // NOTE: invisibleIds / protoIndices / orientations / scales are ignored
+        // for point-style display (each instance position = one point).
+
+        return true;
+
+    } catch (const std::exception& e) {
+        MIDDLEWARE_LOG_ERROR("Exception in ExtractPointInstancerAsCloud: %s", e.what());
         return false;
     }
 }

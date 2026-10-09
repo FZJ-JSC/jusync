@@ -33,6 +33,7 @@ namespace lightusd {
     class Stage;
     class GeomMesh;
     class GeomPoints;
+    class GeomPointInstancer;
 }
 
 namespace anari_usd_middleware {
@@ -571,6 +572,23 @@ private:
     bool ExtractPointCloudData(lightusd::GeomPoints* geomPoints,
                                PointCloudData& outData,
                                const glm::mat4& worldTransform);
+
+    /**
+     * Flatten a USD PointInstancer prim into a point cloud.
+     *
+     * ANARI-USD streams instanced point clouds (e.g. the tutorial points) as
+     * `def PointInstancer` prims whose positions/primvars are time-sampled.
+     * Instance transforms (scales/orientations/protoIndices) are ignored:
+     * each instance position IS one cloud point.
+     *
+     * @param instancer Pointer to TinyUSDZ GeomPointInstancer
+     * @param outData Output point cloud data structure
+     * @param worldTransform World transformation matrix
+     * @return True if at least one position was extracted
+     */
+    bool ExtractPointInstancerAsCloud(const lightusd::GeomPointInstancer* instancer,
+                                      PointCloudData& outData,
+                                      const glm::mat4& worldTransform);
 
     /**
      * Bake per-point colors from a gradient/colormap texture using attribute0 scalars

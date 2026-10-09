@@ -97,7 +97,10 @@ void FJUSYNCPointCloudSpawner::FlushExpiredNoColorClouds()
 
     for (FPendingNoColorCloud& Pending : ToFlush)
     {
-        EnqueuePointCloud(MoveTemp(Pending.Data), Pending.Rank);
+        // Expired entries spawn WITHOUT the gradient rather than ping-ponging
+        // in the queue forever (which also pins PendingAsyncPCS and blocks
+        // initial-spawn completion / live updates).
+        EnqueuePointCloud(MoveTemp(Pending.Data), Pending.Rank, /*bAllowNoGradient=*/!bLUTReady);
     }
 }
 
@@ -125,7 +128,7 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(const FJUSYNCPointCloudData& PC
     EnqueuePointCloud(FJUSYNCPointCloudData(PCData), InRank);
 }
 
-void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData, int32 InRank)
+void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData, int32 InRank, bool bAllowNoGradient)
 {
     if (!PCData.IsValid() || !Owner.IsValid() || bShuttingDown.load()) return;
 
@@ -135,7 +138,7 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
         const int32 DirectPointCount = PCData.PointCount;
         const bool bHasBakedColors = PCData.HasBakedColors();
 
-        if (!bHasBakedColors && PCData.Widths.Num() > 0)
+        if (!bAllowNoGradient && !bHasBakedColors && PCData.Widths.Num() > 0)
         {
             const TArray<FColor> LocalLUT = GetGradientLUT();
             if (LocalLUT.Num() == 0)
@@ -231,7 +234,7 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
 #endif
 
     const bool bLegacyHasColors = PCData.HasColors();
-    if (!bLegacyHasColors && PCData.Widths.Num() > 0)
+    if (!bAllowNoGradient && !bLegacyHasColors && PCData.Widths.Num() > 0)
     {
         const TArray<FColor> LocalLUT = GetGradientLUT();
         if (LocalLUT.Num() == 0)
