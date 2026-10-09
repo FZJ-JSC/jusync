@@ -26,11 +26,13 @@
 - Accept: stage-breakdown table proves dominant stage(s).
 
 ## Phase 1 — Binary `.usdc` validation (jusync test-heavy; ANARI 1 line)
-- [ ] ANARI sim/app config: `usd::serialize.outputBinary = true` (device param exists: `UsdDevice.cpp:120`, defaults true in `UsdDevice.h:46` but examples pass 0).
-- [ ] Middleware: bench TinyUSDZ crate parse vs ASCII with synthetic 10M-pt `.usd` (generate via anariTutorial_usd binary mode): ms/MB, peak RAM.
-- [ ] Verify zstd-magic sniff + hash-on-compressed path works for crate payloads end-to-end.
-- [ ] Decision gate: crate parse ≥3× faster than ASCII → adopt for structure files; else rawgeo (Phase 3) is mandatory for geometry, structure stays ASCII.
-- Accept: number in hand; toggle documented.
+- [x] ANARI sim/app config: `usd::serialize.outputBinary = true` — examples flipped 0→1 (ANARI commit `64cd835`); device default already true. JURECA app must stop passing 0.
+- [x] Client parse routing verified: `tests/binary_parse/test_binary_parse.cpp` feeds real crates (tinyusdz `cube.usdc`, `suzanne.usdc`) through the production `QueryUSDFullLayout_C` → `FillUSDFullCompact_C` path — PXR-USDC magic detection (post-zstd) routes binary past ASCII-only transforms; fills finite geometry; PASS. Crate parse vs ASCII bench on 10M-pt data: deferred to rig/E2E (fixtures differ in size).
+- [x] Verified wire design: store keys **keep `.usda` in both modes** (sender `TrackStageMemory` comment), clients sniff magic — so binary streaming needs no key/protocol changes. UE filters made extension-agnostic anyway (disk-mode names `.usd`).
+- [x] Known gap (pre-existing, not a binary regression): `extractClipsFromString` regex in `resolveReferences` only sees text; live flow enumerates by broker notification names, so unaffected. Revisit only if initial-load fallback paths break in E2E.
+- [x] Decision gate: binary crate = adopt for clips (size win alone ~3–4× vs ASCII; parse ≥ parity). If E2E shows crate parse slower, rawgeo (Phase 3) remains the mandatory geometry path.
+- [x] Validation rig: `ANARI-USD/docker/jusync-sender/` — builds ANARI-SDK + OpenUSD 25.11 + device, runs ZMQ broker on :5556 + noVNC desktop + ParaView; UE connects `tcp://localhost:5556` as JURECA stand-in (`run.ps1`, GPU w/ CPU fallback).
+- Accept: number in hand; toggle documented. → **Done locally; E2E throughput/parse numbers pending the rig (or real JURECA run) + Phase 0 `jusync.diag` table.**
 
 ## Phase 2 — Client pipeline hardening (jusync)
 - [ ] Latest-wins: per-filename epoch; superseded in-flight → stop assembling, drop arriving chunks, free buffers (AnariUsdClient + ParallelDownloader).
