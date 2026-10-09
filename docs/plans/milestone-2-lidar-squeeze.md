@@ -161,8 +161,73 @@ Rework `JUSYNCPointCloudSpawner` direct-LiDAR path:
 - graphify update. Final whole-branch review (fresh subagent, both repos).
 - Commits to jusync.
 
+### Task 8 — H: MPI multi-rank RawGeo streaming (user scope-add 2026-10-10)
+
+Requirement: the whole RawGeo path must work when ANARI-USD runs under
+mpirun (N>1), and the jusync UE client must fetch `.geo` from the OWNING
+rank. Runs after Task 5 so the MPI test also exercises stride.
+
+Architecture facts (verified in code):
+- MPI mode: rank0 = ZmqBroker; EVERY rank runs `InitializeMemoryStore(rank)`
+  (UsdDevice.cpp:536) and workers run ZmqWorker + their own
+  `FileServingThreadLoop` (UsdDevice.cpp:521-524). Files stored on a worker
+  stay in the worker's store; rank0 forwards REQ_GET_FILE with
+  `target_rank>=1` (UsdBridgeZmqBroker.cpp:1030-1070) and relays the worker's
+  chunks to the client (:1276-1330).
+- `TryStoreRawGeo` ends in `g_rankMemoryStore->StoreFile(geoKey, ...)` on the
+  LOCAL rank (UsdBridgeUsdWriter.cpp:2070-2071) → on workers it fills the
+  worker store. RawGeoEnabled() reads env per-process → stride/RawGeo gates
+  propagate naturally under mpirun.
+
+To verify/fix (dig-in list):
+1. Worker→rank0 file-update propagation: find how a worker StoreFile reaches
+   rank0's client-facing LIST + NOTIFY_FILE_UPDATE_V2 (broker :1375-1440
+   "Received from worker" path; likely a FILE_UPDATE message naming keys
+   without bytes). Confirm `.geo` keys ride the SAME channel as `.usda/.usd`
+   twins (both via StoreFile choke point) — if the update message is emitted
+   per-key by the diff-capture/flush flow on workers, we get it free.
+2. Rank0 broker list serving reads `g_rankMemoryStore` (rank0's own store,
+   :607). If worker keys are absent from the list, client never learns the
+   `.geo` — check how worker `.usda` clip keys currently become visible to
+   clients (that mechanism must cover `.geo` too; if the client gets a merged
+   list with per-file rank, done; if not — mirror the USD twins' treatment).
+3. Notification source_rank → client: JUSYNCSubsystem/BlueprintLibrary
+   download call must pass the file's rank into AnariUsdClient::getFileData
+   `targetRank` (src :820/:986 already parameterized). Verify the `.geo`
+   in-situ fetch uses the entry's rank (not hard-wired 0), and that the
+   RawGeo sniff + store twin logic tolerates rank>0 files.
+4. Client spawn semantics: spawner keys already include rank
+   (`%s_r%d`); async builds are per-key so multi-rank = N actors, each
+   building independently — confirm drain budget/1-item-per-tick doesn't
+   serialize badly at N=2 (fine: async start is ~µs).
+5. ZmqWorker::SendFileChunk relay through rank0: relay at :1276-1330 — apply
+   single-copy if it re-copies frames (match Task 2 win on the worker path).
+6. anariBigCloudUsd under mpirun: SPMD replication or partition? Read the
+   example; if replicated, each rank stores the same geoKey in its OWN store
+   (client still downloads once, from whichever rank owns/answers). If
+   partitioned by prim/clip naming, per-rank keys — verify naming flows into
+   `.geo` twins unchanged.
+7. Rig: run the sender container with mpirun -n 2 (OpenMPI is in the image;
+   check run-sender.sh honors a JUSYNC_MPI_RANKS/NPROCS env; if not, add it
+   to the docker dev flow). Recreate `jusync-sender` with NPROCS=2 +
+   ANARI_BIG_FPS=2 + JUSYNC_RAWGEO_STRIDE=4, run headless: expect BOTH ranks'
+   .geo keys listed, downloads target rank correctly (middleware log shows
+   target_rank), two actors spawning/updating in UE, zero USD-text fallback
+   (no big .usda commits for the instancer on either rank).
+8. If worker-rank RawGeo is broken: prefer fixes on the middleware/broker
+   side (routing/listing) over sender-side hacks; NO protocol change if
+   avoidable (target_rank already in ZmqFileRequest; source_rank already in
+   notifications).
+
+Verification = the mpirun -n2 headless run (numbers + greps in ledger)
+AND a regression single-rank run (unchanged behavior). Commits: ANARI-USD
+(fixes), jusync (client rank fix if needed), both feature branches.
+
 ## Success bar (user-visible)
 
 Interactive: 10M-pt cloud at JURECA-scale bandwidth with ≤ ~2 s notify→pixel
 at 2 Hz, game thread never stalls ≥ 50 ms, no custom renderer, zero protocol
 changes, all wins inside Epic-maintained APIs + our middleware plumbing.
+MPI: the same RawGeo fast path works with the sender running under mpirun
+(multi-rank), client fetching from the owning rank — JURECA's real launch
+mode.
