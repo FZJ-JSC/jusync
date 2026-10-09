@@ -288,6 +288,13 @@ private:
     std::atomic<bool> shutdownRequested{false};
     std::string brokerEndpoint;
 
+    // Stable ROUTER identity for the DEALER (P2 keep-warm): an anonymous
+    // socket gets a fresh connection identity on every TCP reconnect, which
+    // drops the client from the broker's notification push list until its
+    // next list/file request. A pinned routing_id survives link churn.
+    // Generated once per client, reused across reconnects.
+    std::string clientRoutingId;
+
     // Thread safety
     mutable std::mutex connectionMutex;
     mutable std::recursive_mutex requestMutex;
