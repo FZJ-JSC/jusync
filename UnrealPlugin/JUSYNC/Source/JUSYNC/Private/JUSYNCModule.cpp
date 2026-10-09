@@ -1,6 +1,7 @@
 #include "JUSYNCModule.h"
 #include "Engine/Engine.h"
 #include "HAL/PlatformFileManager.h"
+#include "HAL/IConsoleManager.h"
 #include "Misc/Paths.h"
 #include "HAL/FileManager.h"
 
@@ -13,12 +14,19 @@
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
 #include "AnariUsdMiddleware.h"
+#if WITH_ANARI_USD_MIDDLEWARE
+#include "AnariUsdMiddleware_C.h"
+#endif
 #endif
 
 #define LOCTEXT_NAMESPACE "FJUSYNCModule"
 
-
 DEFINE_LOG_CATEGORY(LogJUSYNC)
+
+#if WITH_ANARI_USD_MIDDLEWARE
+// jusync.diag console command object (registered in RegisterModuleSystems).
+static IConsoleObject* GJusyncDiagCmd = nullptr;
+#endif
 
 
 void FJUSYNCModule::StartupModule() {
@@ -199,11 +207,55 @@ void FJUSYNCModule::LogMiddlewareCapabilities() {
 }
 
 void FJUSYNCModule::RegisterModuleSystems() {
-    // Hook point for global systems; currently a no-op.
+#if WITH_ANARI_USD_MIDDLEWARE
+    // jusync.diag [N|clear] — per-file streaming stage-latency journal dump (Phase 0).
+    if (!GJusyncDiagCmd)
+    {
+        GJusyncDiagCmd = IConsoleManager::Get().RegisterConsoleCommand(
+            TEXT("jusync.diag"),
+            TEXT("Print JUSYNC streaming stage latency table (ms). Usage: jusync.diag [N|clear], default N=20"),
+            FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args) {
+                if (Args.Num() > 0 && Args[0].Equals(TEXT("clear"), ESearchCase::IgnoreCase))
+                {
+                    JusyncDiagClear_C();
+                    UE_LOG(LogJUSYNC, Log, TEXT("[jusync.diag] journal cleared"));
+                    return;
+                }
+                const int32 N = (Args.Num() > 0)
+                    ? FMath::Clamp(FCString::Atoi(*Args[0]), 1, 200)
+                    : 20;
+                TArray<char> Buf;
+                Buf.SetNumUninitialized(128 * 1024);
+                const int32 Written = JusyncDiagDump_C(Buf.GetData(), Buf.Num(), N);
+                if (Written <= 0)
+                {
+                    UE_LOG(LogJUSYNC, Log, TEXT("[jusync.diag] no traces recorded yet"));
+                    return;
+                }
+                Buf[Written] = '\0';
+                const FString Table = FString(UTF8_TO_TCHAR(Buf.GetData()));
+                TArray<FString> Lines;
+                Table.ParseIntoArrayLines(Lines, /*bCullEmpty=*/false);
+                UE_LOG(LogJUSYNC, Display,
+                    TEXT("===== JUSYNC streaming stage latency (ms, -1 = stage not reached) ====="));
+                for (const FString& Line : Lines)
+                {
+                    UE_LOG(LogJUSYNC, Display, TEXT("%s"), *Line);
+                }
+            }),
+            EConsoleVariableFlags::ECVF_CodeOnly);
+    }
+#endif
 }
 
 void FJUSYNCModule::UnregisterModuleSystems() {
-    // No global systems to clean up.
+#if WITH_ANARI_USD_MIDDLEWARE
+    if (GJusyncDiagCmd)
+    {
+        IConsoleManager::Get().UnregisterConsoleObject(GJusyncDiagCmd);
+        GJusyncDiagCmd = nullptr;
+    }
+#endif
 }
 
 void FJUSYNCModule::CleanupPlatformSpecific() {

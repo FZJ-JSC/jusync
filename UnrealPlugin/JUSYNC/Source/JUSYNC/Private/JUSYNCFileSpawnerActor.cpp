@@ -4,6 +4,9 @@
 #include "JUSYNCPointCloudSpawner.h"
 #include "JUSYNCBenchmarkTiming.h"
 #include "JUSYNCUSDLoader.h"
+#if WITH_ANARI_USD_MIDDLEWARE
+#include "AnariUsdMiddleware_C.h"
+#endif
 #include "HAL/PlatformMemory.h"
 #include "HAL/PlatformFileManager.h"
 #include "HAL/PlatformTime.h"
@@ -1665,6 +1668,23 @@ void AJUSYNCFileSpawnerActor::FlushHiddenMeshUpdates()
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 0 streaming diagnostics: mark host-side stages into the middleware's
+// per-file stage journal (StreamDiagnostics.h / `jusync.diag` console command).
+// Middleware stages (notify, dl, parse, fill) are recorded automatically.
+// ---------------------------------------------------------------------------
+static FORCEINLINE void JUSYNC_DIAG_MARK(const FString& File, int32 Stage, uint64 Bytes = 0)
+{
+#if WITH_ANARI_USD_MIDDLEWARE
+    if (!File.IsEmpty())
+    {
+        JusyncDiagMark_C(TCHAR_TO_UTF8(*File), Stage, Bytes, 0, 0);
+    }
+#else
+    (void)File; (void)Stage; (void)Bytes;
+#endif
+}
+
 AActor* AJUSYNCFileSpawnerActor::SpawnOrUpdateMesh(FJUSYNCCompactMeshRef& Mesh, const FString& Filename, bool bIsRefresh, TArray<AActor*>& ReplacementActors, RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams, const TArray<AActor*>* OldMeshActors, bool bForceGradientSpawn)
 {
     if (!Mesh || !Mesh->IsValid())
@@ -1819,6 +1839,11 @@ AActor* AJUSYNCFileSpawnerActor::SpawnOrUpdateMesh(FJUSYNCCompactMeshRef& Mesh, 
     if (Actor && !ReplacementActors.Contains(Actor))
     {
         ReplacementActors.Add(Actor);
+    }
+
+    if (Actor)
+    {
+        JUSYNC_DIAG_MARK(Filename, JUSYNC_DIAG_SPAWNED);
     }
 
     return Actor;
@@ -2847,6 +2872,7 @@ void AJUSYNCFileSpawnerActor::OnPointCloudSpawnedHandler(const FString& EleName,
         {
             AnimationController->AddActor(FileName, Spawned);
         }
+        JUSYNC_DIAG_MARK(FileName, JUSYNC_DIAG_SPAWNED);
         PendingAsyncPCS = FMath::Max(0, PendingAsyncPCS - 1);
         return;
     }
@@ -2913,6 +2939,7 @@ void AJUSYNCFileSpawnerActor::OnPointCloudSpawnedHandler(const FString& EleName,
 
         OnFileComplete.Broadcast(EleName, Spawned);
         NextSpawnIndex++;
+        JUSYNC_DIAG_MARK(FileName, JUSYNC_DIAG_SPAWNED);
     }
 
     PendingAsyncPCS = FMath::Max(0, PendingAsyncPCS - 1);
@@ -3213,6 +3240,8 @@ void AJUSYNCFileSpawnerActor::HandleFileUpdateNotification(const FString& Filena
         UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Dedup: hash already tracked for '%s'"), *Filename);
         return;
     }
+
+    JUSYNC_DIAG_MARK(Filename, JUSYNC_DIAG_QUEUE, static_cast<uint64>(FileSize));
 
     if (ChangeTracker && ChangeTracker->Contains(Filename))
     {

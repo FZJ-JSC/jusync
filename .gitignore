@@ -1,6 +1,7 @@
 # Build directories
 cmake-build-debug/
 build/
+build-diag/
 build_linux/
 out/
 bin/

@@ -1,5 +1,6 @@
 #include "ParallelDownloader.h"
 #include "MiddlewareLogging.h"
+#include "StreamDiagnostics.h"
 #include <algorithm>
 #include <thread>
 #include <chrono>
@@ -85,6 +86,7 @@ ParallelDownloader::downloadFiles(const std::vector<std::string>& files,
         while (started - completed < actualMaxParallel && started < files.size()) {
             auto& task = (*tasks)[started];
             
+            jusync_diag::Diagnostics::instance().mark(task->filename, jusync_diag::STAGE_DL_START);
             uint32_t requestId = client_->requestFileAsync(
                 task->filename,
                 task->targetRank,
@@ -116,6 +118,8 @@ ParallelDownloader::downloadFiles(const std::vector<std::string>& files,
                     task->completed = true;
                     task->result.success = true;
                     task->result.size = totalSize;
+                    jusync_diag::Diagnostics::instance().mark(
+                        task->filename, jusync_diag::STAGE_DL_DONE, totalSize);
                     task->result.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - task->startTime);
                     
@@ -482,6 +486,7 @@ void ParallelDownloader::downloadWithStreaming(const std::vector<std::string>& f
             task->result.filename = filename;
             
             // Start async download with callbacks
+            jusync_diag::Diagnostics::instance().mark(filename, jusync_diag::STAGE_DL_START);
             uint32_t requestId = client_->requestFileAsync(
                 filename,
                 targetRank,
@@ -505,6 +510,8 @@ void ParallelDownloader::downloadWithStreaming(const std::vector<std::string>& f
                     taskPtr->completed = true;
                     taskPtr->result.success = true;
                     taskPtr->result.size = totalSize;
+                    jusync_diag::Diagnostics::instance().mark(
+                        taskPtr->filename, jusync_diag::STAGE_DL_DONE, totalSize);
                     taskPtr->result.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - taskPtr->startTime);
                     

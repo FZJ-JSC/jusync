@@ -1,5 +1,6 @@
 #include "AnariUsdClient.h"
 #include "MiddlewareLogging.h"
+#include "StreamDiagnostics.h"
 
 #include <regex>
 #include <algorithm>
@@ -1394,6 +1395,13 @@ void AnariUsdClient::handleNotification(const zmq::message_t& data) {
                         static_cast<unsigned long long>(hashPrevHi),
                         notif->hasOldData ? 1 : 0);
 
+    // Phase 0 streaming diagnostics: start (or restart) this file's stage trace.
+    if (notif->message_type == static_cast<uint32_t>(ZmqMessageType::NOTIFY_FILE_UPDATE_V2) ||
+        notif->message_type == static_cast<uint32_t>(ZmqMessageType::NOTIFY_FILE_UPDATE)) {
+        jusync_diag::Diagnostics::instance().mark(
+            notif->getFilename(), jusync_diag::STAGE_NOTIFY, notif->file_size, hashLo, hashHi);
+    }
+
     std::lock_guard<std::mutex> lock(notificationCallbackMutex);
     if (notificationCallback) {
         try {
@@ -2103,7 +2111,7 @@ void AnariUsdClient::enqueueResponseFrame(zmq::message_t delimiter,
     // Notifications have no request_id and would never be matched by waiting threads.
     if (data.size() >= 8) {
         uint32_t magic = *reinterpret_cast<const uint32_t*>(data.data());
-        uint32_t msgType = *reinterpret_cast<const uint32_t*>(data.data() + 4);
+        uint32_t msgType = *reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(data.data()) + 4);
 
         if (magic == ANARI_USD_MAGIC && MessageUtils::isSceneUpdateType(msgType)) {
             handleSceneUpdate(data);

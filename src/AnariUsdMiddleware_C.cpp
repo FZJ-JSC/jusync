@@ -9,6 +9,7 @@
 #include "CollisionProcessor.h"
 #include "UsdProcessor.h"
 #include "AnariUsdMessages.h"
+#include "StreamDiagnostics.h"
 
 #include <memory>
 #include <cstring>
@@ -732,6 +733,8 @@ namespace {
 struct ParsedUSDHandle {
     std::vector<anari_usd_middleware::UsdProcessor::MeshData> meshes;
     std::vector<anari_usd_middleware::UsdProcessor::PointCloudData> clouds;
+    // Source filename (broker path) for streaming diagnostics correlation.
+    std::string filename;
 };
 
 // FMath::Clamp(c*255, 0, 255) then truncate — legacy UE mesh color conversion.
@@ -918,6 +921,7 @@ int QueryUSDFullLayout_C(const unsigned char* buffer,
     *out_cloud_count = 0;
 
     try {
+        jusync_diag::Diagnostics::instance().mark(filename, jusync_diag::STAGE_PARSE_START);
         anari_usd_middleware::UsdProcessor& processor = GetThreadLocalUsdProcessor();
         std::vector<anari_usd_middleware::UsdProcessor::MeshData> mesh_data;
         std::vector<anari_usd_middleware::UsdProcessor::PointCloudData> pc_data;
@@ -936,6 +940,7 @@ int QueryUSDFullLayout_C(const unsigned char* buffer,
         } // semaphore released here
 
         ParsedUSDHandle* handle = new ParsedUSDHandle{std::move(mesh_data), std::move(pc_data)};
+        handle->filename = filename;
         *out_handle = handle;
 
         CMeshLayout* ml = nullptr;
@@ -973,6 +978,7 @@ int QueryUSDFullLayout_C(const unsigned char* buffer,
 
         MIDDLEWARE_LOG_INFO("QueryUSDFullLayout_C: %zu meshes + %zu point clouds for '%s'",
                             *out_mesh_count, *out_cloud_count, filename);
+        jusync_diag::Diagnostics::instance().mark(filename, jusync_diag::STAGE_PARSE_DONE);
         return 1;
     } catch (...) {
         MIDDLEWARE_LOG_ERROR("QueryUSDFullLayout_C: exception for '%s'", filename);
@@ -998,6 +1004,9 @@ int FillUSDFull_C(void* handle,
         }
         for (size_t i = 0; i < cloud_count; ++i) {
             if (!FillCloudIntoBuffer(h->clouds[i], clouds[i])) return 0;
+        }
+        if (!h->filename.empty()) {
+            jusync_diag::Diagnostics::instance().mark(h->filename, jusync_diag::STAGE_FILL_DONE);
         }
         return 1;
     } catch (...) {
@@ -1072,6 +1081,9 @@ int FillUSDFullCompact_C(void* handle,
         }
         for (size_t i = 0; i < cloud_count; ++i) {
             if (!FillCloudIntoBuffer(h->clouds[i], clouds[i])) return 0;
+        }
+        if (!h->filename.empty()) {
+            jusync_diag::Diagnostics::instance().mark(h->filename, jusync_diag::STAGE_FILL_DONE);
         }
         return 1;
     } catch (...) {
@@ -1328,6 +1340,7 @@ int LoadUSDBuffer_C(const unsigned char* buffer, size_t buffer_size, const char*
 
         // Create UsdProcessor instance and call ProcessFile directly
         anari_usd_middleware::UsdProcessor& processor = GetThreadLocalUsdProcessor();
+        jusync_diag::Diagnostics::instance().mark(std_filename, jusync_diag::STAGE_PARSE_START);
         g_parse_semaphore.acquire();
         {
             ParseGuard guard;
@@ -1340,6 +1353,8 @@ int LoadUSDBuffer_C(const unsigned char* buffer, size_t buffer_size, const char*
             return 0;
         }
         } // semaphore released here
+
+        jusync_diag::Diagnostics::instance().mark(std_filename, jusync_diag::STAGE_PARSE_DONE);
 
         // Allocate C mesh array
         *out_count = mesh_data.size();
@@ -2984,6 +2999,47 @@ void FreePointCloudData_C(CPointCloudData* clouds, size_t count) {
 void FreeCachedGradientTexture_C(unsigned char* gradient_rgba) {
     if (!gradient_rgba) return;
     delete[] gradient_rgba;
+}
+
+/* --------------------------------------------------------------------------
+ * Streaming latency diagnostics (Phase 0) — see StreamDiagnostics.h
+ * -------------------------------------------------------------------------- */
+
+void JusyncDiagMark_C(const char* filename, int stage, uint64_t bytes,
+                      uint64_t hashLo, uint64_t hashHi) {
+    if (!filename) return;
+    jusync_diag::Diagnostics& d = jusync_diag::Diagnostics::instance();
+    d.mark(filename, stage, bytes, hashLo, hashHi);
+    if (stage == jusync_diag::STAGE_SPAWNED) {
+        const std::string line = d.summary(filename);
+        if (!line.empty()) {
+            MIDDLEWARE_LOG_INFO("[stream-diag] %s", line.c_str());
+        }
+    }
+}
+
+int JusyncDiagDump_C(char* outBuf, int outBufSize, int lastN) {
+    if (!outBuf || outBufSize <= 0) return 0;
+    const std::string table = jusync_diag::Diagnostics::instance().dump(
+        lastN > 0 ? static_cast<size_t>(lastN) : 20);
+    const int n = static_cast<int>(std::min<size_t>(table.size(),
+                                                    static_cast<size_t>(outBufSize - 1)));
+    std::memcpy(outBuf, table.data(), n);
+    outBuf[n] = '\0';
+    return n;
+}
+
+double JusyncDiagTotalMs_C(const char* filename) {
+    if (!filename) return -1.0;
+    return jusync_diag::Diagnostics::instance().totalMs(filename);
+}
+
+void JusyncDiagClear_C(void) {
+    jusync_diag::Diagnostics::instance().clear();
+}
+
+void JusyncDiagSetEnabled_C(int enabled) {
+    jusync_diag::Diagnostics::instance().setEnabled(enabled != 0);
 }
 
 } // extern "C"

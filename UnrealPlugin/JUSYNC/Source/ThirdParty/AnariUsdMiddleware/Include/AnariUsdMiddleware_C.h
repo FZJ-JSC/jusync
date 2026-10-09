@@ -1411,6 +1411,48 @@ ANARI_USD_MIDDLEWARE_C_API void FreePointCloudData_C(CPointCloudData* clouds, si
  */
 ANARI_USD_MIDDLEWARE_C_API void FreeCachedGradientTexture_C(unsigned char* gradient_rgba);
 
+/* --------------------------------------------------------------------------
+ * Streaming latency diagnostics (Phase 0 observability)
+ *
+ * Middleware stages (notify .. fill_done) are marked automatically inside the
+ * library. Hosts add their own stages (queue, spawned) with JusyncDiagMark_C
+ * and read the per-file stage journal with JusyncDiagDump_C.
+ * See StreamDiagnostics.h for the stage pipeline.
+ * -------------------------------------------------------------------------- */
+typedef enum JusyncDiagStage {
+    JUSYNC_DIAG_NOTIFY      = 0,
+    JUSYNC_DIAG_QUEUE       = 1,
+    JUSYNC_DIAG_DL_START    = 2,
+    JUSYNC_DIAG_DL_DONE     = 3,
+    JUSYNC_DIAG_PARSE_START = 4,
+    JUSYNC_DIAG_PARSE_DONE  = 5,
+    JUSYNC_DIAG_FILL_DONE   = 6,
+    JUSYNC_DIAG_SPAWNED     = 7
+} JusyncDiagStage;
+
+/**
+ * Mark a host stage for a file (filename must match the broker notification path).
+ * Marking JUSYNC_DIAG_SPAWNED emits a one-line stage summary to the middleware log.
+ * bytes/hashLo/hashHi pass through to the trace when non-zero (0 = keep previous).
+ */
+ANARI_USD_MIDDLEWARE_C_API void JusyncDiagMark_C(const char* filename, int stage,
+                                                 uint64_t bytes, uint64_t hashLo, uint64_t hashHi);
+
+/**
+ * Render the last `lastN` file traces as a fixed-width table into outBuf
+ * (always NUL-terminated when outBufSize > 0). Returns bytes written, 0 if empty.
+ */
+ANARI_USD_MIDDLEWARE_C_API int JusyncDiagDump_C(char* outBuf, int outBufSize, int lastN);
+
+/** notify->spawned latency (ms) for a file; -1 when unknown or not yet spawned. */
+ANARI_USD_MIDDLEWARE_C_API double JusyncDiagTotalMs_C(const char* filename);
+
+/** Drop all traces (e.g. before a benchmark run). */
+ANARI_USD_MIDDLEWARE_C_API void JusyncDiagClear_C(void);
+
+/** Master switch for mark() bookkeeping (default on; cost of marking is trivial). */
+ANARI_USD_MIDDLEWARE_C_API void JusyncDiagSetEnabled_C(int enabled);
+
 #ifdef __cplusplus
 }
 #endif
