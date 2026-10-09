@@ -9,6 +9,15 @@
 #include "LidarPointCloud.h"
 #include "LidarPointCloudComponent.h"
 #include "LidarPointCloudActor.h"
+
+// 1 (default): streamed clouds build their octree on Epic's async import thread
+// (ULidarPointCloud::CreateFromData + FLidarPointCloudAsyncParameters) and swap
+// into the component on completion - the game thread never sits in the multi-second
+// SetData. 0: legacy in-place SetData on the game thread.
+static TAutoConsoleVariable<int32> CVarJusyncAsyncCloudBuild(
+    TEXT("jusync.AsyncCloudBuild"), 1,
+    TEXT("Build streamed point clouds off the game thread (Epic async CreateFromData) and swap on completion."),
+    ECVF_Default);
 #endif
 
 FJUSYNCPointCloudSpawner::FJUSYNCPointCloudSpawner(TWeakObjectPtr<UObject> InOwner)
@@ -368,6 +377,150 @@ ULidarPointCloud* FJUSYNCPointCloudSpawner::GetOrCreateCloudForComponent(ULidarP
     Cloud->SetOptimizedForDynamicData(false);
     return Cloud;
 }
+
+// ---------------------------------------------------------------------------
+// Async streaming rebuild (Milestone 2 / Task 3): Epic's sanctioned async path
+// (CreateFromData + FLidarPointCloudAsyncParameters builds the octree on a
+// worker thread; see LidarPointCloud.cpp CreateFromData_Internal). Exactly ONE
+// build in flight per actor key; later updates for the same key are stashed
+// latest-wins and start when the current build finishes. The finished asset is
+// swapped in on the game thread; the old asset becomes unreferenced for GC.
+// ---------------------------------------------------------------------------
+void FJUSYNCPointCloudSpawner::StartAsyncCloudBuild(const FString& Key, FPointCloudReadyEntry&& Entry, AActor* Actor)
+{
+    if (Entry.Points.Num() == 0 || bShuttingDown.load())
+    {
+        return;
+    }
+
+    TSharedRef<FInFlightCloudBuild>* Existing = InFlightBuilds.Find(Key);
+    TSharedRef<FInFlightCloudBuild> F = Existing ? *Existing : MakeShared<FInFlightCloudBuild>();
+    if (!Existing)
+    {
+        InFlightBuilds.Add(Key, F);
+    }
+
+    if (F->bBuilding)
+    {
+        // Latest-wins: replace the stash outright (old stashed points freed here).
+        F->PendingReplacement = MoveTemp(Entry);
+        F->bHasPending = true;
+        UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: build in flight for '%s' - stashed newer update (latest-wins)"), *Key);
+        return;
+    }
+
+    F->Actor = Actor;
+    F->Points = new TArray64<FLidarPointCloudPoint>(MoveTemp(Entry.Points));
+    F->Generation = ++NextCloudBuildGeneration;
+    F->bBuilding = true;
+    F->BuildStarted = FPlatformTime::Seconds();
+
+    const uint64 Generation = F->Generation;
+    const int32 NumPts = static_cast<int32>(F->Points->Num());
+
+    // Completion fires on Epic's build worker thread; hop to GT for the swap.
+    FLidarPointCloudAsyncParameters Params(
+        /*bUseAsync=*/true,
+        /*ProgressCallback=*/nullptr,
+        [this, Key, Generation](bool bSuccess)
+        {
+            FFunctionGraphTask::CreateAndDispatchWhenReady(
+                [this, Key, Generation, bSuccess]()
+                { OnAsyncCloudBuildFinished(Key, Generation, bSuccess); },
+                TStatId(), nullptr, ENamedThreads::GameThread);
+        });
+
+    if (!BeginTask())
+    {
+        delete F->Points;
+        F->Points = nullptr;
+        F->bBuilding = false;
+        return;
+    }
+
+    ULidarPointCloud* NewCloud = ULidarPointCloud::CreateFromData(*F->Points, Params);
+    // GT-only strong ref: keeps the asset GC-safe while the worker fills it.
+    F->CloudRef = MakeUnique<TStrongObjectPtr<UObject>>(NewCloud);
+
+    UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: started async build '%s' (%d points)"), *Key, NumPts);
+}
+
+void FJUSYNCPointCloudSpawner::OnAsyncCloudBuildFinished(const FString& Key, uint64 Generation, bool bSuccess)
+{
+    TSharedRef<FInFlightCloudBuild>* Found = InFlightBuilds.Find(Key);
+    if (Found && (*Found)->Generation == Generation && (*Found)->bBuilding)
+    {
+        FInFlightCloudBuild& F = **Found;
+        const double BuildMs = (FPlatformTime::Seconds() - F.BuildStarted) * 1000.0;
+
+        delete F.Points;
+        F.Points = nullptr;
+
+        ULidarPointCloud* Cloud = F.CloudRef.IsValid() ? Cast<ULidarPointCloud>(F.CloudRef->Get()) : nullptr;
+        F.CloudRef.Reset(); // ownership moves to the component (swap) or GC (drop)
+        F.bBuilding = false;
+
+        AActor* Actor = F.Actor.Get();
+        bool bSwapped = false;
+
+        if (bSuccess && IsValid(Cloud) && IsValid(Actor) && !bShuttingDown.load()
+            && FindActorByElementKey(Key) == Actor) // actor may have been released to the pool meanwhile
+        {
+            if (ALidarPointCloudActor* LidarActor = Cast<ALidarPointCloudActor>(Actor))
+            {
+                if (ULidarPointCloudComponent* Comp = LidarActor->GetPointCloudComponent())
+                {
+                    const double SwapStart = FPlatformTime::Seconds();
+                    Comp->SetPointCloud(Cloud);
+                    ApplyVisualSettings(Comp);
+                    Actor->SetActorHiddenInGame(false);
+                    F.bEverSwapped = true;
+                    bSwapped = true;
+
+                    if (bPerfLogging)
+                    {
+                        UE_LOG(LogTemp, Display, TEXT("JUSYNC PERF PC async-build '%s' build %.1f ms  swap %.3f ms"),
+                               *Key, BuildMs, (FPlatformTime::Seconds() - SwapStart) * 1000.0);
+                    }
+                    OnPointCloudSpawned.Broadcast(Key, Actor);
+                }
+            }
+        }
+
+        if (!bSwapped && IsValid(Cloud))
+        {
+            Cloud->MarkAsGarbage();
+        }
+
+        if (F.bHasPending)
+        {
+            FPointCloudReadyEntry Next = MoveTemp(F.PendingReplacement);
+            F.bHasPending = false;
+            if (!bSwapped && !IsValid(Actor))
+            {
+                Actor = AllocateActor();
+            }
+            if (Actor)
+            {
+                ApplyTransformToActor(Actor);
+                StartAsyncCloudBuild(Key, MoveTemp(Next), Actor);
+            }
+        }
+        else if (!bSwapped)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("JUSYNC Spawner: async build for '%s' %s (%.1f ms)"),
+                   *Key, bSuccess ? TEXT("discarded") : TEXT("FAILED"), BuildMs);
+            if (IsValid(Actor) && !F.bEverSwapped)
+            {
+                // First frame never landed: give the actor back and forget the key.
+                ReleaseActor(Actor);
+                InFlightBuilds.Remove(Key);
+            }
+        }
+    }
+
+    EndTask();
+}
 #endif
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
@@ -676,6 +829,23 @@ void FJUSYNCPointCloudSpawner::DrainReadyQueueLocked()
         ApplyTransformToActor(Actor);
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
+        // Async path (default): hand the points to Epic's background octree build and
+        // swap the finished asset in on completion. Keeps the game thread free, drains
+        // the download queue, and serializes to ONE build per key (latest-wins stash).
+        if (CVarJusyncAsyncCloudBuild.GetValueOnGameThread() > 0
+            && Entry.Points.Num() > 0 && !Entry.bNeedsRecolor)
+        {
+            if (!bInPlaceUpdate)
+            {
+                ElementToActor.Add(Entry.Key, Actor);
+                ActorToElement.Add(Actor, Entry.Key);
+            }
+            Actor->SetActorEnableCollision(false);
+            StartAsyncCloudBuild(Entry.Key, MoveTemp(Entry), Actor);
+            ItemsProcessed++;
+            continue;
+        }
+
         bool bPointCloudUpdateFailed = false;
         if (ALidarPointCloudActor* LidarActor = Cast<ALidarPointCloudActor>(Actor))
         {
@@ -793,6 +963,17 @@ void FJUSYNCPointCloudSpawner::DestroyAllActors()
     ElementToActor.Empty();
     ActorToElement.Empty();
     LastNormalCalcTime.Empty();
+
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    // Drop stashed replacements (points owned by the entry dtor). In-flight builds
+    // self-discard on completion: the actor is untracked, so the key-ownership
+    // check fails and the fresh asset is marked garbage.
+    for (auto& Pair : InFlightBuilds)
+    {
+        Pair.Value->PendingReplacement = FPointCloudReadyEntry();
+        Pair.Value->bHasPending = false;
+    }
+#endif
 }
 
 void FJUSYNCPointCloudSpawner::RecolorGradientPendingActors()

@@ -325,6 +325,7 @@ namespace
                 if (AJUSYNCFileSpawnerActor* Spawner = World->SpawnActor<AJUSYNCFileSpawnerActor>(
                         FVector::ZeroVector, FRotator::ZeroRotator, Params))
                 {
+                    Spawner->bEnablePerfLogging = true; // the harness is the perf instrument
                     Spawner->StartSpawning();
                     GHarness.bSpawnerStarted = true;
                     UE_LOG(LogJUSYNC, Display, TEXT("[jusync.harness] auto-spawner started streaming (world '%s', t=%.1fs)"),

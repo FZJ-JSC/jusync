@@ -110,6 +110,9 @@ public:
     void DrainReadyQueue();
     void DrainReadyQueueLocked();
 
+    /** Async live-streaming path: is a background cloud build in flight / stashed for this key? */
+    int32 GetInFlightBuildCount() const { return InFlightBuilds.Num(); }
+
     FOnPointCloudSpawned OnPointCloudSpawned;
 
 private:
@@ -153,6 +156,30 @@ private:
 
     TMap<FString, AActor*> ElementToActor;
     TMap<AActor*, FString> ActorToElement;
+
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    /** State of one in-flight background ULidarPointCloud build (game-thread only). */
+    struct FInFlightCloudBuild
+    {
+        // Heap points read by the Epic async build thread; freed on completion.
+        TArray64<FLidarPointCloudPoint>* Points = nullptr;
+        // Strong ref so the freshly-created asset can't be GC'd while the
+        // worker builds its octree (lambdas/task captures are not roots).
+        TUniquePtr<TStrongObjectPtr<UObject>> CloudRef;
+        TWeakObjectPtr<AActor> Actor;
+        FPointCloudReadyEntry PendingReplacement;
+        double BuildStarted = 0.0;
+        bool bEverSwapped = false;
+        bool bHasPending = false;
+        bool bBuilding = false;
+        uint64 Generation = 0;
+    };
+    TMap<FString, TSharedRef<FInFlightCloudBuild>> InFlightBuilds;
+    uint64 NextCloudBuildGeneration = 0;
+
+    void StartAsyncCloudBuild(const FString& Key, FPointCloudReadyEntry&& Entry, AActor* Actor);
+    void OnAsyncCloudBuildFinished(const FString& Key, uint64 Generation, bool bSuccess);
+#endif
 
     struct FPendingNoColorCloud
     {
