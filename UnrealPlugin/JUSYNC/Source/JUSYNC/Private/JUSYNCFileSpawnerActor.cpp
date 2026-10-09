@@ -67,22 +67,38 @@ static bool JUSYNCRequestFileToString(const FString& Filename, int32 Rank, FStri
 
 static bool JUSYNCIsLiveUpdateGeometryFile(const FString& Filename)
 {
-    if (!Filename.EndsWith(TEXT(".usda")))
+    // Per-prim geometry clips arrive as ASCII (.usda) OR binary crate (.usd/.usdc/.usdz)
+    // depending on the sender's usd::serialize.outputBinary. Accept any USD extension;
+    // the parser sniffs content (zstd magic, then PXR-USDC header), never the filename.
+    const bool bAnyUsdExt =
+        Filename.EndsWith(TEXT(".usda")) ||
+        Filename.EndsWith(TEXT(".usd")) ||
+        Filename.EndsWith(TEXT(".usdc")) ||
+        Filename.EndsWith(TEXT(".usdz"));
+    if (!bAnyUsdExt)
     {
         return false;
     }
+    // Structural exclusions (session meta / shared stages), extension-agnostic.
     if (Filename.StartsWith(TEXT("Session_")) ||
-        Filename == TEXT("scene.usda") ||
         Filename.Contains(TEXT("manifest")) ||
         Filename.Contains(TEXT("images/")) ||
         Filename.Contains(TEXT("shared/")) ||
         Filename.Contains(TEXT("primstages/")) ||
-        Filename.Contains(TEXT("_Light.usda")) ||
-        Filename.Contains(TEXT("_Material.usda")) ||
-        Filename.Contains(TEXT("_Camera.usda")) ||
-        Filename.Contains(TEXT("_Sampler.usda")))
+        Filename.Contains(TEXT("_Light.")) ||
+        Filename.Contains(TEXT("_Material.")) ||
+        Filename.Contains(TEXT("_Camera.")) ||
+        Filename.Contains(TEXT("_Sampler.")))
     {
         return false;
+    }
+    // Scene-root stage (mirrors prior exact '.usda' behaviour for all extensions).
+    for (const TCHAR* Ext : { TEXT(".usda"), TEXT(".usd"), TEXT(".usdc"), TEXT(".usdz") })
+    {
+        if (Filename == FString(TEXT("scene")) + Ext)
+        {
+            return false;
+        }
     }
     return true;
 }

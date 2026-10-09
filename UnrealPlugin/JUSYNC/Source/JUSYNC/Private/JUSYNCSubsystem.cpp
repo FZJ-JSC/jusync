@@ -10,6 +10,7 @@
 #include "JUSYNCModule.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "Engine/GameInstance.h"
 #include "Kismet/GameplayStatics.h"
 #include "RealtimeMeshSimple.h"
@@ -4737,7 +4738,7 @@ bool UJUSYNCSubsystem::RequestFilesParallel(const TArray<FString>& Filenames, co
             FJUSYNCFileData FileData;
             FileData.Filename = UTF8_TO_TCHAR(filename);
             FileData.Data.Append(data, data_size);
-            FileData.FileType = TEXT("usda");
+            FileData.FileType = FPaths::GetExtension(FileData.Filename);
             FileData.SourceRank = -1;
             FileData.Hash = TEXT("");
             CurrentOutFiles->Add(FileData);

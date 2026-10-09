@@ -4626,8 +4626,10 @@ int64 UJUSYNCBlueprintLibrary::EstimateFileSizeFromFilename(const FString& Filen
     else if (Filename.Contains(TEXT("vtk_actor__triangles_0_Geom__r15_"))) {
         return 71 * 1024 * 1024;  // 71MB
     }
-    else if (Filename.Contains(TEXT(".usda"))) {
-        // Generic USD file estimation
+    else if (Filename.Contains(TEXT(".usda")) ||
+             Filename.Contains(TEXT(".usdc")) ||
+             Filename.Contains(TEXT(".usd"))) {
+        // Generic USD file estimation (ascii .usda or binary crate .usd/.usdc)
         if (Filename.Contains(TEXT("_Geom__"))) {
             return 50 * 1024 * 1024;  // 50MB for geometry files
         }
