@@ -151,7 +151,16 @@ Rework `JUSYNCPointCloudSpawner` direct-LiDAR path:
 - Verification: RSS steady ±5% over soak (no per-cycle growth); asset count
   ≤ 2×keys. Fix pool leak if not. Commit jusync.
 
-### Task 7 — G: re-measure full ledger, docs, review
+### Task 7 ✅ DONE (jusync 7826a7a) — G: re-measure full ledger, docs, review
+
+**Outcome:** Two live runs measured (1Hz/stride1 "idle high-quality" +
+2Hz/stride4 "interactive"); the A-to-G ledger table lives in
+`ten-million-run.md` (headline: game-thread stall 3500 ms -> 0.21 ms, 2Hz
+effective update rate 0.013 -> 1.13 fps). Fresh-eyes subagent review over both
+branch ranges then found 1 shutdown BLOCKER (async cloud-build completion could
+stall the game-thread wait 5 s and then call through a freed spawner) + 1 leak
+MAJOR (idle-burst baselines never pruned) + 4 minors - all fixed and
+re-verified (ANARI-USD 1313ddf, jusync 1b8e6a9; details in progress.md).
 
 - Runs: 1 Hz/stride 1 (10M, "idle high-quality") and 2 Hz/stride 4
   ("interactive"). Mine every metric from Task 0 baselines.
