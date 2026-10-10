@@ -28,6 +28,7 @@ FJUSYNCPointCloudSpawner::FJUSYNCPointCloudSpawner(TWeakObjectPtr<UObject> InOwn
 
 FJUSYNCPointCloudSpawner::~FJUSYNCPointCloudSpawner()
 {
+    AsyncBuildsAlive->store(false);
 }
 
 bool FJUSYNCPointCloudSpawner::BeginTask()
@@ -49,7 +50,8 @@ void FJUSYNCPointCloudSpawner::WaitForCompletion(float TimeoutSeconds)
 {
     bShuttingDown.store(true);
     const double Start = FPlatformTime::Seconds();
-    while (InFlightTasks.load() > 0 && (FPlatformTime::Seconds() - Start) < FMath::Max(0.0f, TimeoutSeconds))
+    while ((InFlightTasks.load() > 0 || AsyncBuildsOutstanding->load() > 0)
+        && (FPlatformTime::Seconds() - Start) < FMath::Max(0.0f, TimeoutSeconds))
     {
         FPlatformProcess::Sleep(0.001f);
     }
@@ -420,26 +422,29 @@ void FJUSYNCPointCloudSpawner::StartAsyncCloudBuild(const FString& Key, FPointCl
     const uint64 Generation = F->Generation;
     const int32 NumPts = static_cast<int32>(F->Points->Num());
 
-    // Completion fires on Epic's build worker thread; hop to GT for the swap.
+    // Completion fires on Epic's build worker thread; swap work hops to the GT.
+    // The worker may outlive shutdown waits, so it must not dereference the
+    // spawner: it decrements the shared outstanding count directly, and the
+    // GT hop is dropped via the alive flag if the spawner died meanwhile.
     FLidarPointCloudAsyncParameters Params(
         /*bUseAsync=*/true,
         /*ProgressCallback=*/nullptr,
-        [this, Key, Generation](bool bSuccess)
+        [this, Key, Generation,
+         Ctr = AsyncBuildsOutstanding, Alive = AsyncBuildsAlive](bool bSuccess)
         {
+            Ctr->fetch_sub(1);
             FFunctionGraphTask::CreateAndDispatchWhenReady(
-                [this, Key, Generation, bSuccess]()
-                { OnAsyncCloudBuildFinished(Key, Generation, bSuccess); },
+                [this, Key, Generation, bSuccess, Alive]()
+                {
+                    if (Alive->load())
+                    {
+                        OnAsyncCloudBuildFinished(Key, Generation, bSuccess);
+                    }
+                },
                 TStatId(), nullptr, ENamedThreads::GameThread);
         });
 
-    if (!BeginTask())
-    {
-        delete F->Points;
-        F->Points = nullptr;
-        F->bBuilding = false;
-        return;
-    }
-
+    AsyncBuildsOutstanding->fetch_add(1);
     ULidarPointCloud* NewCloud = ULidarPointCloud::CreateFromData(*F->Points, Params);
     // GT-only strong ref: keeps the asset GC-safe while the worker fills it.
     F->CloudRef = MakeUnique<TStrongObjectPtr<UObject>>(NewCloud);
@@ -537,7 +542,7 @@ void FJUSYNCPointCloudSpawner::OnAsyncCloudBuildFinished(const FString& Key, uin
                 StartAsyncCloudBuild(Key, MoveTemp(Next), Actor);
             }
         }
-        else if (!bSwapped)
+            else if (!bSwapped)
         {
             UE_LOG(LogTemp, Warning, TEXT("JUSYNC Spawner: async build for '%s' %s (%.1f ms)"),
                    *Key, bSuccess ? TEXT("discarded") : TEXT("FAILED"), BuildMs);
@@ -549,8 +554,6 @@ void FJUSYNCPointCloudSpawner::OnAsyncCloudBuildFinished(const FString& Key, uin
             }
         }
     }
-
-    EndTask();
 }
 #endif
 

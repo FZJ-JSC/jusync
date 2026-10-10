@@ -970,7 +970,9 @@ void UJUSYNCSubsystem::Deinitialize()
 
     if (PCSpawner.IsValid())
     {
-        PCSpawner->WaitForCompletion(5.0f);
+        // Covers the slowest measured off-thread 10M octree build (~6 s) so a
+        // shutdown during streaming never races the Epic build worker.
+        PCSpawner->WaitForCompletion(10.0f);
     }
 
     Super::Deinitialize();

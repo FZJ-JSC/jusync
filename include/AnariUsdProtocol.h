@@ -421,7 +421,8 @@ struct JusyncRawGeoHeader
     {
         if (magic != JUSYNC_RAWGEO_MAGIC || version != JUSYNC_RAWGEO_VERSION)
             return false;
-        if (position_components != 3 || color_components > 4)
+        if (position_components != 3 ||
+            (color_components != 0 && color_components != 3 && color_components != 4))
             return false;
         const size_t table = total_header_and_table_bytes();
         return totalBytes >= table && totalBytes - table >= payload_bytes;

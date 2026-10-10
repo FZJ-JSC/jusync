@@ -6,6 +6,7 @@
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
 #include <atomic>
+#include <memory>
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
 #include "LidarPointCloud.h"
@@ -146,6 +147,12 @@ private:
 #endif
     std::atomic<bool> bShuttingDown{false};
     std::atomic<int32> InFlightTasks{0};
+    // Async cloud builds are counted in a shared_ptr'd atomic rather than
+    // InFlightTasks: Epic's worker thread decrements it without dereferencing
+    // the spawner, and AsyncBuildsAlive (cleared in ~spawner) guards the GT
+    // swap hop so a completion that lands after teardown is dropped safely.
+    std::shared_ptr<std::atomic<int32>> AsyncBuildsOutstanding = std::make_shared<std::atomic<int32>>(0);
+    std::shared_ptr<std::atomic<bool>> AsyncBuildsAlive = std::make_shared<std::atomic<bool>>(true);
 
     bool BeginTask();
     void EndTask();
@@ -175,6 +182,11 @@ private:
         bool bHasPending = false;
         bool bBuilding = false;
         uint64 Generation = 0;
+        // Frees the heap point array if the entry dies without a GT completion
+        // (shutdown path). WaitForCompletion waits for every worker to finish
+        // before the spawner (and this map) can die, so by contract the worker
+        // is no longer touching Points here.
+        ~FInFlightCloudBuild() { delete Points; Points = nullptr; }
     };
     TMap<FString, TSharedRef<FInFlightCloudBuild>> InFlightBuilds;
     uint64 NextCloudBuildGeneration = 0;
