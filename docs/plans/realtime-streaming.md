@@ -148,3 +148,17 @@ middleware-DLL changes**.
 - Broker restarts between loop passes make the initial list sometimes tiny (3 files) - harness-side retry or sender keep-warm across passes.
 - `stream_perf` gained dev-only `[dump-substring out-path]` argv to pull broker bytes for inspection.
 - JURECA tunnel throughput test (dd) still pending - gates P3 vs P5.
+
+
+### Resolved in milestone 2 (2026-10-10, see docs/plans/milestone-2-lidar-squeeze.md + ten-million-run.md ledger)
+- 2 Hz starvation → fixed: async off-thread builds + latest-wins stash (no aborted
+  downloads) + sender-side stride LOD: 2.5M pts @2 Hz shows ≈1.13 fps at ~1.07 s
+  notify→pixel; game thread max swap 0.21 ms.
+- Chunk-size knob → superseded: the win was broker SINGLE-COPY chunk send instead
+  (226→193 ms commit→flush; A0 ceiling probes showed copy-bound, not MTU-bound).
+- Idle scenes → now auto-burst one full-resolution (10M) frame after 6 quiet commits,
+  then stream zero bytes (JUSYNC_RAWGEO_IDLE_FRAMES).
+- Multi-rank MPI senders stream per-rank `.geo` keys end-to-end (client fetches from
+  owning rank; verified mpirun -n 2).
+- Broker restart / tiny initial list + JURECA dd remain open (harness + field tasks).
+
