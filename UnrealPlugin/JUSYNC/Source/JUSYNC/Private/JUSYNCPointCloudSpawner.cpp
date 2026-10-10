@@ -381,12 +381,12 @@ ULidarPointCloud* FJUSYNCPointCloudSpawner::GetOrCreateCloudForComponent(ULidarP
 }
 
 // ---------------------------------------------------------------------------
-// Async streaming rebuild (Milestone 2 / Task 3): Epic's sanctioned async path
-// (CreateFromData + FLidarPointCloudAsyncParameters builds the octree on a
-// worker thread; see LidarPointCloud.cpp CreateFromData_Internal). Exactly ONE
-// build in flight per actor key; later updates for the same key are stashed
-// latest-wins and start when the current build finishes. The finished asset is
-// swapped in on the game thread; the old asset becomes unreferenced for GC.
+// Async streaming rebuild: Epic's sanctioned async path (CreateFromData +
+// FLidarPointCloudAsyncParameters builds the octree on a worker thread; see
+// LidarPointCloud.cpp CreateFromData_Internal). Exactly ONE build in flight
+// per actor key; later updates for the same key are stashed latest-wins and
+// start when the current build finishes. The finished asset is swapped in on
+// the game thread; the old asset becomes unreferenced for GC.
 // ---------------------------------------------------------------------------
 void FJUSYNCPointCloudSpawner::StartAsyncCloudBuild(const FString& Key, FPointCloudReadyEntry&& Entry, AActor* Actor)
 {
@@ -508,9 +508,9 @@ void FJUSYNCPointCloudSpawner::OnAsyncCloudBuildFinished(const FString& Key, uin
         }
         else if (bSwapped && IsValid(ReplacedCloud) && ReplacedCloud != Cloud)
         {
-            // Detached last-frame asset: nothing renders it anymore, tell GC now
-            // (soak showed unbounded transient-cloud growth waiting for the
-            // default purge interval).
+            // Detached last-frame asset: nothing renders it anymore, so flag
+            // it for GC immediately instead of waiting for the default purge
+            // interval (streamed clouds would otherwise pile up between sweeps).
             ReplacedCloud->MarkAsGarbage();
             ++ReplacementsSinceGC;
             if (ReplacementsSinceGC >= GCSwapInterval)
@@ -860,9 +860,8 @@ void FJUSYNCPointCloudSpawner::DrainReadyQueueLocked()
         ApplyTransformToActor(Actor);
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
-        // Async path (default): hand the points to Epic's background octree build and
-        // swap the finished asset in on completion. Keeps the game thread free, drains
-        // the download queue, and serializes to ONE build per key (latest-wins stash).
+        // Async path (default): off-thread octree build + latest-wins swap
+        // (see StartAsyncCloudBuild).
         if (CVarJusyncAsyncCloudBuild.GetValueOnGameThread() > 0
             && Entry.Points.Num() > 0 && !Entry.bNeedsRecolor)
         {

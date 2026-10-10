@@ -1685,9 +1685,9 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, FJUSYNCPointClo
 
     // Bounding box mirrors the legacy quirk: the box always contains the
     // origin in USD space, then the (x, z, -y) transform is applied to it.
-    // Fill runs ParallelFor'd (Milestone-2 Task C): point writes are
-    // index-independent, only the bbox reduces - done per chunk, merged
-    // serially with 0-init to keep the origin-in-bbox semantics.
+    // Fill runs ParallelFor'd: point writes are index-independent, only the
+    // bbox reduces - done per chunk, merged serially with 0-init to keep the
+    // origin-in-bbox semantics.
     struct FChunkBox { float Min[3]; float Max[3]; };
     const int64 Per = FMath::DivideAndRoundUp<int64>(N, 64);
     const int32 NumChunks = (int32)FMath::Clamp<int64>(
