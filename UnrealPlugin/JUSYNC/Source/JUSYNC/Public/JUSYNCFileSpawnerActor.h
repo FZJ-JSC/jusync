@@ -412,6 +412,11 @@ private:
     int32 PendingParseTasks;
     int32 PipelineNextIndex;
     int32 PipelineActive;
+    // Initial-download stall watchdog (Tick -> CheckAllDownloadsComplete): a
+    // missed async completion can leave PipelineActive stuck above zero, which
+    // strands the spawner in Downloading and blocks every live update.
+    double DownloadStallSince;
+    float DownloadWatchdogAcc;
     bool bIsCancelled;
     int32 MaxRetries;
     int32 CurrentRetryCount;
@@ -421,6 +426,19 @@ private:
     // Live update state
     FTimerHandle LiveUpdateTimerHandle;
     float LiveUpdatePollAccumulator = 0.0f;
+
+    // Initial file-list retry: the broker can come up before any scene files are
+    // committed (e.g. ANARI-usd device binds :5556 at device-creation time while
+    // ParaView's first renderFrame commit lands seconds-to-minutes later). Latching
+    // Error on the first empty response made UE-vs-sender boot order a hard
+    // dependency; retry with a small delay and only error out after exhausting.
+    FTimerHandle InitialFileListRetryTimerHandle;
+    int32 InitialFileListRetryCount = 0;
+    // "Data ready" event from the broker: the first pushed notification
+    // (FileUpdateV2/CommitComplete) is the authoritative signal that the sender
+    // scene exists, so it triggers the initial file-list fetch directly instead
+    // of relying only on the polling retry.
+    bool bInitialKickInFlight = false;
     TMap<FString, AActor*> FileToActorMap;
     TMap<FString, TArray<AActor*>> FilenameToActors;
     TMap<FString, TArray<AActor*>> FilenameToPCActors;

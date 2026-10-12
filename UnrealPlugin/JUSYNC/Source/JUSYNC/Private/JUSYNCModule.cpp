@@ -300,6 +300,8 @@ namespace
         double QuitAt = 0.0;
         bool bAutoSpawner = false;
         bool bSpawnerStarted = false;
+        float PointSizeOverride = -1.f;
+        float PointBiasOverride = -1.f;
         FTSTicker::FDelegateHandle TickerHandle;
     };
     FJusyncHarnessState GHarness;
@@ -326,6 +328,14 @@ namespace
                         FVector::ZeroVector, FRotator::ZeroRotator, Params))
                 {
                     Spawner->bEnablePerfLogging = true; // the harness is the perf instrument
+                    if (GHarness.PointSizeOverride >= 0.f)
+                    {
+                        Spawner->PointCloudSize = GHarness.PointSizeOverride;
+                    }
+                    if (GHarness.PointBiasOverride >= 0.f)
+                    {
+                        Spawner->PointSizeBias = GHarness.PointBiasOverride;
+                    }
                     Spawner->StartSpawning();
                     GHarness.bSpawnerStarted = true;
                     UE_LOG(LogJUSYNC, Display, TEXT("[jusync.harness] auto-spawner started streaming (world '%s', t=%.1fs)"),
@@ -382,6 +392,15 @@ void FJUSYNCModule::MaybeStartHeadlessHarness()
         GHarness.QuitAt = FCString::Atof(*QuitStr);
     }
     GHarness.bAutoSpawner = FParse::Param(FCommandLine::Get(), TEXT("JusyncAutoSpawner"));
+    FString PSizeStr, PBiasStr;
+    if (FParse::Value(FCommandLine::Get(), TEXT("JusyncPointSize="), PSizeStr))
+    {
+        GHarness.PointSizeOverride = FMath::Max(0.f, FCString::Atof(*PSizeStr));
+    }
+    if (FParse::Value(FCommandLine::Get(), TEXT("JusyncPointBias="), PBiasStr))
+    {
+        GHarness.PointBiasOverride = FMath::Clamp(FCString::Atof(*PBiasStr), 0.f, 0.15f);
+    }
 
     if (GHarness.DiagInterval <= 0.0 && GHarness.QuitAt <= 0.0 && !GHarness.bAutoSpawner)
     {

@@ -2487,7 +2487,7 @@ std::vector<std::string> UsdProcessor::UsdProcessorImpl::extractClipsFromString(
 
     // std::regex_iterator<const char*> matches std::string_view (const char* base);
     // std::sregex_iterator is only bound to std::string iterators.
-    std::regex_iterator<const char*> it(content.begin(), content.end(), clipsPattern);
+    std::regex_iterator<const char*> it(content.data(), content.data() + content.size(), clipsPattern);
     const std::regex_iterator<const char*> end;
 
     while (it != end) {

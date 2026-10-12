@@ -20,6 +20,46 @@ static TAutoConsoleVariable<int32> CVarJusyncAsyncCloudBuild(
     ECVF_Default);
 #endif
 
+namespace
+{
+    // ULidarPointCloud refuses a cloud whose bounds are degenerate on any axis
+    // (min == max) - e.g. genuinely planar simulation data (a z=0 slice / flat
+    // sheet), which otherwise silently spawns as an EMPTY actor with
+    // "Provided bounds are incorrect". Nudge a single point per flat axis by a
+    // sub-visual epsilon so the octree can be built. 0.01 cm is invisible.
+    void JUSYNCPadDegenerateBounds(TArray64<FLidarPointCloudPoint>& Points)
+    {
+        if (Points.Num() == 0)
+        {
+            return;
+        }
+
+        float MinX = FLT_MAX, MinY = FLT_MAX, MinZ = FLT_MAX;
+        float MaxX = -FLT_MAX, MaxY = -FLT_MAX, MaxZ = -FLT_MAX;
+        for (const FLidarPointCloudPoint& P : Points)
+        {
+            MinX = FMath::Min(MinX, (float)P.Location.X);
+            MinY = FMath::Min(MinY, (float)P.Location.Y);
+            MinZ = FMath::Min(MinZ, (float)P.Location.Z);
+            MaxX = FMath::Max(MaxX, (float)P.Location.X);
+            MaxY = FMath::Max(MaxY, (float)P.Location.Y);
+            MaxZ = FMath::Max(MaxZ, (float)P.Location.Z);
+        }
+
+        constexpr float Eps = 0.01f;
+        float PadX = (MaxX - MinX <= 1e-4f) ? Eps : 0.0f;
+        float PadY = (MaxY - MinY <= 1e-4f) ? Eps : 0.0f;
+        float PadZ = (MaxZ - MinZ <= 1e-4f) ? Eps : 0.0f;
+        if (PadX != 0.0f || PadY != 0.0f || PadZ != 0.0f)
+        {
+            FLidarPointCloudPoint& P = Points[Points.Num() - 1];
+            P.Location.X += PadX;
+            P.Location.Y += PadY;
+            P.Location.Z += PadZ;
+        }
+    }
+} // namespace
+
 FJUSYNCPointCloudSpawner::FJUSYNCPointCloudSpawner(TWeakObjectPtr<UObject> InOwner)
     : Owner(InOwner), MaxPoolSize(8), SpawnLocation(FVector::ZeroVector),
       SpawnScale(1.0f), BudgetMs(16.0f)
@@ -445,6 +485,7 @@ void FJUSYNCPointCloudSpawner::StartAsyncCloudBuild(const FString& Key, FPointCl
         });
 
     AsyncBuildsOutstanding->fetch_add(1);
+    JUSYNCPadDegenerateBounds(*F->Points);
     ULidarPointCloud* NewCloud = ULidarPointCloud::CreateFromData(*F->Points, Params);
     // GT-only strong ref: keeps the asset GC-safe while the worker fills it.
     F->CloudRef = MakeUnique<TStrongObjectPtr<UObject>>(NewCloud);
@@ -886,6 +927,7 @@ void FJUSYNCPointCloudSpawner::DrainReadyQueueLocked()
             {
                 ULidarPointCloud* LidarCloud = GetOrCreateCloudForComponent(Comp);
                 const double SetDataStart = FPlatformTime::Seconds();
+                JUSYNCPadDegenerateBounds(Entry.Points);
                 const bool bSetDataAccepted = LidarCloud && LidarCloud->SetData(Entry.Points);
                 if (bPerfLogging)
                 {
@@ -1047,6 +1089,7 @@ void FJUSYNCPointCloudSpawner::RecolorGradientPendingActors()
         }
 
         ULidarPointCloud* Cloud = GetOrCreateCloudForComponent(Comp);
+        JUSYNCPadDegenerateBounds(NewPoints);
         if (Cloud && Cloud->SetData(NewPoints))
         {
             MaybeCalculateNormals(Cloud, Actor, static_cast<int32>(NewPoints.Num()));

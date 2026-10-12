@@ -249,11 +249,11 @@ AJUSYNCFileSpawnerActor::AJUSYNCFileSpawnerActor()
     bSpawnPointClouds = true;
     bUseGradientColors = true;
     GradientPngFilename = TEXT("");
-    PointCloudSize = 0.1f;
+    PointCloudSize = 0.04f;
     PointShape = EJUSYNCPointShape::Square;
     PointOrientation = EJUSYNCPointOrientation::FacingCamera;
     PointScaling = EJUSYNCPointScaling::PerNodeAdaptive;
-    PointSizeBias = 0.035f;
+    PointSizeBias = 0.012f;
     GapFillingStrength = 0.0f;
     PointCloudPoolSize = 16;
     bCalculatePointCloudNormals = false;
@@ -279,6 +279,8 @@ AJUSYNCFileSpawnerActor::AJUSYNCFileSpawnerActor()
     PendingParseTasks = 0;
     PipelineNextIndex = 0;
     PipelineActive = 0;
+    DownloadStallSince = 0.0;
+    DownloadWatchdogAcc = 0.0f;
     bIsCancelled = false;
     MaxSpawnsPerFrame = 3;
 
@@ -287,7 +289,7 @@ AJUSYNCFileSpawnerActor::AJUSYNCFileSpawnerActor()
     MeshCacheMaxMB = 2048;
     bCachePointClouds = true;
 
-    bEnableTimeStepAnimation = false;
+    bEnableTimeStepAnimation = true;
     TimeStepPlaybackFPS = 30.0f;
     bLoopTimeStepAnimation = true;
 
@@ -687,6 +689,18 @@ void AJUSYNCFileSpawnerActor::Tick(float DeltaSeconds)
     {
         FlushHiddenMeshUpdates();
     }
+
+    // Initial-download watchdog: re-evaluate completion periodically so a missed
+    // async completion cannot strand the spawner in Downloading forever.
+    if (CurrentState == EJUSYNCSpawnerState::Downloading && FilesTotal > 0)
+    {
+        DownloadWatchdogAcc += DeltaSeconds;
+        if (DownloadWatchdogAcc >= 1.0f)
+        {
+            DownloadWatchdogAcc = 0.0f;
+            CheckAllDownloadsComplete();
+        }
+    }
 }
 
 void AJUSYNCFileSpawnerActor::StartSpawning()
@@ -716,6 +730,8 @@ void AJUSYNCFileSpawnerActor::StartSpawning()
     PendingAsyncPCS = 0; PendingParseTasks = 0;
     bIsCancelled = false;
     CurrentRetryCount = 0;
+    InitialFileListRetryCount = 0;
+    bInitialKickInFlight = false;
     CurrentState = EJUSYNCSpawnerState::Connecting;
     bInitialSpawnDone = false;
     bSceneDiffInFlight = false;
@@ -969,9 +985,35 @@ void AJUSYNCFileSpawnerActor::OnFileListReceived_Internal(const TArray<FString>&
 {
     if (bIsCancelled) return;
 
+    // Allow a later broker notification to re-trigger the initial fetch if this
+    // one did not lead to a spawn (e.g. request/response timed out before the
+    // sender's first commit finished).
+    if (!bInitialSpawnDone) bInitialKickInFlight = false;
+
     if (!bSuccess || FileList.Num() == 0)
     {
-        UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: failed to retrieve file list from broker"));
+        // The broker may be online but not yet have committed any scene files
+        // (ParaView's ANARI-usd device binds :5556 when the device is created, but
+        // the first file + commit only land on the first ANARI render). Retry a few
+        // times before declaring a hard error so UE-vs-sender boot order does not
+        // matter. Nothing has spawned yet, so re-requesting is just the normal
+        // initial path again.
+        constexpr int32 MaxInitialFileListRetries = 15;
+        if (InitialFileListRetryCount < MaxInitialFileListRetries)
+        {
+            ++InitialFileListRetryCount;
+            UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: file list %s (retry %d/%d in 3s) — broker may still be prepping scene"),
+                   bSuccess ? TEXT("empty") : TEXT("request failed"), InitialFileListRetryCount, MaxInitialFileListRetries);
+            GEngine->AddOnScreenDebugMessage(-1, 4.0f, FColor::Yellow, FString::Printf(TEXT("[Spawner] Waiting for broker scene (retry %d/%d)..."), InitialFileListRetryCount, MaxInitialFileListRetries));
+            CurrentState = EJUSYNCSpawnerState::FetchingList;
+            GetWorldTimerManager().SetTimer(
+                InitialFileListRetryTimerHandle,
+                FTimerDelegate::CreateUObject(this, &AJUSYNCFileSpawnerActor::RequestFileList),
+                3.0f, false);
+            return;
+        }
+
+        UE_LOG(LogTemp, Display, TEXT("JUSYNC Spawner: failed to retrieve file list from broker after %d retries"), MaxInitialFileListRetries);
         GEngine->AddOnScreenDebugMessage(-1, 8.0f, FColor::Red, TEXT("[Spawner] Failed to get file list from broker!"));
         CurrentState = EJUSYNCSpawnerState::Error;
         OnError.Broadcast(TEXT("Failed to retrieve file list"));
@@ -2785,16 +2827,20 @@ void AJUSYNCFileSpawnerActor::RecolorGradientPendingMeshes()
 
 void AJUSYNCFileSpawnerActor::CheckAllDownloadsComplete()
 {
-    UE_LOG(LogTemp, Verbose, TEXT("[COMPLETION] ENTRY: FilesDownloaded=%d, FilesTotal=%d, PipelineActive=%d, PendingParseTasks=%d, PendingAsyncPCS=%d, Deferred=%d, bInitialSpawnDone=%d"),
+    UE_LOG(LogTemp, Display, TEXT("[COMPLETION] ENTRY: FilesDownloaded=%d, FilesTotal=%d, PipelineActive=%d, PendingParseTasks=%d, PendingAsyncPCS=%d, Deferred=%d, bInitialSpawnDone=%d"),
         FilesDownloaded, FilesTotal, PipelineActive, PendingParseTasks, PendingAsyncPCS, DeferredSpawns.Num(), bInitialSpawnDone ? 1 : 0);
 
-    if (FilesDownloaded >= FilesTotal)
+    // Done when every file has been DISPATCHED and the pipeline has DRAINED -
+    // not merely when FilesDownloaded == FilesTotal. Several early-return paths
+    // decrement PipelineActive without incrementing FilesDownloaded, so that
+    // counter can stall below FilesTotal forever and strand the spawner in
+    // Downloading (which blocks every live update).
+    const bool bAllDispatched = (PipelineNextIndex >= FilteredFiles.Num());
+    const bool bPipelineIdle =
+        PipelineActive <= 0 && PendingParseTasks <= 0 && PendingAsyncSpawns <= 0 &&
+        PendingAsyncPCS <= 0 && DeferredSpawns.Num() == 0;
+    if (FilesDownloaded >= FilesTotal || (bAllDispatched && bPipelineIdle))
     {
-        if (PipelineActive > 0)
-        {
-            return;
-        }
-
         int32 TotalFailed = FailedFileIndices.Num() + ParseFailedIndices.Num();
         if (TotalFailed > 0 && CurrentRetryCount < MaxRetries)
         {
@@ -3250,17 +3296,42 @@ void AJUSYNCFileSpawnerActor::OnBrokerNotification(const FJUSYNCNotification& No
 {
     const char* TypeStr = (Notification.Type == EJUSYNCNotificationType::FileUpdateV2) ? "FileUpdateV2" :
                            (Notification.Type == EJUSYNCNotificationType::CommitComplete) ? "CommitComplete" : "FileUpdate";
-    UE_LOG(LogTemp, Verbose, TEXT("[V2HANDLER] Received %s for '%s' | state=%d enabled=%d initialDone=%d"),
+    UE_LOG(LogTemp, Display, TEXT("[V2HANDLER] Received %s for '%s' | state=%d enabled=%d initialDone=%d"),
            ANSI_TO_TCHAR(TypeStr), *Notification.Filename, (int32)CurrentState, bEnableLiveUpdates ? 1 : 0, bInitialSpawnDone ? 1 : 0);
+
+    // Initial-spawn wake-up: while we are still waiting for the very first scene
+    // (Connecting / FetchingList / Error from an empty-list latch), a pushed
+    // notification from the broker IS the "data is ready" signal. The usd broker
+    // only serves request/response traffic once its first commit lands, but it
+    // pushes notifications from that same moment — so fetch now, event-driven,
+    // instead of burning a poll cycle. Independent of the live-updates toggle:
+    // this is bootstrapping, not a live update.
+    if (!bInitialSpawnDone &&
+        (CurrentState == EJUSYNCSpawnerState::Error ||
+         CurrentState == EJUSYNCSpawnerState::FetchingList ||
+         CurrentState == EJUSYNCSpawnerState::Connecting))
+    {
+        if (!bInitialKickInFlight)
+        {
+            bInitialKickInFlight = true;
+            GetWorldTimerManager().ClearTimer(InitialFileListRetryTimerHandle);
+            InitialFileListRetryCount = 0;
+            UE_LOG(LogTemp, Display, TEXT("[V2HANDLER] Broker signaled scene ready (%s for '%s') — fetching file list now"),
+                   ANSI_TO_TCHAR(TypeStr), *Notification.Filename);
+            RequestFileList();
+        }
+        return;
+    }
 
     if (!bEnableLiveUpdates)
     {
         UE_LOG(LogTemp, Warning, TEXT("[SIGNAL] DROPPED — 'Enable Live Updates' is FALSE in spawner Details panel"));
         return;
     }
+
     if (CurrentState != EJUSYNCSpawnerState::Complete)
     {
-        UE_LOG(LogTemp, Verbose, TEXT("[LiveUpdate] BLOCKED: CurrentState=%d (need Complete=%d)"), (int32)CurrentState, (int32)EJUSYNCSpawnerState::Complete);
+        UE_LOG(LogTemp, Display, TEXT("[LiveUpdate] BLOCKED: CurrentState=%d (need Complete=%d)"), (int32)CurrentState, (int32)EJUSYNCSpawnerState::Complete);
         return;
     }
 
@@ -3370,6 +3441,10 @@ void AJUSYNCFileSpawnerActor::HandleFileUpdateNotification(const FString& Filena
             }
 #endif
         }
+        // A coalesced/superseded change still needs the download chain kicked:
+        // if the previous chain already finished, nothing else would ever pop
+        // this entry, so the update would sit queued forever.
+        ChainRefreshNext();
         return;
     }
 
@@ -3964,6 +4039,16 @@ void AJUSYNCFileSpawnerActor::ChainRefreshNext()
     if (bIsCancelled) return;
     if (!ChangeTracker) return;
     if (ChangeTracker->QueuedCount() == 0) return;
+
+    // Self-heal a stale pipeline counter: if the tracker reports no in-flight
+    // change but PipelineActive is non-zero, a completion was missed (e.g. the
+    // mesh-cache hit path returns without decrementing) and this gate would
+    // block every future live update forever.
+    if (PipelineActive > 0 && ChangeTracker->ActiveCount() == 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[LiveUpdate] PipelineActive=%d stale (no active change) - resetting"), PipelineActive);
+        PipelineActive = 0;
+    }
 
     UJUSYNCSubsystem* Subsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
     if (!Subsystem)

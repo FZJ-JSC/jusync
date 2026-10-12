@@ -1651,14 +1651,16 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, FJUSYNCPointClo
     }
 
     // attribute0 (gradient-LUT scalar channel), when the sender emitted one.
+    // VTK names arbitrary arrays "vtk_<ArrayName>" (usd::attributeN.name), so
+    // fall back to the first per-point attribute when no literal match exists.
     const float* WidthF = nullptr;
     int32 WidthComps = 0;
     int64 WidthCount = 0;
     {
+        const int64 Count = FMath::Min<int64>((int64)Hdr.attr_uniform_count, N);
         const float* Section = AttrF;
         for (uint32 a = 0; a < Hdr.num_attributes; ++a)
         {
-            const int64 Count = FMath::Min<int64>((int64)Hdr.attr_uniform_count, N);
             if (strcmp(Descs[a].name, "attribute0") == 0)
             {
                 WidthF = Section;
@@ -1667,6 +1669,13 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, FJUSYNCPointClo
                 break;
             }
             Section += Count * Descs[a].components;
+        }
+        if (!WidthF && Hdr.num_attributes > 0 &&
+            Descs[0].components >= 1 && Descs[0].components <= 4)
+        {
+            WidthF = AttrF;
+            WidthComps = (int32)Descs[0].components;
+            WidthCount = Count;
         }
     }
 

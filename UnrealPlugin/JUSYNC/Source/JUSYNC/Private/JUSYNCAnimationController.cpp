@@ -163,6 +163,27 @@ int64 FJUSYNCAnimationController::DetectTimeStepOrder(const FString& Filename, F
     OutLabel = FPaths::GetBaseFilename(Filename);
     const FString Base = FPaths::GetBaseFilename(Filename);
 
+    // Preferred: the JUSYNC / ANARI-USD writers encode the sample time after
+    // the last "__" (e.g. "..._Geom__0.250000"). Order by the real value so
+    // fractional and integral seconds sort correctly — the legacy last-digit-run
+    // parser collapses 0.000000/1.000000/2.000000 -> 0 and
+    // 0.250000/1.250000 -> 250000, merging distinct time steps into one bucket.
+    const int32 TimeSep = Base.Find(TEXT("__"), ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+    if (TimeSep != INDEX_NONE)
+    {
+        FString TimeTok = Base.Mid(TimeSep + 2);
+        const int32 UniqueSuffix = TimeTok.Find(TEXT("_u"), ESearchCase::IgnoreCase);
+        if (UniqueSuffix != INDEX_NONE)
+        {
+            TimeTok = TimeTok.Left(UniqueSuffix);
+        }
+        if (!TimeTok.IsEmpty() && TimeTok.IsNumeric())
+        {
+            return static_cast<int64>(FCString::Atod(*TimeTok) * 1000000.0 + 0.5);
+        }
+    }
+
+    // Fallback: last contiguous digit run (legacy datasets, e.g. cloud_00000020).
     int32 Start = INDEX_NONE;
     int32 End = INDEX_NONE;
     for (int32 i = Base.Len() - 1; i >= 0; --i)

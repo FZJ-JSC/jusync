@@ -90,21 +90,45 @@ message(STATUS "ZeroMQ Include: ${ZMQ_INCLUDE_DIR}")
 # ------------------------------
 # OpenSSL Configuration (Portable)
 # ------------------------------
-# Try environment variable first, then user-supplied path, then fallback (Windows only)
-if(NOT DEFINED OPENSSL_ROOT_DIR AND DEFINED ENV{OPENSSL_ROOT_DIR})
-    set(OPENSSL_ROOT_DIR $ENV{OPENSSL_ROOT_DIR})
-endif()
+# No project source currently uses OpenSSL: libzmq is built static with CURVE
+# disabled and the bundled lightusd/civetweb do not enable SSL. Keep this behind
+# an option so shipping builds neither link OpenSSL nor ship libcrypto/libssl
+# DLLs next to the plugin (Unreal loads whichever OpenSSL DLL it finds first —
+# exactly the confusion we want to avoid). Re-enable with -DJUSYNC_USE_OPENSSL=ON
+# if zmq WSS/CURVE or app-level crypto ever needs it; static linking is then
+# forced so the plugin stays self-contained either way.
+option(JUSYNC_USE_OPENSSL "Link OpenSSL into the middleware" OFF)
 
-if(WIN32 AND NOT OPENSSL_ROOT_DIR)
-    set(OPENSSL_ROOT_DIR "C:/Program Files/OpenSSL-Win64" CACHE PATH "OpenSSL root directory (fallback)")
-    message(STATUS "Using fallback OPENSSL_ROOT_DIR: ${OPENSSL_ROOT_DIR}")
-elseif(OPENSSL_ROOT_DIR)
-    message(STATUS "Using OPENSSL_ROOT_DIR: ${OPENSSL_ROOT_DIR}")
-endif()
+if(JUSYNC_USE_OPENSSL)
+    # Try environment variable first, then user-supplied path, then fallback (Windows only)
+    if(NOT DEFINED OPENSSL_ROOT_DIR AND DEFINED ENV{OPENSSL_ROOT_DIR})
+        set(OPENSSL_ROOT_DIR $ENV{OPENSSL_ROOT_DIR})
+    endif()
 
-find_package(OpenSSL REQUIRED)
-message(STATUS "OpenSSL Include: ${OPENSSL_INCLUDE_DIR}")
-message(STATUS "OpenSSL Libraries: ${OPENSSL_LIBRARIES}")
+    if(WIN32 AND NOT OPENSSL_ROOT_DIR)
+        set(OPENSSL_ROOT_DIR "C:/Program Files/OpenSSL-Win64" CACHE PATH "OpenSSL root directory (fallback)")
+    endif()
+
+    set(OPENSSL_USE_STATIC_LIBS ON CACHE BOOL "Link OpenSSL statically" FORCE)
+    find_package(OpenSSL REQUIRED)
+
+    if(MSVC)
+        # slproweb-style installs ship libssl_static.lib/libcrypto_static.lib but
+        # FindOpenSSL can still resolve the dynamic import libs. Pin the static
+        # ones plus the system libs static OpenSSL pulls in.
+        find_library(OPENSSL_SSL_STATIC NAMES libssl_static
+            HINTS "${OPENSSL_ROOT_DIR}/lib/VC/x64/MD" "${OPENSSL_ROOT_DIR}/lib" REQUIRED)
+        find_library(OPENSSL_CRYPTO_STATIC NAMES libcrypto_static
+            HINTS "${OPENSSL_ROOT_DIR}/lib/VC/x64/MD" "${OPENSSL_ROOT_DIR}/lib" REQUIRED)
+        set(JUSYNC_OPENSSL_LIBS ${OPENSSL_SSL_STATIC} ${OPENSSL_CRYPTO_STATIC} crypt32 ws2_32 advapi32 bcrypt)
+    else()
+        set(JUSYNC_OPENSSL_LIBS OpenSSL::SSL OpenSSL::Crypto)
+    endif()
+    message(STATUS "OpenSSL: enabled, statically linked")
+else()
+    set(JUSYNC_OPENSSL_LIBS "")
+    message(STATUS "OpenSSL: DISABLED (middleware ships without libcrypto/libssl)")
+endif()
 
 # ------------------------------
 # zstd Configuration (Portable)
@@ -182,6 +206,14 @@ if(ENABLE_CUDA AND CUDA_FOUND)
         ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
     )
 
+    # Statically link the CUDA runtime (cudart_static) so the plugin DLL does
+    # not need cudart64_*.dll next to it. The GPU driver's nvcuda.dll is
+    # loaded at runtime by the CUDA runtime itself — that is normal and
+    # driver-provided, not something we ship.
+    set_target_properties(${PROJECT_NAME} PROPERTIES
+        CUDA_RUNTIME_LIBRARY Static
+    )
+
     message(STATUS "CUDA GPU acceleration: ENABLED")
     message(STATUS "CUDA architectures: ${CUDA_ARCHITECTURES}")
 else()
@@ -216,7 +248,6 @@ target_include_directories(${PROJECT_NAME}
         ${CMAKE_CURRENT_SOURCE_DIR}/external/tinyusdz/src
         ${CMAKE_CURRENT_SOURCE_DIR}/external/stb
         ${ZMQ_INCLUDE_DIR}
-        ${OPENSSL_INCLUDE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/external/cppzmq
 )
 
@@ -253,8 +284,7 @@ endif()
 target_link_libraries(${PROJECT_NAME}
     PRIVATE
         ${ZMQ_STATIC_TARGET}  # Static ZMQ library instead of ${ZMQ_LIBRARY}
-        OpenSSL::SSL
-        OpenSSL::Crypto
+        ${JUSYNC_OPENSSL_LIBS}
         lightusd::lightusd_static
         glm::glm
         ${TBB_LIB}
@@ -383,6 +413,7 @@ if(BUILD_TESTS)
 
     # Set C++17 standard for the test tool
     target_compile_features(usd_validation_tool PRIVATE cxx_std_17)
+
     # stream_perf — middleware-level performance harness for P1/P2 streaming:
     # connect/list/download timing with crate sniff, abort-token responsiveness,
     # notification flow over an idle window. Drives the same C API as the UE
@@ -531,11 +562,15 @@ if(BUILD_TESTS)
     )
 
     # Windows DLL copying for validation tool (NOT NEEDED FOR STATIC ZMQ)
-    if(WIN32)
-        # Only copy OpenSSL DLLs, ZMQ is now static
+    # Only relevant when OpenSSL is opted-in AND dynamically linked.
+    if(WIN32 AND JUSYNC_USE_OPENSSL AND NOT OPENSSL_USE_STATIC_LIBS)
+        # Only copy OpenSSL DLLs, ZMQ is now static. Glob the actual soname so
+        # OpenSSL 3.x (libcrypto-3-x64.dll) and 4.x (libcrypto-4-x64.dll) both work.
+        file(GLOB OPENSSL_CRYPTO_DLL "${OPENSSL_ROOT_DIR}/bin/libcrypto-*-x64.dll")
+        file(GLOB OPENSSL_SSL_DLL "${OPENSSL_ROOT_DIR}/bin/libssl-*-x64.dll")
         set(REQUIRED_DLLS
-            "${OPENSSL_ROOT_DIR}/bin/libcrypto-3-x64.dll"
-            "${OPENSSL_ROOT_DIR}/bin/libssl-3-x64.dll"
+            "${OPENSSL_CRYPTO_DLL}"
+            "${OPENSSL_SSL_DLL}"
         )
 
         foreach(DLL ${REQUIRED_DLLS})
@@ -573,10 +608,14 @@ if(BUILD_TESTS)
 endif()
 
 # Install required DLLs on Windows (ONLY OPENSSL NOW, ZMQ IS STATIC)
-if(WIN32)
+# Only relevant when OpenSSL is opted-in AND dynamically linked.
+if(WIN32 AND JUSYNC_USE_OPENSSL AND NOT OPENSSL_USE_STATIC_LIBS)
+    # Same soname glob as above: works with OpenSSL 3.x and 4.x installs.
+    file(GLOB OPENSSL_CRYPTO_DLL "${OPENSSL_ROOT_DIR}/bin/libcrypto-*-x64.dll")
+    file(GLOB OPENSSL_SSL_DLL "${OPENSSL_ROOT_DIR}/bin/libssl-*-x64.dll")
     set(INSTALL_DLLS
-        "${OPENSSL_ROOT_DIR}/bin/libcrypto-3-x64.dll"
-        "${OPENSSL_ROOT_DIR}/bin/libssl-3-x64.dll"
+        "${OPENSSL_CRYPTO_DLL}"
+        "${OPENSSL_SSL_DLL}"
     )
 
     foreach(DLL ${INSTALL_DLLS})
