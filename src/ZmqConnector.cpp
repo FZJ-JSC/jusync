@@ -5,7 +5,6 @@
 #include <filesystem>
 #include <stdexcept>
 
-// Platform detection
 #if defined(_WIN32)
     #define PLATFORM_WINDOWS 1
     #define PLATFORM_LINUX 0
@@ -17,7 +16,6 @@
     #define PLATFORM_LINUX 0
 #endif
 
-// Platform-specific includes
 #if PLATFORM_WINDOWS
     #include <winsock2.h>
     #include <windows.h>
@@ -50,18 +48,13 @@ bool ZmqConnector::initialize(const char* endpoint, int timeoutMs) {
     connectionStatus.store(ConnectionStatus::Connecting);
 
     try {
-        // Validate timeout
         if (timeoutMs <= 0 || timeoutMs > 30000) {
             MIDDLEWARE_LOG_ERROR("Invalid timeout value: %d (must be 1-30000ms)", timeoutMs);
             connectionStatus.store(ConnectionStatus::Error);
             return false;
         }
 
-        // DEALER-ONLY ARCHITECTURE: No ZMQ context or ROUTER socket is created here.
-        // All communication is handled by AnariUsdClient (DEALER socket).
-        // ZmqConnector in this mode is a stub for endpoint validation and health tracking.
 
-        // Determine and validate endpoint (but don't bind)
         currentEndpoint = endpoint ? endpoint : getDefaultEndpoint();
 
         if (!validateEndpoint(currentEndpoint)) {
@@ -73,8 +66,6 @@ bool ZmqConnector::initialize(const char* endpoint, int timeoutMs) {
 
         MIDDLEWARE_LOG_INFO("ZmqConnector initialized in DEALER-only stub mode");
 
-        // In stub mode, socket is null. This is intentional - use AnariUsdClient
-        // for actual communication.
         connectionStatus.store(ConnectionStatus::Connected);
         shutdownRequested.store(false);
 
@@ -102,7 +93,6 @@ void ZmqConnector::disconnect(int gracefulTimeoutMs) {
     std::lock_guard<std::mutex> lock(connectionMutex);
 
     try {
-        // Close socket first
         if (zmqSocket) {
             if (!currentEndpoint.empty()) {
                 try {
@@ -154,7 +144,6 @@ bool ZmqConnector::validateEndpoint(const std::string& endpoint) const {
         return false;
     }
 
-    // Basic protocol validation
     if (endpoint.find("tcp://") == 0) {
         return validateTcpEndpoint(endpoint);
     } else if (endpoint.find("ipc://") == 0) {
@@ -167,7 +156,6 @@ bool ZmqConnector::validateEndpoint(const std::string& endpoint) const {
 }
 
 bool ZmqConnector::validateTcpEndpoint(const std::string& endpoint) const {
-    // TCP endpoint validation: tcp://host:port
     static const std::regex tcpPattern(R"(^tcp://([^:]+|\*):(\d+)$)");
     std::smatch matches;
 
@@ -175,18 +163,15 @@ bool ZmqConnector::validateTcpEndpoint(const std::string& endpoint) const {
         return false;
     }
 
-    // Validate port range
     int port = std::stoi(matches[2]);
     return (port > 0 && port <= 65535);
 }
 
 bool ZmqConnector::validateIpcEndpoint(const std::string& endpoint) const {
 #if PLATFORM_WINDOWS
-    // Windows named pipes
     std::string path = endpoint.substr(6);  // Remove "ipc://"
     return path.find("//./pipe/") == 0 || path.find("\\\\.\\pipe\\") == 0;
 #elif PLATFORM_LINUX
-    // Unix domain sockets
     std::string path = endpoint.substr(6);  // Remove "ipc://"
     return !path.empty() && path[0] == '/' && path.find("..") == std::string::npos;
 #else
@@ -195,7 +180,6 @@ bool ZmqConnector::validateIpcEndpoint(const std::string& endpoint) const {
 }
 
 bool ZmqConnector::validateInprocEndpoint(const std::string& endpoint) const {
-    // In-process endpoint validation: inproc://name
     std::string name = endpoint.substr(9);  // Remove "inproc://"
     return !name.empty() && name.find_first_of(":/\\") == std::string::npos;
 }

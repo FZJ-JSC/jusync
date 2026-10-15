@@ -30,31 +30,27 @@ AnariUsdClient::~AnariUsdClient() {
 
 bool AnariUsdClient::connect(const char* brokerEndpoint, int timeoutMs) {
     std::lock_guard<std::mutex> lock(connectionMutex);
-    
+
     if (connectionStatus.load() == ConnectionStatus::Connected) {
         MIDDLEWARE_LOG_WARNING("AnariUsdClient already connected");
         return true;
     }
 
-    MIDDLEWARE_LOG_INFO("Connecting to ANARI USD broker: %s (timeout %dms)", 
+    MIDDLEWARE_LOG_INFO("Connecting to ANARI USD broker: %s (timeout %dms)",
                         brokerEndpoint ? brokerEndpoint : "default", timeoutMs);
     connectionStatus.store(ConnectionStatus::Connecting);
-    // Reconnect requested (first time or after a dead-link auto-reconnect):
-    // re-arm heartbeat recovery and remember the timeout for it.
     explicitDisconnect.store(false);
     if (timeoutMs > 0 && timeoutMs <= 30000) {
         connectTimeoutMs = timeoutMs;
     }
 
     try {
-        // Validate timeout
         if (timeoutMs <= 0 || timeoutMs > 30000) {
             MIDDLEWARE_LOG_ERROR("Invalid timeout value: %d (must be 1-30000ms)", timeoutMs);
             connectionStatus.store(ConnectionStatus::Error);
             return false;
         }
 
-        // Initialize ZMQ context
         zmqContext = std::make_unique<zmq::context_t>(1);
         if (!zmqContext) {
             MIDDLEWARE_LOG_ERROR("Failed to create ZMQ context");
@@ -62,11 +58,9 @@ bool AnariUsdClient::connect(const char* brokerEndpoint, int timeoutMs) {
             return false;
         }
 
-        // Set context options
         zmqContext->set(zmq::ctxopt::max_sockets, 1024);
         zmqContext->set(zmq::ctxopt::io_threads, 1);
 
-        // Create DEALER socket
         zmqSocket = std::make_unique<zmq::socket_t>(*zmqContext, zmq::socket_type::dealer);
         if (!zmqSocket) {
             MIDDLEWARE_LOG_ERROR("Failed to create ZMQ DEALER socket");
@@ -75,7 +69,6 @@ bool AnariUsdClient::connect(const char* brokerEndpoint, int timeoutMs) {
             return false;
         }
 
-        // Configure socket
         if (!configureSocket(timeoutMs)) {
             MIDDLEWARE_LOG_ERROR("Failed to configure DEALER socket");
             cleanup();
@@ -83,7 +76,6 @@ bool AnariUsdClient::connect(const char* brokerEndpoint, int timeoutMs) {
             return false;
         }
 
-        // Validate and set endpoint
         std::string endpoint = brokerEndpoint ? brokerEndpoint : "tcp://localhost:5556";
         if (!validateEndpoint(endpoint)) {
             MIDDLEWARE_LOG_ERROR("Invalid broker endpoint: %s", endpoint.c_str());
@@ -92,7 +84,6 @@ bool AnariUsdClient::connect(const char* brokerEndpoint, int timeoutMs) {
             return false;
         }
 
-        // Connect to broker
         try {
             zmqSocket->connect(endpoint);
             this->brokerEndpoint = endpoint;
@@ -105,14 +96,11 @@ bool AnariUsdClient::connect(const char* brokerEndpoint, int timeoutMs) {
             return false;
         }
 
-        // Reset statistics
         connectionStats.reset();
         shutdownRequested.store(false);
 
-        // Mark as connected
         connectionStatus.store(ConnectionStatus::Connected);
 
-        // Start background dispatcher thread
         dispatcherActive.store(true);
         dispatchThread = std::thread(&AnariUsdClient::dispatcherThread, this);
 
@@ -134,7 +122,7 @@ bool AnariUsdClient::connect(const char* brokerEndpoint, int timeoutMs) {
 
 void AnariUsdClient::disconnect(int gracefulTimeoutMs) {
     std::lock_guard<std::mutex> lock(connectionMutex);
-    
+
     if (connectionStatus.load() == ConnectionStatus::Disconnected) {
         return;
     }
@@ -144,7 +132,6 @@ void AnariUsdClient::disconnect(int gracefulTimeoutMs) {
     connectionStatus.store(ConnectionStatus::ShuttingDown);
     shutdownRequested.store(true);
 
-    // Give pending requests time to complete
     if (gracefulTimeoutMs > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(gracefulTimeoutMs));
     }
@@ -164,7 +151,6 @@ AnariUsdClient::ConnectionStatus AnariUsdClient::getConnectionStatus() const {
 
 bool AnariUsdClient::configureSocket(int timeoutMs) {
     try {
-        // Set socket options
         zmqSocket->set(zmq::sockopt::linger, 0);
         zmqSocket->set(zmq::sockopt::sndhwm, 1000);
         zmqSocket->set(zmq::sockopt::rcvhwm, 1000);
@@ -172,9 +158,6 @@ bool AnariUsdClient::configureSocket(int timeoutMs) {
         zmqSocket->set(zmq::sockopt::rcvtimeo, timeoutMs);
         zmqSocket->set(zmq::sockopt::maxmsgsize, static_cast<int64_t>(maxMessageSize.load()));
 
-        // Pin a stable ROUTER identity so broker-side notification targeting
-        // (client_ids_) survives TCP reconnects; the broker registers this
-        // id on every request it serves, including heartbeat pings.
         if (clientRoutingId.empty())
         {
             const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -211,7 +194,6 @@ bool AnariUsdClient::configureWindowsSocket() {
         zmqSocket->set(zmq::sockopt::tcp_keepalive_idle, 300);
         zmqSocket->set(zmq::sockopt::tcp_keepalive_cnt, 3);
         zmqSocket->set(zmq::sockopt::tcp_keepalive_intvl, 30);
-        // Increase buffer sizes for broadcast reliability (16 ranks × 8 files × ~10KB each = ~1.3MB)
         zmqSocket->set(zmq::sockopt::sndbuf, 2097152);  // 2MB send buffer
         zmqSocket->set(zmq::sockopt::rcvbuf, 4194304);  // 4MB receive buffer for burst responses
 
@@ -250,7 +232,6 @@ bool AnariUsdClient::validateEndpoint(const std::string& endpoint) const {
         return false;
     }
 
-    // TCP endpoint validation: tcp://host:port
     if (endpoint.find("tcp://") == 0) {
         std::regex tcpPattern(R"(^tcp://([^:]+|localhost):(\d+)$)");
         std::smatch matches;
@@ -259,7 +240,6 @@ bool AnariUsdClient::validateEndpoint(const std::string& endpoint) const {
             return false;
         }
 
-        // Validate port range
         int port = std::stoi(matches[2]);
         return (port > 0 && port <= 65535);
     }
@@ -274,7 +254,6 @@ bool AnariUsdClient::requestFileList(int32_t targetRank, FileListCallback callba
     }
 
     try {
-        // Create file list request
         ZmqFileRequest request;
         request.magic = ANARI_USD_MAGIC;           // 0x55534446 ("USDF") - CRITICAL: Must be set!
         request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_LIST_FILES);
@@ -283,26 +262,22 @@ bool AnariUsdClient::requestFileList(int32_t targetRank, FileListCallback callba
         request.chunk_size = 0; // Not applicable for file list
         request.setFilename(""); // No filename for list request
 
-        MIDDLEWARE_LOG_INFO("Requesting file list from rank %d (request_id: %u)", 
+        MIDDLEWARE_LOG_INFO("Requesting file list from rank %d (request_id: %u)",
                             targetRank, request.request_id);
-        
-        // DEBUG: Log request details
+
         MIDDLEWARE_LOG_INFO("DEBUG: File list request - magic=0x%08x, type=%u, size=%zu bytes",
                            request.magic, request.message_type, sizeof(request));
 
-        // Send request
         if (!sendRequest(&request, sizeof(request), request.request_id)) {
             MIDDLEWARE_LOG_ERROR("Failed to send file list request");
             return false;
         }
-        
+
         MIDDLEWARE_LOG_INFO("DEBUG: File list request sent successfully, waiting for response...");
 
-        // Receive file list response — FILTER BY request_id
         uint32_t myRequestId = request.request_id;
         size_t headerSize = sizeof(ZmqFileChunk);
 
-        // Receive chunk header + JSON
         FrameMsg dummyDelim1, dataFrame1;
         if (!waitForMatchingFrames(myRequestId, timeoutMs, dummyDelim1, dataFrame1)) {
             MIDDLEWARE_LOG_ERROR("Timeout waiting for file list response");
@@ -373,7 +348,6 @@ bool AnariUsdClient::requestFileList(int32_t targetRank, FileListCallback callba
             return false;
         }
 
-        // Receive completion message — also filtered by request_id
         FrameMsg dummyDelim2, dataFrame2;
         if (!waitForMatchingFrames(myRequestId, timeoutMs, dummyDelim2, dataFrame2)) {
             MIDDLEWARE_LOG_ERROR("Timeout waiting for file list completion");
@@ -385,7 +359,6 @@ bool AnariUsdClient::requestFileList(int32_t targetRank, FileListCallback callba
             }
         }
 
-        // Trigger callback
         if (callback) {
             callback(files);
         }
@@ -411,22 +384,17 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
     }
 
     try {
-        // For broadcast requests (targetRank == -1), we need to receive multiple responses
-        // For single rank requests, we just process one response
         bool isBroadcast = (targetRank == -1);
-        
-        // CRITICAL FIX: Query total worker count BEFORE sending request
-        // In single-rank mode, convert broadcast to direct request to rank 0
+
         uint32_t totalWorkers = 1; // Default to single-rank mode (non-MPI)
         int32_t actualTargetRank = targetRank;
-        
+
         if (isBroadcast) {
             uint32_t workerCount = 0;
             if (getTotalWorkerCountSync(workerCount, 2000)) {
                 totalWorkers = workerCount;
                 MIDDLEWARE_LOG_INFO("Dynamic worker count from broker: %u", totalWorkers);
-                
-                // SINGLE-RANK MODE FIX: If only rank 0 exists, convert broadcast to direct request
+
                 if (totalWorkers == 1) {
                     MIDDLEWARE_LOG_INFO("Single-rank mode detected - converting broadcast (-1) to direct request to rank 0");
                     actualTargetRank = 0; // Change target from -1 to 0
@@ -434,11 +402,9 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
                 }
             } else {
                 MIDDLEWARE_LOG_WARNING("Failed to get worker count from broker, using default single-rank mode");
-                // Keep original targetRank (could be -1 or specific rank)
             }
         }
 
-        // Create file list request with CORRECTED target rank
         ZmqFileRequest request;
         request.magic = ANARI_USD_MAGIC;           // 0x55534446 ("USDF") - CRITICAL: Must be set!
         request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_LIST_FILES);
@@ -450,7 +416,6 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
         MIDDLEWARE_LOG_INFO("Requesting file list with sizes from rank %d (request_id: %u, isBroadcast: %d)",
                             actualTargetRank, request.request_id, isBroadcast ? 1 : 0);
 
-        // Send request
         if (!sendRequest(&request, sizeof(request), request.request_id)) {
             MIDDLEWARE_LOG_ERROR("Failed to send file list request");
             return false;
@@ -462,7 +427,6 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
         uint32_t broadcastRequestId = request.request_id;
         bool receivedAtLeastOneResponse = false;
 
-        // Track which ranks have responded for broadcast requests
         std::vector<bool> respondedRanks(totalWorkers, false);
 
         do {
@@ -476,7 +440,6 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
             int remainingTimeout = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(timeoutDuration - elapsed).count());
             if (remainingTimeout <= 0) break;
 
-            // For broadcast: check if all ranks have responded
             if (isBroadcast) {
                 int respondedCount = 0;
                 for (int32_t rank = 0; rank < static_cast<int32_t>(totalWorkers); ++rank) {
@@ -488,7 +451,6 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
                 }
             }
 
-            // Receive chunk header (filtered by request_id)
             FrameMsg dummyDelim1, dataFrame1;
             if (!waitForMatchingFrames(broadcastRequestId, remainingTimeout, dummyDelim1, dataFrame1)) {
                 break; // timeout or shutdown
@@ -571,7 +533,6 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
                 }
                 MIDDLEWARE_LOG_INFO("Parsed files from rank %d", jsonRank);
 
-                // Mark this rank as responded
                 if (isBroadcast && jsonRank >= 0 && jsonRank < static_cast<int32_t>(totalWorkers)) {
                     respondedRanks[jsonRank] = true;
                     MIDDLEWARE_LOG_INFO("Rank %d responded (%d/%d total)", jsonRank,
@@ -582,7 +543,6 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
                 continue;
             }
 
-            // Receive completion message (filtered by request_id)
             FrameMsg dummyDelim2, dataFrame2;
             if (!waitForMatchingFrames(broadcastRequestId, remainingTimeout, dummyDelim2, dataFrame2)) {
                 MIDDLEWARE_LOG_WARNING("Timeout waiting for completion from rank %d", chunk->source_rank);
@@ -601,72 +561,59 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
                 break;
             }
 
-            // Try next rank — short timeout to avoid blocking on stragglers
-            // Use a small per-rank timeout so 100 ranks don't take forever
         } while (isBroadcast);
-        
+
         if (!receivedAtLeastOneResponse) {
             MIDDLEWARE_LOG_ERROR("No valid file list responses received");
             return false;
         }
-        
+
         MIDDLEWARE_LOG_INFO("Accumulated %zu total files from %s",
                            allFileInfos.size(),
                            isBroadcast ? "multiple ranks (broadcast)" : "single rank");
-        
-        // For broadcast: implement retry logic for missing ranks (MPI mode only)
-        // In single-rank mode (non-MPI), there's only rank 0, so no retry needed
+
         if (isBroadcast && allFileInfos.size() > 0) {
-            // Use the respondedRanks vector that was already populated during the main loop
             int32_t maxRank = -1;
             int32_t minRank = static_cast<int32_t>(totalWorkers);
-            
+
             for (int32_t rank = 0; rank < static_cast<int32_t>(totalWorkers); ++rank) {
                 if (respondedRanks[rank]) {
                     if (rank > maxRank) maxRank = rank;
                     if (rank < minRank) minRank = rank;
                 }
             }
-            
-            // Count responded ranks
+
             int32_t respondedCount = 0;
             for (int32_t rank = 0; rank < static_cast<int32_t>(totalWorkers); ++rank) {
                 if (respondedRanks[rank]) respondedCount++;
             }
-            
+
             MIDDLEWARE_LOG_INFO("Broadcast response summary: %d/%d ranks responded (ranks %d-%d)",
                                 respondedCount, totalWorkers, minRank, maxRank);
-            
-            // Only retry missing ranks if we're in multi-rank MPI mode
-            // In single-rank mode (totalWorkers == 1), don't retry
+
             bool isSingleRankMode = (totalWorkers == 1);
-            
+
             if (!isSingleRankMode && respondedCount < static_cast<int32_t>(totalWorkers)) {
                 MIDDLEWARE_LOG_INFO("Multi-rank mode detected - retrying %d missing ranks...",
                                     totalWorkers - respondedCount);
-                
-                // Retry each missing rank
+
                 int32_t retryTimeout = timeoutMs / 3; // Shorter timeout for retries
                 if (retryTimeout < 5000) retryTimeout = 5000; // Minimum 5 seconds
-                
-                // Create a temporary vector for retry results
+
                 std::vector<FileInfo> retryResults = allFileInfos;
-                
+
                 for (int32_t rank = 0; rank < static_cast<int32_t>(totalWorkers); ++rank) {
                     if (!respondedRanks[rank]) {
                         MIDDLEWARE_LOG_INFO("Retrying rank %d with %d ms timeout", rank, retryTimeout);
-                        
-                        // Inline retry logic (simplified version of requestFileListForSingleRank)
+
                         std::vector<FileInfo> rankFiles;
-                        
-                        // Check connection
+
                         if (connectionStatus.load() != ConnectionStatus::Connected || !zmqSocket) {
                             MIDDLEWARE_LOG_ERROR("Not connected for retry request");
                             continue;
                         }
-                        
+
                         try {
-                            // Create file list request
                             ZmqFileRequest request;
                             request.magic = ANARI_USD_MAGIC;  // CRITICAL: Set magic number
                             request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_LIST_FILES);
@@ -674,19 +621,17 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
                             request.target_rank = rank;
                             request.chunk_size = 0;
                             request.setFilename("");
-                            
+
                             MIDDLEWARE_LOG_INFO("Retry: requesting file list from rank %d (request_id: %u)",
                                                rank, request.request_id);
-                            
-                            // Send request
+
                             if (!sendRequest(&request, sizeof(request), request.request_id)) {
                                 MIDDLEWARE_LOG_ERROR("Retry failed to send request to rank %d", rank);
                                 continue;
                             }
-                            
+
                             uint32_t retryRequestId = request.request_id;
 
-                            // Receive chunk header (filtered by request_id)
                             FrameMsg dummyDelim1, dataFrame1;
                             if (!waitForMatchingFrames(retryRequestId, retryTimeout, dummyDelim1, dataFrame1)) {
                                 MIDDLEWARE_LOG_WARNING("Retry timeout for rank %d after %d ms", rank, retryTimeout);
@@ -739,36 +684,32 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
                                 }
                             }
 
-                            // Clean up remaining completion message
                             FrameMsg dummyDelim2, dataFrame2;
                             waitForMatchingFrames(retryRequestId, std::min(retryTimeout / 3, 2000), dummyDelim2, dataFrame2);
 
                             MIDDLEWARE_LOG_INFO("Retry successful for rank %d: got %zu files", rank, rankFiles.size());
-                            
+
                         } catch (const std::exception& e) {
                             MIDDLEWARE_LOG_ERROR("Exception in retry for rank %d: %s", rank, e.what());
                         }
-                        
-                        // Add retried files to results
+
                         for (const auto& fileInfo : rankFiles) {
                             retryResults.push_back(fileInfo);
                         }
-                        
+
                         if (rankFiles.empty()) {
                             MIDDLEWARE_LOG_WARNING("Retry failed for rank %d", rank);
                         }
                     }
                 }
-                
-                // Update allFileInfos with retry results
+
                 allFileInfos = retryResults;
                 MIDDLEWARE_LOG_INFO("After retries: %zu total files", allFileInfos.size());
             } else if (isSingleRankMode) {
                 MIDDLEWARE_LOG_INFO("Single-rank mode detected - no retry needed (only rank 0 exists)");
             }
         }
-        
-        // Trigger callback
+
         if (callback) {
             callback(allFileInfos);
         }
@@ -798,7 +739,6 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
         return false;
     }
 
-    // Validate filename
     if (filename.empty()) {
         MIDDLEWARE_LOG_ERROR("Cannot request file - filename is empty");
         if (errorCallback) {
@@ -807,11 +747,8 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
         return false;
     }
 
-    // ✅ FIX: Removed outer requestMutex lock - sendRequest() handles its own locking
-    // Holding lock during blocking recv loop serialized ALL network I/O and caused hangs
 
     try {
-        // Create file request
         ZmqFileRequest request;
         request.magic = ANARI_USD_MAGIC;
         request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_GET_FILE);
@@ -820,24 +757,19 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
         request.chunk_size = DEFAULT_CHUNK_SIZE;
         request.setFilename(filename);
 
-        MIDDLEWARE_LOG_DEBUG("Requesting file '%s' from rank %d (request_id: %u)", 
+        MIDDLEWARE_LOG_DEBUG("Requesting file '%s' from rank %d (request_id: %u)",
                             filename.c_str(), targetRank, request.request_id);
 
-        // Send request
         if (!sendRequest(&request, sizeof(request), request.request_id)) {
             MIDDLEWARE_LOG_ERROR("Failed to send file request");
             return false;
         }
 
-        // Receive file in chunks — FILTER BY request_id to avoid cross-talk
         bool fileComplete = false;
         uint64_t totalSize = 0;
         uint32_t myRequestId = request.request_id;
 
         while (!fileComplete && !shutdownRequested.load()) {
-            // Latest-wins abort (P2): consumer flagged this transfer as
-            // superseded — stop consuming, drop buffered + future frames of
-            // our request id and free the pipeline for the fresh download.
             if (abortFlag && abortFlag->load(std::memory_order_acquire)) {
                 MIDDLEWARE_LOG_INFO("Download of '%s' (request_id %u) aborted: superseded by newer update",
                                     filename.c_str(), myRequestId);
@@ -848,7 +780,6 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
                 return false;
             }
 
-            // Receive delimiter + data frames, filtered by request_id
             FrameMsg dummyDelim, dataFrame;
             if (!waitForMatchingFrames(myRequestId, timeoutMs, dummyDelim, dataFrame, abortFlag)) {
                 if (abortFlag && abortFlag->load(std::memory_order_acquire)) {
@@ -890,8 +821,6 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
                                               chunk->chunk_size, dataSize);
                     }
 
-                    // Zero-copy: hand the chunk payload straight from the
-                    // ZMQ buffer to the callback (no intermediate vector).
                     if (chunkCallback) {
                         chunkCallback(chunk->getFilename(),
                                       combinedData + sizeof(ZmqFileChunk),
@@ -974,38 +903,25 @@ bool AnariUsdClient::requestFrame(int32_t frameNumber, int32_t targetRank,
         return false;
     }
 
-    // ✅ FIX: Removed outer requestMutex lock - sendRequest() handles its own locking
-    // Holding lock during blocking recv loop serialized ALL network I/O and caused hangs
 
     try {
-        // Create frame request
         ZmqFileRequest request;
         request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_GET_FRAME);
         request.request_id = generateRequestId();
         request.target_rank = targetRank;
         request.chunk_size = DEFAULT_CHUNK_SIZE;
-        
-        // Encode frame number in filename
+
         std::string frameFilename = "frame_" + std::to_string(frameNumber);
         request.setFilename(frameFilename);
 
-        MIDDLEWARE_LOG_DEBUG("Requesting frame %d from rank %d (request_id: %u)", 
+        MIDDLEWARE_LOG_DEBUG("Requesting frame %d from rank %d (request_id: %u)",
                             frameNumber, targetRank, request.request_id);
 
-        // Send request
         if (!sendRequest(&request, sizeof(request), request.request_id)) {
             MIDDLEWARE_LOG_ERROR("Failed to send frame request");
             return false;
         }
 
-        // Receive frame files from the dispatcher-backed response index.  This used
-        // to recv() directly from the socket here, which raced the dispatcher thread
-        // (the sole recv owner) and could steal/desync frames.  Now requestFrame
-        // matches its own request_id from the index exactly like requestFile.
-        //
-        // A frame spans multiple files with no single terminal marker, so — as before —
-        // we treat the frame as delivered once the broker stays quiet for `timeoutMs`
-        // and keep the original return-value semantics (quiescence returns false).
         uint32_t myRequestId = request.request_id;
         int filesReceived = 0;
 
@@ -1055,8 +971,6 @@ bool AnariUsdClient::requestFrame(int32_t frameNumber, int32_t targetRank,
                         MIDDLEWARE_LOG_WARNING("Chunk size mismatch: header %u, data %zu",
                                                chunk->chunk_size, dataSize);
                     }
-                    // Zero-copy: hand the chunk payload straight from the
-                    // ZMQ buffer to the callback (no intermediate vector).
                     if (chunkCallback) {
                         chunkCallback(chunk->getFilename(),
                                       combinedData + sizeof(ZmqFileChunk),
@@ -1079,11 +993,6 @@ bool AnariUsdClient::requestFrame(int32_t frameNumber, int32_t targetRank,
                     MIDDLEWARE_LOG_DEBUG("Frame file %d complete: %s (%zu bytes)",
                                         filesReceived, complete->getFilename().c_str(), complete->total_size);
 
-                    // Terminal frame marker from the broker: every file of this
-                    // frame has already been delivered (wire ordering), so the
-                    // frame is definitively complete. Return immediately instead
-                    // of waiting out the legacy "broker stays quiet" quiescence
-                    // heuristic (which cost a full timeout after every frame).
                     if (complete->getFilename() == "__frame_complete__") {
                         MIDDLEWARE_LOG_INFO("Frame %d complete marker received (%d file completes)",
                                             frameNumber, filesReceived);
@@ -1119,6 +1028,7 @@ bool AnariUsdClient::requestFrame(int32_t frameNumber, int32_t targetRank,
         }
 
         // Shutdown requested while in flight.
+
         drain();
         return false;
 
@@ -1140,7 +1050,7 @@ bool AnariUsdClient::getFileSync(const std::string& filename, int32_t targetRank
     };
 
     FileData file;
-    
+
     auto chunkCallback = [&file](const std::string& fname, const uint8_t* chunk,
                                   size_t chunkSize, uint64_t offset, uint64_t totalSize) {
         file.totalSize = totalSize;
@@ -1165,7 +1075,7 @@ bool AnariUsdClient::getFileSync(const std::string& filename, int32_t targetRank
 
 bool AnariUsdClient::getFileListSync(int32_t targetRank, std::vector<std::string>& files, int timeoutMs) {
     bool received = false;
-    
+
     auto callback = [&files, &received](const std::vector<std::string>& fileList) {
         files = fileList;
         received = true;
@@ -1180,7 +1090,7 @@ bool AnariUsdClient::getFileListSync(int32_t targetRank, std::vector<std::string
 
 bool AnariUsdClient::getFileListWithSizesSync(int32_t targetRank, std::vector<FileInfo>& files, int timeoutMs) {
     bool received = false;
-    
+
     auto callback = [&files, &received](const std::vector<FileInfo>& fileList) {
         files = fileList;
         received = true;
@@ -1196,16 +1106,11 @@ bool AnariUsdClient::getFileListWithSizesSync(int32_t targetRank, std::vector<Fi
 bool AnariUsdClient::sendRequest(const void* data, size_t size, uint32_t requestId) {
     try {
         std::lock_guard<std::recursive_mutex> lock(requestMutex);
-        
-        // DEBUG: Log request details
+
         const ZmqFileRequest* req = static_cast<const ZmqFileRequest*>(data);
         MIDDLEWARE_LOG_DEBUG("DEBUG sendRequest: magic=0x%08x, type=%u, size=%zu, request_id=%u",
                            req->magic, req->message_type, size, requestId);
-        
-        // Send empty delimiter frame with SNDMORE flag (first frame of 2-frame message)
-        // DEALER sends: [empty delimiter] + [data] (2 frames)
-        // ROUTER receives: [identity] + [empty delimiter] + [data] (3 frames)
-        // ZeroMQ automatically adds identity frame for DEALER→ROUTER communication
+
         zmq::message_t emptyFrame(0);
         auto result1 = zmqSocket->send(emptyFrame, zmq::send_flags::sndmore);
         if (!result1) {
@@ -1213,14 +1118,13 @@ bool AnariUsdClient::sendRequest(const void* data, size_t size, uint32_t request
             connectionStats.failedRequests.fetch_add(1);
             return false;
         }
-        
+
         MIDDLEWARE_LOG_DEBUG("DEBUG sendRequest: Empty delimiter sent successfully");
-        
-        // Send binary struct (second/last frame, no SNDMORE flag)
+
         zmq::message_t msg(size);
         memcpy(msg.data(), data, size);
         auto result2 = zmqSocket->send(msg, zmq::send_flags::none);
-        
+
         if (!result2 || result2.value() != size) {
             MIDDLEWARE_LOG_ERROR("Failed to send request data (request_id: %u)", requestId);
             connectionStats.failedRequests.fetch_add(1);
@@ -1264,7 +1168,6 @@ bool AnariUsdClient::testConnection() {
     }
 
     try {
-        // Send a simple file list request to test connection
         return requestFileList(0, nullptr, 1000);
     } catch (...) {
         return false;
@@ -1273,7 +1176,6 @@ bool AnariUsdClient::testConnection() {
 
 void AnariUsdClient::updateHealthStatus() {
     lastHealthCheck = std::chrono::steady_clock::now();
-    // Additional health checks can be added here
 }
 
 void AnariUsdClient::setNotificationCallback(NotificationCallback callback) {
@@ -1434,7 +1336,6 @@ void AnariUsdClient::handleNotification(const zmq::message_t& data) {
                         static_cast<unsigned long long>(hashPrevHi),
                         notif->hasOldData ? 1 : 0);
 
-    // Phase 0 streaming diagnostics: start (or restart) this file's stage trace.
     if (notif->message_type == static_cast<uint32_t>(ZmqMessageType::NOTIFY_FILE_UPDATE_V2) ||
         notif->message_type == static_cast<uint32_t>(ZmqMessageType::NOTIFY_FILE_UPDATE)) {
         jusync_diag::Diagnostics::instance().mark(
@@ -1465,15 +1366,10 @@ bool AnariUsdClient::requestWorkerListString(std::vector<std::tuple<int32_t, std
 
     try {
         MIDDLEWARE_LOG_INFO("Requesting worker list using string protocol 'GET_WORKERS'");
-        
-        // Send GET_WORKERS string using HPC broker protocol
-        // DEALER sends: [empty delimiter] + "GET_WORKERS" (2 frames)
-        // ROUTER receives: [identity] + [empty delimiter] + "GET_WORKERS" (3 frames)
-        // ✅ FIX: Lock only for send, release before blocking receive
+
         {
             std::lock_guard<std::recursive_mutex> lock(requestMutex);
 
-            // Send empty delimiter frame with SNDMORE flag
             zmq::message_t emptyFrame(0);
             auto result = zmqSocket->send(emptyFrame, zmq::send_flags::sndmore);
             if (!result) {
@@ -1482,7 +1378,6 @@ bool AnariUsdClient::requestWorkerListString(std::vector<std::tuple<int32_t, std
                 return false;
             }
 
-            // Send "GET_WORKERS" string (broker accepts any string)
             zmq::message_t requestMsg(strlen("GET_WORKERS"));
             memcpy(requestMsg.data(), "GET_WORKERS", strlen("GET_WORKERS"));
             result = zmqSocket->send(requestMsg, zmq::send_flags::none);
@@ -1496,30 +1391,23 @@ bool AnariUsdClient::requestWorkerListString(std::vector<std::tuple<int32_t, std
             connectionStats.totalRequestsSent.fetch_add(1);
         } // ✅ Lock released here before blocking receive
 
-        // Wait for the raw-string response via the dispatcher-backed index.
-        // The GET_WORKERS reply carries no ANARI magic/request_id, so it is routed
-        // to the id==0 FIFO by enqueueResponseFrame (the dispatcher is still the
-        // sole owner of the socket recv).
         FrameMsg dummyDelim, responseData;
         if (!waitForMatchingFrames(0, timeoutMs, dummyDelim, responseData)) {
             MIDDLEWARE_LOG_ERROR("Timeout waiting for worker list response");
             return false;
         }
 
-        // Parse response: "WORKER_LIST|rank1:hostname1:ip1;rank2:hostname2:ip2;..."
         std::string responseStr(reinterpret_cast<const char*>(responseData->data()), responseData->size());
         MIDDLEWARE_LOG_INFO("Received worker list response: %s", responseStr.c_str());
 
-        // Check if response starts with "WORKER_LIST|"
         if (responseStr.find("WORKER_LIST|") != 0) {
             MIDDLEWARE_LOG_ERROR("Invalid worker list response format: %s", responseStr.c_str());
             return false;
         }
 
-        // Extract worker data
         std::string workerData = responseStr.substr(12); // Skip "WORKER_LIST|"
         outWorkers.clear();
-        
+
         size_t pos = 0;
         while (pos < workerData.length()) {
             size_t semicolonPos = workerData.find(';', pos);
@@ -1531,21 +1419,20 @@ bool AnariUsdClient::requestWorkerListString(std::vector<std::tuple<int32_t, std
                 workerStr = workerData.substr(pos, semicolonPos - pos);
                 pos = semicolonPos + 1;
             }
-            
+
             if (workerStr.empty()) {
                 continue;
             }
-            
-            // Parse "rank:hostname:ip"
+
             size_t colon1 = workerStr.find(':');
             size_t colon2 = workerStr.find(':', colon1 + 1);
-            
+
             if (colon1 != std::string::npos && colon2 != std::string::npos) {
                 try {
                     int32_t rank = std::stoi(workerStr.substr(0, colon1));
                     std::string hostname = workerStr.substr(colon1 + 1, colon2 - colon1 - 1);
                     std::string ip = workerStr.substr(colon2 + 1);
-                    
+
                     outWorkers.push_back(std::make_tuple(rank, hostname, ip));
                 } catch (const std::exception& e) {
                     MIDDLEWARE_LOG_WARNING("Failed to parse worker entry: %s", workerStr.c_str());
@@ -1575,21 +1462,18 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
     }
 
     try {
-        // Create binary property request using ZmqFileRequest struct
         ZmqFileRequest request;
         request.magic = ANARI_USD_MAGIC;           // 0x55534446 ("USDF")
         request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_GET_PROPERTY);  // 400
         request.request_id = generateRequestId();
         request.target_rank = -1;                  // Request from all ranks
-        request.setFilename("totalWorkerCount");   // Use totalWorkerCount (includes rank 0) not workerCount (excludes rank 0)
+        request.setFilename("totalWorkerCount");
         request.chunk_size = 0;                    // Not applicable for property requests
 
         MIDDLEWARE_LOG_DEBUG("Requesting worker count via binary property 'totalWorkerCount' (request_id: %u)",
                              request.request_id);
 
-        // ✅ FIX: Removed outer requestMutex lock - sendRequest() handles its own locking
 
-        // Send binary struct (276 bytes) using existing sendRequest method
         if (!sendRequest(&request, sizeof(request), request.request_id)) {
             MIDDLEWARE_LOG_ERROR("Failed to send binary property request");
             return false;
@@ -1597,7 +1481,6 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
 
         connectionStats.totalRequestsSent.fetch_add(1);
 
-        // Receive binary property response (filtered by request_id)
         FrameMsg dummyDelim, dataFrame;
         uint32_t workerCountRequestId = request.request_id;
         if (!waitForMatchingFrames(workerCountRequestId, timeoutMs, dummyDelim, dataFrame)) {
@@ -1605,7 +1488,6 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
             return false;
         }
 
-        // Validate response size
         size_t responseSize = dataFrame->size();
         if (responseSize < sizeof(ZmqPropertyResponse)) {
             MIDDLEWARE_LOG_ERROR("Property response too small: %zu bytes (expected at least %zu)",
@@ -1613,13 +1495,11 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
             return false;
         }
 
-        // Parse binary property response
         const ZmqPropertyResponse* response = reinterpret_cast<const ZmqPropertyResponse*>(dataFrame->data());
         MIDDLEWARE_LOG_DEBUG("DEBUG: Received binary property response: magic=0x%08x type=%u id=%u prop=%d int=%lld",
                              response->magic, response->message_type, response->request_id,
                              response->property_type, response->int_value);
-        
-        // Validate response
+
         if (!MessageUtils::isValidMagic(response->magic)) {
             MIDDLEWARE_LOG_ERROR("Invalid magic number in property response: 0x%08x", response->magic);
             return false;
@@ -1636,7 +1516,6 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
                                   request.request_id, response->request_id);
         }
 
-        // Check property type
         if (response->property_type == -1) {
             MIDDLEWARE_LOG_ERROR("Property request failed with error (property_type = -1)");
             return false;
@@ -1647,11 +1526,9 @@ bool AnariUsdClient::requestWorkerCount(WorkerCountCallback callback, int timeou
             return false;
         }
 
-        // Get worker count from int_value field
         uint32_t totalWorkers = static_cast<uint32_t>(response->int_value);
         MIDDLEWARE_LOG_DEBUG("Parsed worker count: totalWorkers=%u", totalWorkers);
 
-        // Trigger callback
         if (callback) {
             callback(totalWorkers);
         }
@@ -1679,26 +1556,20 @@ bool AnariUsdClient::requestWorkerStatus(int32_t targetRank, WorkerStatusCallbac
     try {
         MIDDLEWARE_LOG_WARNING("requestWorkerStatus: ANARI-USD broker doesn't support individual worker status queries");
         MIDDLEWARE_LOG_WARNING("Using REQ_GET_PROPERTY (400) with 'workerList' property instead of unsupported REQ_WORKER_STATUS (20)");
-        
-        // ANARI-USD broker doesn't support individual worker status queries
-        // Only aggregate properties are supported: "workerCount", "mpiSize", "mpiRank", "workerList"
-        // We'll use "workerList" to get all workers and find the specific rank
+
         ZmqFileRequest request;
         request.magic = ANARI_USD_MAGIC;
         request.message_type = static_cast<uint32_t>(ZmqMessageType::REQ_GET_PROPERTY);  // 400 instead of 20
         request.request_id = generateRequestId();
         request.target_rank = -1;  // Request from broker, not specific rank
-        
-        // Request worker list (supported property)
+
         request.setFilename("workerList");
         request.chunk_size = 0;
 
         MIDDLEWARE_LOG_INFO("Requesting worker status for rank %d using 'workerList' property (request_id: %u)",
                             targetRank, request.request_id);
 
-        // ✅ FIX: Removed outer requestMutex lock - sendRequest() handles its own locking
 
-        // Send request
         if (!sendRequest(&request, sizeof(request), request.request_id)) {
             MIDDLEWARE_LOG_ERROR("Failed to send worker status property request");
             return false;
@@ -1706,7 +1577,6 @@ bool AnariUsdClient::requestWorkerStatus(int32_t targetRank, WorkerStatusCallbac
 
         connectionStats.totalRequestsSent.fetch_add(1);
 
-        // Receive property response (filtered by request_id)
         FrameMsg dummyDelim, dataFrame;
         uint32_t workerStatusRequestId = request.request_id;
         if (!waitForMatchingFrames(workerStatusRequestId, timeoutMs, dummyDelim, dataFrame)) {
@@ -1714,7 +1584,6 @@ bool AnariUsdClient::requestWorkerStatus(int32_t targetRank, WorkerStatusCallbac
             return false;
         }
 
-        // Validate response size
         size_t responseSize = dataFrame->size();
         if (responseSize < sizeof(ZmqPropertyResponse)) {
             MIDDLEWARE_LOG_ERROR("Property response too small: %zu bytes (expected at least %zu)",
@@ -1722,10 +1591,8 @@ bool AnariUsdClient::requestWorkerStatus(int32_t targetRank, WorkerStatusCallbac
             return false;
         }
 
-        // Parse property response
         const ZmqPropertyResponse* response = reinterpret_cast<const ZmqPropertyResponse*>(dataFrame->data());
-        
-        // Validate response
+
         if (!MessageUtils::isValidMagic(response->magic)) {
             MIDDLEWARE_LOG_ERROR("Invalid magic number in property response: 0x%08x", response->magic);
             return false;
@@ -1742,7 +1609,6 @@ bool AnariUsdClient::requestWorkerStatus(int32_t targetRank, WorkerStatusCallbac
                                   request.request_id, response->request_id);
         }
 
-        // Check if property request failed
         if (response->property_type == -1) {
             MIDDLEWARE_LOG_ERROR("Worker status property request failed (property_type = -1)");
             MIDDLEWARE_LOG_ERROR("ANARI-USD broker may not support individual worker status queries");
@@ -1752,36 +1618,32 @@ bool AnariUsdClient::requestWorkerStatus(int32_t targetRank, WorkerStatusCallbac
         MIDDLEWARE_LOG_INFO("Received property response for worker list request (property_type=%d)",
                            response->property_type);
 
-        // Check if we got a string response (property_type = 1 for "workerList")
         if (response->property_type != 1) {
             MIDDLEWARE_LOG_ERROR("Expected string property type (1) for workerList, got %d", response->property_type);
             return false;
         }
 
-        // Parse worker list string: "rank:hostname:ib_address;rank:hostname:ib_address;..."
         std::string workerList = response->getStringValue();
         MIDDLEWARE_LOG_INFO("Worker list: %s", workerList.c_str());
 
-        // Parse to find specific rank
         std::string foundHostname = "unknown";
         std::string foundIp = "unknown";
-        
+
         size_t start = 0;
         while (start < workerList.size()) {
             size_t end = workerList.find(';', start);
             if (end == std::string::npos) end = workerList.size();
-            
+
             std::string workerEntry = workerList.substr(start, end - start);
             if (!workerEntry.empty()) {
-                // Parse "rank:hostname:ib_address"
                 size_t colon1 = workerEntry.find(':');
                 size_t colon2 = workerEntry.find(':', colon1 + 1);
-                
+
                 if (colon1 != std::string::npos && colon2 != std::string::npos) {
                     std::string rankStr = workerEntry.substr(0, colon1);
                     std::string hostname = workerEntry.substr(colon1 + 1, colon2 - colon1 - 1);
                     std::string ip = workerEntry.substr(colon2 + 1);
-                    
+
                     try {
                         int rank = std::stoi(rankStr);
                         if (rank == targetRank) {
@@ -1794,17 +1656,14 @@ bool AnariUsdClient::requestWorkerStatus(int32_t targetRank, WorkerStatusCallbac
                     }
                 }
             }
-            
+
             start = end + 1;
         }
 
-        // Trigger callback with available information
-        // Note: ANARI-USD broker doesn't provide worker status, GPU info, or heartbeat
-        // We return placeholder values for those fields
         if (callback) {
             callback(targetRank, 1,  // status=1 (idle) - placeholder
                      foundHostname,   // actual hostname if found
-                     "unknown",       // gpu_info - not provided by broker  
+                     "unknown",       // gpu_info - not provided by broker
                      0);              // last_heartbeat - not provided by broker
         }
 
@@ -1825,70 +1684,67 @@ bool AnariUsdClient::requestWorkerStatus(int32_t targetRank, WorkerStatusCallbac
 bool AnariUsdClient::getWorkerCountSync(uint32_t& workerCount, int timeoutMs) {
     std::promise<uint32_t> promise;
     std::future<uint32_t> future = promise.get_future();
-    
+
     bool success = requestWorkerCount([&promise](uint32_t count) {
         promise.set_value(count);
     }, timeoutMs);
-    
+
     if (!success) {
         return false;
     }
-    
+
     auto status = future.wait_for(std::chrono::milliseconds(timeoutMs));
     if (status == std::future_status::ready) {
         workerCount = future.get();
         return true;
     }
-    
+
     return false;
 }
 
 bool AnariUsdClient::getWorkerStatusSync(int32_t targetRank,
                                          std::vector<std::tuple<int32_t, uint32_t, std::string, std::string, uint64_t>>& workers,
                                          int timeoutMs) {
-    // For now, just get single worker status
     std::promise<bool> promise;
     std::future<bool> future = promise.get_future();
-    
-    bool success = requestWorkerStatus(targetRank, 
-        [&promise, &workers](int32_t rank, uint32_t status, const std::string& hostname, 
+
+    bool success = requestWorkerStatus(targetRank,
+        [&promise, &workers](int32_t rank, uint32_t status, const std::string& hostname,
                              const std::string& gpuInfo, uint64_t lastHeartbeat) {
             workers.push_back(std::make_tuple(rank, status, hostname, gpuInfo, lastHeartbeat));
             promise.set_value(true);
         }, timeoutMs);
-    
+
     if (!success) {
         return false;
     }
-    
+
     auto status = future.wait_for(std::chrono::milliseconds(timeoutMs));
     return status == std::future_status::ready;
 }
 
 bool AnariUsdClient::getTotalWorkerCountSync(uint32_t& totalCount, int timeoutMs) {
     MIDDLEWARE_LOG_DEBUG("=== getTotalWorkerCountSync ENTERED (timeout=%d ms) ===", timeoutMs);
-    
-    // Use binary protocol instead of legacy string protocol
+
     std::promise<uint32_t> promise;
     std::future<uint32_t> future = promise.get_future();
-    
+
     bool success = requestWorkerCount([&promise](uint32_t count) {
         MIDDLEWARE_LOG_DEBUG("Worker count callback received: count=%u", count);
         promise.set_value(count);
     }, timeoutMs);
-    
+
     if (!success) {
         MIDDLEWARE_LOG_ERROR("Failed to retrieve worker count using binary protocol");
         return false;
     }
-    
-    // Wait for the result
+
     auto status = future.wait_for(std::chrono::milliseconds(timeoutMs));
     if (status != std::future_status::ready) {
         MIDDLEWARE_LOG_ERROR("Timeout waiting for worker count response");
         return false;
     }
-    
+
     totalCount = future.get();
     MIDDLEWARE_LOG_DEBUG("=== getTotalWorkerCountSync COMPLETE: totalCount=%u ===", totalCount);
     return true;
@@ -1901,23 +1757,21 @@ bool AnariUsdClient::requestFilesParallel(
     std::function<void()> completion_callback,
     std::function<void(const std::string&, const std::string&)> error_callback,
     int timeout_ms) {
-    
-    // Extreme crash protection - check for stack corruption
+
     try {
         MIDDLEWARE_LOG_DEBUG("=== ENTERING requestFilesParallel ===");
     } catch (...) {
-        // If logging fails, we have serious memory corruption
         return false;
     }
     MIDDLEWARE_LOG_INFO("Filenames: %zu, TargetRanks: %zu", filenames.size(), target_ranks.size());
-    
+
     #ifdef _WIN32
     char debug_msg[512];
-    snprintf(debug_msg, sizeof(debug_msg), "[ANARI] requestFilesParallel: %zu files, first: %s\n", 
+    snprintf(debug_msg, sizeof(debug_msg), "[ANARI] requestFilesParallel: %zu files, first: %s\n",
              filenames.size(), filenames.empty() ? "(none)" : filenames[0].c_str());
     OutputDebugStringA(debug_msg);
     #endif
-    
+
     if (!isConnected()) {
         MIDDLEWARE_LOG_ERROR("Cannot start parallel downloads: client not connected");
         if (error_callback) {
@@ -1927,30 +1781,28 @@ bool AnariUsdClient::requestFilesParallel(
         }
         return false;
     }
-    
+
     MIDDLEWARE_LOG_DEBUG("Client is connected");
-    
+
     if (filenames.size() != target_ranks.size()) {
         MIDDLEWARE_LOG_ERROR("Filename count (%zu) doesn't match target_ranks count (%zu)",
                            filenames.size(), target_ranks.size());
         return false;
     }
-    
+
     MIDDLEWARE_LOG_DEBUG("Input validation passed");
 
     MIDDLEWARE_LOG_DEBUG("Starting parallel download of %zu files using same logic as async node", filenames.size());
-    
-    // Create shared state for tracking all downloads
+
     struct ParallelDownloadState {
         std::atomic<size_t> completed_files{0};
         std::atomic<size_t> successful_files{0};
         std::mutex completion_mutex;
     };
-    
+
     auto state = std::make_shared<ParallelDownloadState>();
     size_t total_files = filenames.size();
-    
-    // Ensure the bounded parallel-download worker pool is running.
+
     {
         std::lock_guard<std::mutex> lock(downloadTaskMutex);
         if (!downloadPoolActive.load(std::memory_order_acquire)) {
@@ -1966,25 +1818,21 @@ bool AnariUsdClient::requestFilesParallel(
         }
     }
 
-    // Build a per-file download task and hand it to the worker pool for overlap.
     for (size_t i = 0; i < filenames.size(); ++i) {
         std::string filename = filenames[i];
         int32_t target_rank = target_ranks[i];
-        
-        // Create per-file state for accumulation
+
         struct FileDownloadState {
             std::vector<uint8_t> data;
             uint64_t total_size = 0;
             bool complete = false;
             std::string filename;
         };
-        
+
         auto file_state = std::make_shared<FileDownloadState>();
         file_state->filename = filename;
-        
-        // Define callbacks (same pattern as getFileSync)
-        // Use explicit std::function to ensure proper type conversion
-        std::function<void(const std::string&, const uint8_t*, size_t, uint64_t, uint64_t)> chunk_callback = 
+
+        std::function<void(const std::string&, const uint8_t*, size_t, uint64_t, uint64_t)> chunk_callback =
             [file_state](const std::string& fname, const uint8_t* chunk, size_t chunkSize,
                         uint64_t offset, uint64_t total_size) {
                 file_state->total_size = total_size;
@@ -1993,62 +1841,52 @@ bool AnariUsdClient::requestFilesParallel(
                 }
                 std::memcpy(file_state->data.data() + offset, chunk, chunkSize);
             };
-        
-        std::function<void(const std::string&, uint64_t)> complete_callback = 
+
+        std::function<void(const std::string&, uint64_t)> complete_callback =
             [file_state, state, spawn_callback, total_files, completion_callback](
                 const std::string& fname, uint64_t total_size) {
-                
+
                 file_state->complete = true;
                 file_state->data.resize(total_size);
-                
-                MIDDLEWARE_LOG_INFO("Parallel download complete: %s (%zu bytes)", 
+
+                MIDDLEWARE_LOG_INFO("Parallel download complete: %s (%zu bytes)",
                                    fname.c_str(), file_state->data.size());
-                
-                // Call spawn callback with complete file data
+
                 if (spawn_callback && !file_state->data.empty()) {
                     spawn_callback(fname, file_state->data);
                 }
-                
-                // Update completion state
+
                 size_t completed = state->completed_files.fetch_add(1) + 1;
                 size_t successful = state->successful_files.fetch_add(1) + 1;
-                
+
                 MIDDLEWARE_LOG_DEBUG("Parallel progress: %zu/%zu files", completed, total_files);
-                
-                // Check if all files are done
+
                 if (completed >= total_files) {
-                    MIDDLEWARE_LOG_INFO("All parallel downloads completed: %zu/%zu successful", 
+                    MIDDLEWARE_LOG_INFO("All parallel downloads completed: %zu/%zu successful",
                                        successful, total_files);
-                    
+
                     if (completion_callback && successful == total_files) {
                         completion_callback();
                     }
                 }
             };
-        
-        std::function<void(const std::string&)> error_callback_wrapper = 
+
+        std::function<void(const std::string&)> error_callback_wrapper =
             [filename, error_callback, state, total_files](const std::string& error_msg) {
-                
+
                 MIDDLEWARE_LOG_ERROR("Parallel download error for %s: %s", filename.c_str(), error_msg.c_str());
-                
+
                 if (error_callback) {
                     error_callback(filename, error_msg);
                 }
-                
-                // Update completion state (with error)
+
                 size_t completed = state->completed_files.fetch_add(1) + 1;
-                
-                // Check if all files are done (including errors)
+
                 if (completed >= total_files) {
                     MIDDLEWARE_LOG_INFO("All parallel downloads completed (with errors)");
-                    // Don't call completion_callback since there were errors
                 }
             };
-        
-        // Hand off this file to the worker pool so downloads overlap (up to
-        // MAX_PARALLEL_DOWNLOADS concurrent transfers).  Previously requestFile
-        // ran synchronously here, serializing all N files on a single thread
-        // despite the "parallel" name.
+
         auto task = FileDownloadTask{};
         task.run = [this, filename, target_rank, timeout_ms,
                     chunk_callback, complete_callback, error_callback_wrapper,
@@ -2056,13 +1894,10 @@ bool AnariUsdClient::requestFilesParallel(
             if (!this->requestFile(filename, target_rank,
                                    chunk_callback, complete_callback,
                                    error_callback_wrapper, timeout_ms)) {
-                // requestFile only returns false without routing an error through
-                // error_callback_wrapper in this "not started" (send) case.
                 MIDDLEWARE_LOG_ERROR("Failed to start parallel download for: %s", filename.c_str());
                 if (error_callback) {
                     error_callback(filename, "Failed to start download");
                 }
-                // Count as completed (with error)
                 state->completed_files.fetch_add(1);
             }
         };
@@ -2074,15 +1909,10 @@ bool AnariUsdClient::requestFilesParallel(
     }
 
     downloadTaskCv.notify_all();
-    
-    // Return true immediately - downloads run asynchronously
-    // Callbacks will handle completion and spawning
+
     return true;
 }
 
-// ============================================================================
-// Request-ID matching receive helpers
-// ============================================================================
 
 uint32_t AnariUsdClient::extractRequestId(const uint8_t* data, size_t dataSize) const {
     if (!data || dataSize < 12) return 0; // need magic(4) + type(4) + request_id(4)
@@ -2093,24 +1923,12 @@ uint32_t AnariUsdClient::extractRequestId(const uint8_t* data, size_t dataSize) 
     return *reinterpret_cast<const uint32_t*>(data + 8);
 }
 
-// ---------------------------------------------------------------------------
-// Dispatcher thread: owns ALL ZMQ recv. Pulls frame pairs from the socket
-// and enqueues them.  Request threads never call recv().
-// ---------------------------------------------------------------------------
 
 void AnariUsdClient::dispatcherThread() {
     MIDDLEWARE_LOG_INFO("Dispatcher thread started");
 
     zmq::pollitem_t items[] = {{ zmqSocket->handle(), 0, ZMQ_POLLIN, 0 }};
 
-    // Idle heartbeat (P2): the broker is a ROUTER that pushes notifications
-    // only to identities it has recently HEARD from. When an idle SSH tunnel
-    // drops the TCP connection and libzmq transparently reconnects, the new
-    // pipe is unknown to the ROUTER and notifications are dropped until the
-    // client sends something again — that is the silent "20 s poll backstop"
-    // lag seen in the streaming journal. A lightweight periodic property ping
-    // keeps the tunnel warm, re-registers the identity, and proves liveness
-    // (any inbound frame, including ping replies, resets the dead timer).
     const auto IDLE_MS = std::chrono::milliseconds(5000);
     const auto DEAD_MS = std::chrono::milliseconds(20000);
     auto lastInbound = std::chrono::steady_clock::now();
@@ -2119,8 +1937,6 @@ void AnariUsdClient::dispatcherThread() {
 
     while (dispatcherActive.load()) {
         try {
-            // Poll with 100ms timeout so we wake up promptly on activity but
-            // also check dispatcherActive periodically.
             int pollResult = zmq::poll(items, 1, std::chrono::milliseconds(100));
             if (pollResult <= 0) {
                 const auto now = std::chrono::steady_clock::now();
@@ -2135,23 +1951,12 @@ void AnariUsdClient::dispatcherThread() {
                                                     "heartbeat: no inbound traffic",
                                                     static_cast<uint64_t>(DEAD_MS.count()), 0);
                             connectionStatus.store(ConnectionStatus::Disconnected);
-                            // Fail any stalled waiters immediately so the
-                            // consumer retries instead of hanging to timeout.
                             wakeResponseWaiters();
 
-                            // Recovery: UE never re-calls ConnectToBroker on its own,
-                            // and connect() from this thread would join() itself — so
-                            // run the full teardown + re-handshake on one detached
-                            // thread. cleanup() joins THIS dispatcher once we return;
-                            // the loop above must not send more pings meanwhile, which
-                            // is why deadReported latches until (re)connect resets it.
                             if (!explicitDisconnect.load() &&
                                 !reconnectInProgress.exchange(true)) {
                                 const std::string endpoint = brokerEndpoint;
                                 const int timeout = connectTimeoutMs;
-                                // shared_from_this(): the thread owns a reference
-                                // for its lifetime, so a mid-reconnect client
-                                // destruction can never dangle 'this'.
                                 std::thread([self = shared_from_this(),
                                              endpoint, timeout]() {
                                     for (int attempt = 1; attempt <= 3; ++attempt) {
@@ -2185,7 +1990,6 @@ void AnariUsdClient::dispatcherThread() {
                 continue;
             }
 
-            // Poll said data available — receive the complete pair under recvMutex
             zmq::message_t delimMsg, dataMsg;
 
             {
@@ -2197,8 +2001,6 @@ void AnariUsdClient::dispatcherThread() {
                 if (!dataRes) continue;
             }
 
-            // Zero-copy: move the received ZMQ buffers straight into the
-            // response index (previously two full memcpys per message here).
             enqueueResponseFrame(std::move(delimMsg), std::move(dataMsg));
 
             lastInbound = std::chrono::steady_clock::now();
@@ -2217,12 +2019,6 @@ void AnariUsdClient::dispatcherThread() {
     MIDDLEWARE_LOG_INFO("Dispatcher thread stopped");
 }
 
-// ---------------------------------------------------------------------------
-// sendIdlePing — fire-and-forget property request for the dispatcher's idle
-// heartbeat (see dispatcherThread). Nobody consumes the reply: the request id
-// is registered as abandoned right after sending, so the dispatcher discards
-// the response frame on arrival. The value is the round trip itself.
-// ---------------------------------------------------------------------------
 
 void AnariUsdClient::sendIdlePing() {
     if (!zmqSocket || connectionStatus.load() != ConnectionStatus::Connected) {
@@ -2251,15 +2047,11 @@ void AnariUsdClient::sendIdlePing() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// enqueueResponseFrame — called ONLY by dispatcher thread
-// ---------------------------------------------------------------------------
 
 void AnariUsdClient::enqueueResponseFrame(zmq::message_t delimiter,
                                             zmq::message_t data) {
-    // Check if this is a notification message (NOTIFY_FILE_UPDATE=300, NOTIFY_COMMIT_COMPLETE=301,
-    // NOTIFY_FILE_UPDATE_V2=302, NOTIFY_SCENE_UPDATE=303, NOTIFY_PROPERTY_UPDATE=304).
     // Notifications have no request_id and would never be matched by waiting threads.
+
     if (data.size() >= 8) {
         uint32_t magic = *reinterpret_cast<const uint32_t*>(data.data());
         uint32_t msgType = *reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(data.data()) + 4);
@@ -2291,7 +2083,6 @@ void AnariUsdClient::enqueueResponseFrame(zmq::message_t delimiter,
         }
     }
 
-    // Extract the request_id BEFORE moving `data` (move leaves it empty).
     const uint32_t requestId = extractRequestId(static_cast<const uint8_t*>(data.data()), data.size());
 
     auto entry = std::make_shared<FramePair>(
@@ -2301,8 +2092,6 @@ void AnariUsdClient::enqueueResponseFrame(zmq::message_t delimiter,
     {
         std::lock_guard<std::mutex> lock(responseQueueMutex);
 
-        // Superseded download (P2 abort): discard this consumer's remaining
-        // frames instead of buffering them forever with nobody to dequeue.
         if (requestId != 0) {
             auto ab = abandonedRequests.find(requestId);
             if (ab != abandonedRequests.end()) {
@@ -2315,15 +2104,13 @@ void AnariUsdClient::enqueueResponseFrame(zmq::message_t delimiter,
 
         if (requestId == 0) {
             // Raw-string response (e.g. GET_WORKERS) carrying no ANARI magic/id.
+
             noIdResponseQueue.push_back(std::move(entry));
         } else {
             responseByRequest[requestId].push_back(std::move(entry));
         }
         totalQueuedFrames.fetch_add(1, std::memory_order_relaxed);
 
-        // High-watermark safety valve: warn (never drop) if the index grows
-        // unbounded because a consumer stalled.  A stuck consumer only leaks its
-        // own request_id entry, which is drained when it completes/times out.
         if (totalQueuedFrames.load(std::memory_order_relaxed) > 4000) {
             const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                        std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -2337,9 +2124,6 @@ void AnariUsdClient::enqueueResponseFrame(zmq::message_t delimiter,
     responseQueueCv.notify_all(); // Wake waiting threads matching their id
 }
 
-// ---------------------------------------------------------------------------
-// tryDequeueMatching — non-blocking dequeue attempt
-// ---------------------------------------------------------------------------
 
 bool AnariUsdClient::tryDequeueMatching(uint32_t requestId,
                                         FrameMsg& outDelimiter,
@@ -2376,11 +2160,6 @@ bool AnariUsdClient::tryDequeueMatchingLocked(uint32_t requestId,
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// abandonRequestFrames — mid-transfer abort cleanup (P2 latest-wins).
-// Drops frames already buffered for a request whose consumer gave up, and
-// records the id so the dispatcher discards the broker's remaining frames.
-// ---------------------------------------------------------------------------
 
 void AnariUsdClient::abandonRequestFrames(uint32_t requestId) {
     std::lock_guard<std::mutex> lock(responseQueueMutex);
@@ -2399,17 +2178,9 @@ void AnariUsdClient::abandonRequestFrames(uint32_t requestId) {
             ++e;
         }
     }
-    // Expiry covers the slowest remaining transfer (chunk stream ends well
-    // within 5 min at tunnel rates for our tile sizes); set stays tiny since
-    // we prune here and on first stale hit in enqueueResponseFrame.
     abandonedRequests[requestId] = now + std::chrono::minutes(5);
 }
 
-// ---------------------------------------------------------------------------
-// wakeResponseWaiters — re-evaluate wait predicates (abort flags).
-// The brief lock closes the lost-wakeup window between a waiter's predicate
-// check and its cv wait.
-// ---------------------------------------------------------------------------
 
 void AnariUsdClient::wakeResponseWaiters() {
     {
@@ -2418,19 +2189,13 @@ void AnariUsdClient::wakeResponseWaiters() {
     responseQueueCv.notify_all();
 }
 
-// ---------------------------------------------------------------------------
-// waitForMatchingFrames — blocks on condition_variable until matching frame
-// arrives or timeout expires.  Game threads NEVER call recv().
-// ---------------------------------------------------------------------------
 
 bool AnariUsdClient::waitForMatchingFrames(uint32_t requestId, int timeoutMs,
                                             FrameMsg& outDelimiter,
                                             FrameMsg& outData,
                                             const std::atomic<bool>* abortFlag) {
-    // Fast path: frame already in the index
     if (tryDequeueMatching(requestId, outDelimiter, outData)) return true;
 
-    // Slow path: wait on the condition_variable until a frame for THIS id arrives.
     auto deadline = std::chrono::steady_clock::now()
                     + std::chrono::milliseconds(timeoutMs);
 
@@ -2440,13 +2205,10 @@ bool AnariUsdClient::waitForMatchingFrames(uint32_t requestId, int timeoutMs,
             connectionStatus.load() != ConnectionStatus::Connected) {
             return false;
         }
-        // Mid-transfer abort: the trigger sets the flag then calls
-        // wakeResponseWaiters(), so we land here on the next wakeup.
         if (abortFlag && abortFlag->load(std::memory_order_acquire)) {
             return false;
         }
 
-        // O(1) predicate: is there a frame buffered for this specific request_id?
         auto hasFrame = [this, requestId]() -> bool {
             if (requestId == 0) {
                 return !noIdResponseQueue.empty();
@@ -2456,7 +2218,6 @@ bool AnariUsdClient::waitForMatchingFrames(uint32_t requestId, int timeoutMs,
         };
         if (hasFrame()) break;
 
-        // Wait on condition_variable with deadline
         if (responseQueueCv.wait_until(lock, deadline) == std::cv_status::timeout) {
             MIDDLEWARE_LOG_WARNING("Timeout %d ms waiting for request_id %u",
                                    timeoutMs, requestId);
@@ -2465,17 +2226,10 @@ bool AnariUsdClient::waitForMatchingFrames(uint32_t requestId, int timeoutMs,
     }
 
     // A frame is present — dequeue our own id's frame.
-    // Use the locked variant: we already hold responseQueueMutex, and
-    // re-locking the same non-recursive mutex self-deadlocks (glibc parks
-    // the thread in the futex forever; UE Stop then hangs in cleanup()).
+
     return tryDequeueMatchingLocked(requestId, outDelimiter, outData);
 }
 
-// ---------------------------------------------------------------------------
-// downloadWorkerLoop — pool worker.  Runs per-file download tasks (requestFile)
-// so requestFilesParallel can overlap up to MAX_PARALLEL_DOWNLOADS transfers.
-// Exits cleanly when cleanup() stops the pool and the task queue drains.
-// ---------------------------------------------------------------------------
 void AnariUsdClient::downloadWorkerLoop() {
     for (;;) {
         FileDownloadTask task;
@@ -2506,24 +2260,13 @@ void AnariUsdClient::downloadWorkerLoop() {
     }
 }
 
-// ============================================================================
-// Cleanup
-// ============================================================================
 
 void AnariUsdClient::cleanup() {
-    // 1) Signal ALL background loops to stop and wake ALL waiters BEFORE any
-    //    join.  Download workers run requestFile, which blocks in
-    //    waitForMatchingFrames on responseQueueCv; if we joined them first, a
-    //    worker mid-request would sleep out its full timeout (up to 10 minutes
-    //    for large files) before noticing shutdownRequested, stalling Stop.
     downloadPoolActive.store(false, std::memory_order_release);
     dispatcherActive.store(false);
     downloadTaskCv.notify_all();
     responseQueueCv.notify_all();
 
-    // 2) Stop the parallel-download worker pool.  Its workers run
-    //    requestFile (send path + response index), so join them before the
-    //    dispatcher / socket / context are torn down.
     for (auto& w : downloadWorkers) {
         if (w.joinable()) {
             w.join();
@@ -2531,7 +2274,6 @@ void AnariUsdClient::cleanup() {
     }
     downloadWorkers.clear();
 
-    // 3) Stop dispatcher thread — it owns all ZMQ receive
     if (dispatchThread.joinable()) {
         dispatchThread.join();
     }
@@ -2540,7 +2282,6 @@ void AnariUsdClient::cleanup() {
         try {
             zmqSocket->close();
         } catch (...) {
-            // Ignore errors during cleanup
         }
         zmqSocket.reset();
     }
@@ -2549,14 +2290,12 @@ void AnariUsdClient::cleanup() {
         try {
             zmqContext->close();
         } catch (...) {
-            // Ignore errors during cleanup
         }
         zmqContext.reset();
     }
 
     pendingRequests.clear();
 
-    // 4) Empty the response index and the download task queue.
     {
         std::lock_guard<std::mutex> lock(responseQueueMutex);
         responseByRequest.clear();

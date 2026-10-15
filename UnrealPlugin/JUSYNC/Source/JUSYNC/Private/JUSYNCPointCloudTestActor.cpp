@@ -55,7 +55,6 @@ void AJUSYNCPointCloudTestActor::EndPlay(const EEndPlayReason::Type EndPlayReaso
 
 void AJUSYNCPointCloudTestActor::LoadAndSpawnFromDisk()
 {
-    // Build list of USD files to process
     TArray<FString> FilesToLoad = UsdFilePaths;
     if (FilesToLoad.Num() == 0 && !UsdFilePath.IsEmpty())
     {
@@ -69,7 +68,6 @@ void AJUSYNCPointCloudTestActor::LoadAndSpawnFromDisk()
         return;
     }
 
-    // Load optional PNG texture buffer once (before file spawner starts)
     TArray<uint8> PngBuffer;
     if (!TexturePngFilePath.IsEmpty())
     {
@@ -85,7 +83,6 @@ void AJUSYNCPointCloudTestActor::LoadAndSpawnFromDisk()
         }
     }
 
-    // Set up Gradient LUT for point clouds from PNG (if enabled + PNG loaded)
     if (bApplyGradientToPCs && PngBuffer.Num() > 0)
     {
         TArray<FColor> GradientLUT = BuildGradientLUTFromPng(PngBuffer);
@@ -107,7 +104,6 @@ void AJUSYNCPointCloudTestActor::LoadAndSpawnFromDisk()
     GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Cyan,
         FString::Printf(TEXT("[TestActor] Processing %d file(s), spawn x%d grid"), TotalFiles, SpawnCount));
 
-    // Dispatch each file parse (all background, non-blocking)
     for (int32 i = 0; i < FilesToLoad.Num(); ++i)
     {
         const FString& FilePath = FilesToLoad[i];
@@ -161,7 +157,6 @@ void AJUSYNCPointCloudTestActor::SpawnFromParsedData(const FString& Filename, bo
         return;
     }
 
-    // Load PNG texture from buffer (once per file parse result)
     UTexture2D* LoadedTex = nullptr;
     if (PngBuffer.Num() > 0)
     {
@@ -172,25 +167,21 @@ void AJUSYNCPointCloudTestActor::SpawnFromParsedData(const FString& Filename, bo
     int32 MeshSpawned = 0;
     int32 PCSpawned = 0;
 
-    // Resolve spawner for budgeted async PC conversion
     UJUSYNCSubsystem* S = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
     FJUSYNCPointCloudSpawner* PCSpawner = S ? S->GetPointCloudSpawner() : nullptr;
 
-    // Spawn N instances in grid layout
     for (int32 Inst = 0; Inst < SpawnCount; ++Inst)
     {
         int32 Col = Inst % GridColumns;
         int32 Row = Inst / GridColumns;
         FVector Loc = BaseSpawnLoc + FVector(Col * SpawnGap, Row * GridRowGap, 0.0f);
 
-        // Meshes
         if (bSpawnMeshes && MeshData.Num() > 0)
         {
             for (const FJUSYNCMeshData& M : MeshData)
             {
                 if (!M.IsValid() || M.Vertices.Num() == 0 || M.Triangles.Num() == 0) continue;
 
-                // Prepare custom material with texture parameter (if any)
                 UMaterialInterface* SpawnMat = SpawnMaterial;
                 if (SpawnMaterial && LoadedTex)
                 {
@@ -214,7 +205,6 @@ void AJUSYNCPointCloudTestActor::SpawnFromParsedData(const FString& Filename, bo
                         Spawned->SetActorScale3D(FVector(SpawnScaleFactor));
                     }
 
-                    // If we only have texture but no custom material, apply texture to default material
                     if (!SpawnMaterial && LoadedTex)
                     {
                         ApplyTextureToMesh(Spawned, LoadedTex);
@@ -227,7 +217,6 @@ void AJUSYNCPointCloudTestActor::SpawnFromParsedData(const FString& Filename, bo
             }
         }
 
-        // Point clouds - use budgeted async spawner to avoid thread explosion
         if (bSpawnPointClouds && PointCloudData.Num() > 0)
         {
             for (const FJUSYNCPointCloudData& PC : PointCloudData)
@@ -236,7 +225,6 @@ void AJUSYNCPointCloudTestActor::SpawnFromParsedData(const FString& Filename, bo
 
                 if (PCSpawner)
                 {
-                    // Spawner has built-in budget (16ms), gradient LUT, and pool management
                     PCSpawner->SetSpawnLocation(Loc);
                     PCSpawner->SetSpawnScale(SpawnScaleFactor);
                     PCSpawner->EnqueuePointCloud(PC, 0);
@@ -254,7 +242,6 @@ void AJUSYNCPointCloudTestActor::SpawnFromParsedData(const FString& Filename, bo
         }
     }
 
-    // Debug summary on screen
     GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Green,
         FString::Printf(TEXT("[TestActor] Meshes: %d"), MeshSpawned));
     GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Blue,
@@ -305,14 +292,12 @@ void AJUSYNCPointCloudTestActor::ApplyTextureToMesh(AActor* Spawned, UTexture2D*
     UMaterialInstanceDynamic* MatInst = UMaterialInstanceDynamic::Create(BaseMatIntf, this);
     if (!MatInst) return;
 
-    // Determine parameter name
     FName ParamName = TEXT("BaseColor");
     if (!TextureParameterName.IsEmpty())
     {
         ParamName = *TextureParameterName;
     }
 
-    // Try to set texture parameter (silently handles missing params)
     MatInst->SetTextureParameterValue(ParamName, Tex);
     RootComp->SetMaterial(0, MatInst);
 }

@@ -26,14 +26,6 @@ struct FJUSYNCFileChangeRequest
     EJUSYNCFileChangeState State = EJUSYNCFileChangeState::Queued;
 };
 
-/**
- * Single game-thread tracker for pending live-update file changes.
- *
- * Replaces the old patchwork of RefreshingFiles / RefreshedFiles /
- * bCommitDiffInProgress / V2ActiveDownloads. The owner must only call this on
- * the game thread; background work captures values and returns via game-thread
- * tasks.
- */
 class FJUSYNCFileChangeTracker
 {
 public:

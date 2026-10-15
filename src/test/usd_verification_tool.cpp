@@ -8,9 +8,7 @@
 #include <memory>
 #include <algorithm>
 
-// Primary focus: C interface (your production interface)
 #include "AnariUsdMiddleware_C.h"
-// Minimal C++ interface for syntax validation only
 #include "AnariUsdMiddleware.h"
 #include "MiddlewareLogging.h"
 
@@ -69,7 +67,6 @@ private:
     TestResults results;
 
 public:
-    // Enhanced mesh data validation with detailed reporting
     bool validateMeshData(const std::string& meshName, size_t vertexCount, size_t indexCount,
                          size_t normalCount, size_t uvCount, size_t colorCount,
                          bool isCollision = false) {
@@ -119,7 +116,6 @@ public:
         return valid;
     }
 
-    // Validate collision-specific data
     bool validateCollisionData(const std::string& meshName, const CMeshData& mesh) {
         bool valid = true;
 
@@ -143,7 +139,6 @@ public:
             valid = false;
         }
 
-        // Check bounding box validity for most collision types
         if (mesh.collision_type != COLLISION_NONE) {
             bool hasBounds = false;
             for (int i = 0; i < 3; i++) {
@@ -168,7 +163,6 @@ public:
         return valid;
     }
 
-    // Test a single file with a specific collision type
     bool testSingleFileWithCollision(const std::string& filePath, int collisionType) {
         std::string typeName = GetCollisionComplexityName_C(collisionType);
         std::cout << "\n📦 Testing " << fs::path(filePath).filename() << " with " << typeName << std::endl;
@@ -197,12 +191,10 @@ public:
 
             std::cout << "    📊 Loaded " << meshCount << " meshes in " << duration.count() << "ms" << std::endl;
 
-            // Validate each mesh (both visual and collision data)
             bool allMeshesValid = true;
             for (size_t i = 0; i < meshCount; ++i) {
                 const auto& mesh = meshes[i];
 
-                // Validate visual mesh data
                 if (!validateMeshData(mesh.element_name,
                                      mesh.points_count,
                                      mesh.indices_count,
@@ -212,13 +204,11 @@ public:
                     allMeshesValid = false;
                 }
 
-                // Validate collision data
                 if (!validateCollisionData(mesh.element_name, mesh)) {
                     allMeshesValid = false;
                 }
             }
 
-            // Clean up
             FreeMeshData_C(meshes, meshCount);
 
             if (!allMeshesValid) {
@@ -235,9 +225,6 @@ public:
         }
     }
 
-    // ========================================================================
-    // PRIMARY FOCUS: COMPREHENSIVE C INTERFACE TESTING (90% of validation effort)
-    // ========================================================================
 
     bool testCInterfaceComprehensive(const std::string& testDataPath) {
         std::cout << "\n🚀 COMPREHENSIVE C INTERFACE TESTING (Production Critical)" << std::endl;
@@ -249,17 +236,14 @@ public:
             return false;
         }
 
-        // Initialize middleware once for all tests
         if (!InitializeMiddleware_C(nullptr)) {
             results.addFailure("C_PRIMARY_Initialization", "Failed to initialize C middleware");
             return false;
         }
 
-        // Find all USD files
         std::vector<std::string> usdFiles;
 
         if (fs::is_regular_file(testDataPath)) {
-            // Single file
             std::string ext = fs::path(testDataPath).extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
@@ -272,7 +256,6 @@ public:
                 return false;
             }
         } else if (fs::is_directory(testDataPath)) {
-            // Directory scan
             std::cout << "📁 Scanning directory for USD files..." << std::endl;
 
             for (const auto& entry : fs::recursive_directory_iterator(testDataPath)) {
@@ -299,7 +282,6 @@ public:
             return false;
         }
 
-        // Define all collision types to test comprehensively
         std::vector<int> collisionTypes = {
             COLLISION_NONE,
             COLLISION_SIMPLE,
@@ -311,7 +293,6 @@ public:
 
         bool allPassed = true;
 
-        // Test each file with each collision type (comprehensive matrix testing)
         for (const auto& filePath : usdFiles) {
             std::cout << "\n" << std::string(80, '=') << std::endl;
             std::cout << "🎯 COMPREHENSIVE TESTING: " << fs::path(filePath).filename() << std::endl;
@@ -325,11 +306,9 @@ public:
             }
         }
 
-        // Test collision parameter configuration
         std::cout << "\n🔧 TESTING C INTERFACE COLLISION CONFIGURATION" << std::endl;
         std::cout << "Priority: PRIMARY (Production Parameter Validation)" << std::endl;
 
-        // Test default collision complexity setting
         for (int collisionType : collisionTypes) {
             if (SetDefaultCollisionComplexity_C(collisionType)) {
                 results.addSuccess("C_CollisionConfig_Default_" + std::string(GetCollisionComplexityName_C(collisionType)));
@@ -340,7 +319,6 @@ public:
             }
         }
 
-        // Test collision parameters
         if (SetCollisionParameters_C(0.25f, 0.001f, 32)) {
             results.addSuccess("C_CollisionConfig_Parameters");
             std::cout << "    ✅ Set collision parameters: ratio=0.25, precision=0.001, hulls=32" << std::endl;
@@ -349,25 +327,21 @@ public:
             allPassed = false;
         }
 
-        // Test error handling (critical for production stability)
         if (!testCInterfaceErrorHandling()) {
             allPassed = false;
         }
 
-        // Shutdown middleware
         ShutdownMiddleware_C();
 
         return allPassed;
     }
 
-    // Test C interface error handling (production stability)
     bool testCInterfaceErrorHandling() {
         std::cout << "\n🔒 C INTERFACE ERROR HANDLING TEST (Production Stability)" << std::endl;
         std::cout << "Priority: PRIMARY (Critical for Production)" << std::endl;
 
         bool allPassed = true;
 
-        // Test 1: Non-existent file (common production scenario)
         std::cout << "    Testing non-existent file handling..." << std::endl;
         CMeshData* meshes = nullptr;
         size_t meshCount = 0;
@@ -382,7 +356,6 @@ public:
             allPassed = false;
         }
 
-        // Test 2: Invalid USD data
         std::cout << "    Testing invalid USD data handling..." << std::endl;
         std::string tempFile = "temp_invalid.usda";
         std::ofstream temp(tempFile);
@@ -403,11 +376,9 @@ public:
             allPassed = false;
         }
 
-        // Test 3: Invalid collision complexity values
         std::cout << "    Testing invalid collision complexity values..." << std::endl;
         bool invalidTestPassed = true;
 
-        // Test with out-of-range collision complexity
         if (SetDefaultCollisionComplexity_C(999)) {
             results.addFailure("C_ERROR_InvalidCollisionType", "Should have rejected invalid collision type 999");
             invalidTestPassed = false;
@@ -423,10 +394,8 @@ public:
             std::cout << "        ✅ Correctly rejected invalid collision types" << std::endl;
         }
 
-        // Test 4: Memory management validation
         std::cout << "    Testing memory management..." << std::endl;
 
-        // Test with null pointers (defensive programming)
         int result1 = LoadUSDFromDisk_C(nullptr, &meshes, &meshCount);
         int result2 = LoadUSDFromDisk_C("test.usd", nullptr, &meshCount);
         int result3 = LoadUSDFromDisk_C("test.usd", &meshes, nullptr);
@@ -442,16 +411,12 @@ public:
         return allPassed;
     }
 
-    // ========================================================================
-    // SECONDARY: C++ INTERFACE SYNTAX VALIDATION (10% of effort)
-    // ========================================================================
 
     bool testCppSyntaxOnly() {
         std::cout << "\n📝 C++ INTERFACE SYNTAX VALIDATION (Architecture Check)" << std::endl;
         std::cout << "Priority: SECONDARY (10% - Syntax Check Only, No File Loading)" << std::endl;
 
         try {
-            // Test 1: Basic object creation and destruction
             std::cout << "    Testing C++ object creation..." << std::endl;
             std::unique_ptr<AnariUsdMiddleware> middleware = std::make_unique<AnariUsdMiddleware>();
 
@@ -461,7 +426,6 @@ public:
             }
             std::cout << "        ✅ C++ middleware object created successfully" << std::endl;
 
-            // Test 2: Basic method calls (syntax validation only)
             std::cout << "    Testing basic method calls..." << std::endl;
 
             bool connected = middleware->isConnected();  // Should return false since not initialized
@@ -470,22 +434,17 @@ public:
             std::string status = middleware->getStatusInfo();  // Should return some status
             std::cout << "        ✅ getStatusInfo() callable: " << (!status.empty() ? "returns data" : "empty") << std::endl;
 
-            // Test 3: Method signatures and return types (compilation check)
             std::cout << "    Testing method signatures..." << std::endl;
 
-            // These calls test that the API compiles correctly
             ECollisionComplexity defaultCollision = middleware->getDefaultCollisionComplexity();
             std::cout << "        ✅ getDefaultCollisionComplexity() returns: " << static_cast<int>(defaultCollision) << std::endl;
 
-            // Test setter methods (no actual processing)
             middleware->setDefaultCollisionComplexity(ECollisionComplexity::Complex);
             std::cout << "        ✅ setDefaultCollisionComplexity() callable" << std::endl;
 
-            // Test 4: Callback registration syntax
             std::cout << "    Testing callback registration syntax..." << std::endl;
 
             int callbackId = middleware->registerUpdateCallback([](const FileData& data) {
-                // Empty callback for syntax test
             });
             std::cout << "        ✅ registerUpdateCallback() returns ID: " << callbackId << std::endl;
 
@@ -507,9 +466,6 @@ public:
         }
     }
 
-    // ========================================================================
-    // MAIN TEST ORCHESTRATION
-    // ========================================================================
 
     bool runTestSuite(const std::string& testDataPath) {
         std::cout << "🚀 JUSYNC USD VALIDATION - C INTERFACE FOCUSED (v2.0)" << std::endl;
@@ -520,16 +476,13 @@ public:
 
         bool allPassed = true;
 
-        // PRIMARY TESTS: Comprehensive C Interface Testing (90% of effort)
         if (!testCInterfaceComprehensive(testDataPath)) {
             allPassed = false;
             std::cout << "⚠️ Critical: C interface tests failed - this affects production!" << std::endl;
         }
 
-        // SECONDARY TEST: C++ Syntax Validation (10% of effort - architecture validation only)
         if (!testCppSyntaxOnly()) {
             std::cout << "⚠️ C++ syntax validation failed - check wrapper integrity" << std::endl;
-            // Don't fail the entire suite for C++ syntax issues since C interface is primary
         }
 
         return allPassed;
@@ -557,7 +510,6 @@ public:
     }
 };
 
-// Main function with focused approach
 int main(int argc, char* argv[]) {
     std::cout << "╔═══════════════════════════════════════════════════════════╗" << std::endl;
     std::cout << "║     JUSYNC USD Validation Tool v2.0 (C-Interface Focus)  ║" << std::endl;
@@ -571,7 +523,6 @@ int main(int argc, char* argv[]) {
     if (argc > 1) {
         testDataPath = argv[1];
     } else {
-        // Try to find default test directory
         testDataPath = "tests/data/usd_samples";
         if (!fs::exists(testDataPath)) {
             testDataPath = "./tests/data/usd_samples";
@@ -588,10 +539,8 @@ int main(int argc, char* argv[]) {
 
     USDValidationTool validator;
 
-    // Primary tests - C interface with all collision types
     bool success = validator.testCInterfaceComprehensive(testDataPath);
 
-    // Optional - C++ syntax validation (no file loading)
     if (success) {
         validator.testCppSyntaxOnly(); // Just compilation/linking test
     }

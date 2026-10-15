@@ -1,17 +1,10 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "JUSYNCElementNames.h"
 
 class AActor;
 
-/**
- * Minimal time-step playback controller.
- *
- * Time steps are detected from numeric filename suffixes (e.g. clip_00012.usda)
- * or supplied explicitly. Playback shows the actors belonging to the current
- * time step and hides the others. This is intentionally a scene-level timeline,
- * not a mesh deformation timeline.
- */
 class FJUSYNCAnimationController
 {
 public:
@@ -23,6 +16,14 @@ public:
         TSet<AActor*> Actors;
     };
 
+    struct FActorSlot
+    {
+        int64 Order = 0;
+        FString Element;
+        int32 Uniq = -1;
+        int32 Seq = 0;
+    };
+
     void SetPlaybackSettings(float InFPS, bool bInLoop);
     void Play();
     void Stop();
@@ -30,7 +31,7 @@ public:
     void ShowAll();
     bool IsPlaying() const { return bPlaying; }
 
-    void AddActor(const FString& Filename, AActor* Actor);
+    void AddActor(const FString& Filename, AActor* Actor, const FString& InElementName = FString());
     void RemoveActor(AActor* Actor);
     void RemoveFile(const FString& Filename);
     void Clear();
@@ -47,9 +48,12 @@ private:
     FTimeStep* FindOrCreateStep(const FString& Filename, int64 Order, const FString& Label);
     void ApplyVisibility();
 
+    void ComputeElementWinners(int64 OrderFilter, TSet<AActor*>& OutWinners) const;
+
     TMap<int64, FTimeStep> TimeSteps;
     TArray<int64> SortedOrders;
-    TMap<AActor*, int64> ActorToStep;
+    TMap<AActor*, FActorSlot> ActorSlots;
+    int32 NextSeq = 0;
     int32 CurrentIndex = 0;
     float FPS = 30.0f;
     float Accumulator = 0.0f;

@@ -1,12 +1,7 @@
 #pragma once
 
-// Performance optimization flags
-// Define DISABLE_DEBUG_LOGGING to remove debug logging overhead in production
-// #define DISABLE_DEBUG_LOGGING  // Uncomment for production builds
 
-// Check if we're compiling with Unreal Engine
 #if defined(_MSC_VER) && defined(__UNREAL__)
-// Unreal Engine environment
 #include "CoreMinimal.h"
 #include "HAL/PlatformMemory.h"
 #include "Misc/ScopeLock.h"
@@ -15,7 +10,6 @@
 #define MIDDLEWARE_LOG_ERROR(format, ...) UE_LOG(LogTemp, Error, TEXT(format), ##__VA_ARGS__)
 
 #ifdef DISABLE_DEBUG_LOGGING
-    // Production: strip INFO/DEBUG/VERBOSE, keep WARNING/ERROR
     #define MIDDLEWARE_LOG_INFO(format, ...)
     #define MIDDLEWARE_LOG_DEBUG(format, ...)
     #define MIDDLEWARE_LOG_VERBOSE(format, ...)
@@ -25,11 +19,9 @@
     #define MIDDLEWARE_LOG_VERBOSE(format, ...) UE_LOG(LogTemp, VeryVerbose, TEXT(format), ##__VA_ARGS__)
 #endif
 
-// String conversion helpers
 #define TO_MIDDLEWARE_STRING(str) FString(UTF8_TO_TCHAR(str.c_str()))
 #define FROM_MIDDLEWARE_STRING(str) TCHAR_TO_UTF8(*str)
 
-// Unreal Engine 5.5 specific safety measures
 #define MIDDLEWARE_SAFE_DELETE(ptr) \
     do { \
         if (ptr) { \
@@ -56,14 +48,11 @@
     } while(0)
 
 #else
-// Standard C++ environment
 #include <iostream>
 #include <cstdio>
 #include <limits>
 
-// On Windows, use OutputDebugString so logs appear in Unreal Engine
 #ifdef _WIN32
-// Declare OutputDebugStringA without including windows.h to avoid conflicts
 extern "C" __declspec(dllimport) void __stdcall OutputDebugStringA(const char* lpOutputString);
 
 #define MIDDLEWARE_LOG_TO_OUTPUT(format, ...) do { \
@@ -77,7 +66,6 @@ extern "C" __declspec(dllimport) void __stdcall OutputDebugStringA(const char* l
 #define MIDDLEWARE_LOG_ERROR(format, ...) MIDDLEWARE_LOG_TO_OUTPUT("[ERROR] " format "\n", ##__VA_ARGS__)
 
 #ifdef DISABLE_DEBUG_LOGGING
-    // Production: strip INFO/DEBUG/VERBOSE, keep WARNING/ERROR
     #define MIDDLEWARE_LOG_INFO(format, ...)
     #define MIDDLEWARE_LOG_DEBUG(format, ...)
     #define MIDDLEWARE_LOG_VERBOSE(format, ...)
@@ -88,12 +76,10 @@ extern "C" __declspec(dllimport) void __stdcall OutputDebugStringA(const char* l
 #endif
 
 #else
-// Non-Windows standard environment
 #define MIDDLEWARE_LOG_WARNING(format, ...) fprintf(stderr, "[WARNING] " format "\n", ##__VA_ARGS__)
 #define MIDDLEWARE_LOG_ERROR(format, ...) fprintf(stderr, "[ERROR] " format "\n", ##__VA_ARGS__)
 
 #ifdef DISABLE_DEBUG_LOGGING
-    // Production: strip INFO/DEBUG/VERBOSE, keep WARNING/ERROR
     #define MIDDLEWARE_LOG_INFO(format, ...)
     #define MIDDLEWARE_LOG_DEBUG(format, ...)
     #define MIDDLEWARE_LOG_VERBOSE(format, ...)
@@ -104,7 +90,6 @@ extern "C" __declspec(dllimport) void __stdcall OutputDebugStringA(const char* l
 #endif
 #endif
 
-// String conversion helpers (no-ops in standard C++)
 #define TO_MIDDLEWARE_STRING(str) str
 #define FROM_MIDDLEWARE_STRING(str) str
 
@@ -135,7 +120,6 @@ extern "C" __declspec(dllimport) void __stdcall OutputDebugStringA(const char* l
 
 #endif
 
-// Common safety constants - Unlimited for RMC compatibility
 namespace anari_usd_middleware {
     namespace safety {
         static constexpr size_t MAX_BUFFER_SIZE = static_cast<size_t>(std::numeric_limits<int64_t>::max() / 2); // Essentially unlimited (4.6EB)
@@ -148,7 +132,6 @@ namespace anari_usd_middleware {
     }
 }
 
-// Safe math operations
 #define MIDDLEWARE_SAFE_DIVIDE(numerator, denominator, result, context) \
     do { \
         if (std::abs(denominator) < anari_usd_middleware::safety::EPSILON) { \

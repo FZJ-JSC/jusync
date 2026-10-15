@@ -35,10 +35,6 @@ public:
     static void BakeLUTIntoCompactMesh(FJUSYNCCompactMeshData& Mesh, const TArray<FColor>& LUT);
     static void BakeLUTIntoCompactMeshes(TArray<FJUSYNCCompactMeshRef>& Meshes, const TArray<FColor>& LUT);
 
-    /**
-     * Bakes LUT colors into compact meshes using copy-on-write semantics so shared
-     * cached payloads are not mutated in place.
-     */
     static void EnsureCompactMeshesBaked(TArray<FJUSYNCCompactMeshRef>& Meshes, const TArray<FColor>& LUT, uint64 LUTVersion);
     static void EnsureCompactMeshBaked(FJUSYNCCompactMeshRef& Mesh, const TArray<FColor>& LUT, uint64 LUTVersion);
 
@@ -48,11 +44,6 @@ public:
     static bool ParseBufferCompact(UJUSYNCSubsystem* Subsystem, const TArray<uint8>& Buffer, const FString& Filename,
         TArray<FJUSYNCCompactMeshRef>& OutMeshes, TArray<FJUSYNCPointCloudRef>& OutPointClouds);
 
-    /**
-     * Task-graph parse path. The USD layout query is still serialized inside the
-     * subsystem (tinyusdz constraint), but buffer ownership, LUT baking, and the
-     * game-thread hand-off are scheduled through TaskGraph.
-     */
     static void ParseAsync(
         UJUSYNCSubsystem* Subsystem,
         TArray<uint8>&& Buffer,

@@ -1,8 +1,6 @@
 #pragma once
-// ─────────────────────────────────────────────────────────────────────────────
 // AnariUsdMiddleware - public C++ API (thread-safe, UE-friendly)
-// Now includes collision-generation support (simple → complex)
-// ─────────────────────────────────────────────────────────────────────────────
+
 #include <string>
 #include <vector>
 #include <memory>
@@ -28,16 +26,10 @@
 
 namespace anari_usd_middleware {
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Core safety limits (mirrors MiddlewareLogging.h > safety namespace)
-// ─────────────────────────────────────────────────────────────────────────────
 namespace detail {
     namespace safety = anari_usd_middleware::safety;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Public data structures
-// ─────────────────────────────────────────────────────────────────────────────
 struct FileData {
     std::string              filename;
     std::vector<uint8_t>     data;
@@ -52,7 +44,6 @@ struct FileData {
     void clear() { filename.clear(); data.clear(); hash.clear(); fileType.clear(); }
 };
 
-/* -------------------------------- Mesh / Collision ------------------------ */
 
 struct MeshData {
     std::string          elementName;   // prim name
@@ -62,9 +53,7 @@ struct MeshData {
     std::vector<float>   normals;       // xyz…
     std::vector<float>   uvs;           // uv…
     std::vector<float>   vertex_colors; // rgba…
-    /* NEW: collision */
     CollisionData        collision;
-    /* NEW: USD geometry features */
     std::string          subdivisionScheme;  // e.g., "catmull-clark", "bilinear", "none"
     bool                 doubleSided = false;
     std::vector<uint32_t>faceVertexCounts;  // For heterogenous polygons
@@ -88,7 +77,6 @@ struct MeshData {
     void clear() { *this = MeshData(); }
 };
 
-/* -------------------------------- Texture --------------------------------- */
 struct TextureData {
     int                    width{0}, height{0}, channels{0};
     std::vector<uint8_t>   data;
@@ -99,52 +87,33 @@ struct TextureData {
     void clear() { *this = TextureData(); }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Callback typedefs
-// ─────────────────────────────────────────────────────────────────────────────
 using FileUpdateCallback = std::function<void(const FileData&)>;
 using MessageCallback    = std::function<void(const std::string&)>;
 
-// ─────────────────────────────────────────────────────────────────────────────
 class ANARI_USD_MIDDLEWARE_API AnariUsdMiddleware {
 public:
-    /* construction */
     AnariUsdMiddleware();
     ~AnariUsdMiddleware();
     AnariUsdMiddleware(const AnariUsdMiddleware&)            = delete;
     AnariUsdMiddleware& operator=(const AnariUsdMiddleware&) = delete;
 
-    /* connection / lifecycle */
     bool initialize(const char* endpoint = nullptr);
     void shutdown();
     bool isConnected() const;
 
-    /* NEW: ANARI USD DEALER client methods */
     bool connectToBroker(const char* brokerEndpoint, int timeoutMs = 5000);
     void disconnectFromBroker();
     bool isBrokerConnected() const;
-    
-    /* NEW: File request methods */
+
     bool requestFileList(int32_t targetRank, std::vector<std::string>& outFiles, int timeoutMs = 10000);
     bool requestFileListWithSizes(int32_t targetRank, std::vector<FileInfo>& outFiles, int timeoutMs = 10000);
     bool requestFile(const std::string& filename, int32_t targetRank,
                      std::vector<uint8_t>& outFileData, int timeoutMs = 30000);
-    // In-situ variant: download straight into a caller buffer (no middleware
-    // intermediate). outStatus: 1 = ok, 0 = failure, -1 = overflow.
-    // abortHandle (0 = not abortable): a token from createAbortToken(); while
-    // the download is in flight, triggerAbortToken() cancels it immediately
-    // (returns as failure "superseded") so a stale transfer never blocks a
-    // fresher one behind it in the pipeline.
     bool requestFileIntoBuffer(const std::string& filename, int32_t targetRank,
                                uint8_t* outBuffer, size_t outCapacity,
                                size_t& outSize, int& outStatus, int timeoutMs = 30000,
                                uint64_t abortHandle = 0);
 
-    // ---- Abort tokens (P2 latest-wins mid-transfer cancellation) ----
-    // Opaque handles backed by a process-wide registry. Create on the game
-    // thread before starting an interruptible download, trigger when a newer
-    // notification supersedes the in-flight one, release when the download
-    // returns. Thread-safe; triggering after release is a harmless no-op.
     uint64_t createAbortToken();
     bool triggerAbortToken(uint64_t handle);
     void releaseAbortToken(uint64_t handle);
@@ -152,27 +121,24 @@ public:
                       std::vector<std::pair<std::string, std::vector<uint8_t>>>& outFrameFiles,
                       int timeoutMs = 60000);
 
-    /* NEW: Worker status queries (synchronous) */
     bool requestWorkerCount(uint32_t& outWorkerCount, int timeoutMs = 5000);
     bool requestTotalWorkerCount(uint32_t& outTotalCount, int timeoutMs = 5000);  // Includes rank 0
     bool requestWorkerStatus(int32_t targetRank,
                              std::vector<std::tuple<int32_t, uint32_t, std::string, std::string, uint64_t>>& outWorkerStatus,
                              int timeoutMs = 10000);
-    
-    /* NEW: Worker status queries (async with callbacks) */
+
     using WorkerCountCallback = std::function<void(uint32_t workerCount)>;
     using WorkerStatusCallback = std::function<void(const std::vector<std::tuple<int32_t, uint32_t, std::string, std::string, uint64_t>>& workerStatus)>;
     using FileListCallback = std::function<void(const std::vector<std::string>& files)>;
     using FileListWithSizesCallback = std::function<void(const std::vector<FileInfo>& files)>;
     using BrokerErrorCallback = std::function<void(const std::string& error)>;
-    
+
     void requestWorkerCountAsync(int timeoutMs, WorkerCountCallback callback, BrokerErrorCallback errorCallback = nullptr);
     void requestTotalWorkerCountAsync(int timeoutMs, WorkerCountCallback callback, BrokerErrorCallback errorCallback = nullptr);
     void requestWorkerStatusAsync(int32_t targetRank, int timeoutMs, WorkerStatusCallback callback, BrokerErrorCallback errorCallback = nullptr);
     void requestFileListAsync(int32_t targetRank, int timeoutMs, FileListCallback callback, BrokerErrorCallback errorCallback = nullptr);
     void requestFileListWithSizesAsync(int32_t targetRank, int timeoutMs, FileListWithSizesCallback callback, BrokerErrorCallback errorCallback = nullptr);
-    
-    /* NEW: Parallel file downloads with RAM awareness and immediate spawning */
+
     void requestFilesParallelAsync(
         const std::vector<std::string>& filenames,
         const std::vector<int32_t>& targetRanks,
@@ -180,17 +146,14 @@ public:
         std::function<void(const std::string&, const std::vector<uint8_t>&)> fileReceivedCallback,
         std::function<void()> completionCallback = nullptr,
         std::function<void(const std::string&, const std::string&)> errorCallback = nullptr);
-      
-    /* NEW: String-based worker list (compatible with Python broker) */
+
     bool requestWorkerListString(std::vector<std::tuple<int32_t, std::string, std::string>>& outWorkers, int timeoutMs = 5000);
 
-    /* callbacks */
     int  registerUpdateCallback (FileUpdateCallback cb);
     void unregisterUpdateCallback(int id);
     int  registerMessageCallback(MessageCallback cb);
     void unregisterMessageCallback(int id);
 
-    /* Notification callback for live updates (NOTIFY_FILE_UPDATE, NOTIFY_COMMIT_COMPLETE, V2 types) */
     using NotificationCallback = std::function<void(uint32_t messageType,
                                                      int32_t sourceRank,
                                                      const std::string& filename,
@@ -203,7 +166,6 @@ public:
                                                      bool hasOldData)>;     // true if hashPrev128 is valid
     void setNotificationCallback(NotificationCallback cb);
 
-    /* Typed scene / property update callback */
     using SceneUpdateCallback = std::function<void(uint32_t messageType,
                                                     int32_t sourceRank,
                                                     uint64_t timestamp,
@@ -220,7 +182,6 @@ public:
                                                     uint32_t payloadSize)>;
     void setSceneUpdateCallback(SceneUpdateCallback cb);
 
-    /* Protocol diagnostics callback */
     using ProtocolDiagnosticsCallback = std::function<void(const std::string& event,
                                                             const std::string& message,
                                                             uint64_t value0,
@@ -229,14 +190,11 @@ public:
 
     uint32_t getProtocolVersion() const;
 
-    /* receiver thread */
     bool startReceiving();
     void stopReceiving();
 
-    /* texture helpers */
     TextureData CreateTextureFromBuffer(const std::vector<uint8_t>& buffer);
 
-    /* ---------------- USD loading (visual-only) -------------------------- */
     bool LoadUSDBuffer(const std::vector<uint8_t>& buffer,
                        const std::string& fileName,
                        std::vector<MeshData>& outMeshes);
@@ -244,7 +202,6 @@ public:
     bool LoadUSDFromDisk(const std::string& filePath,
                          std::vector<MeshData>& outMeshes);
 
-    /* ---------------- USD loading WITH collision ------------------------- */
     bool LoadUSDBufferWithCollision(const std::vector<uint8_t>& buffer,
                                     const std::string& fileName,
                                     ECollisionComplexity complexity,
@@ -254,7 +211,6 @@ public:
                                       ECollisionComplexity complexity,
                                       std::vector<MeshData>& outMeshes);
 
-    /* collision configuration */
     void  setDefaultCollisionComplexity(ECollisionComplexity cpx);
     ECollisionComplexity getDefaultCollisionComplexity() const;
 
@@ -262,26 +218,21 @@ public:
                                  float convexHullPrecision,
                                  int   maxConvexHulls);
 
-    /* gradient helpers */
     bool WriteGradientLineAsPNG(const std::vector<uint8_t>& buffer,
                                 const std::string& outPath);
     bool GetGradientLineAsPNGBuffer(const std::vector<uint8_t>& buffer,
                                     std::vector<uint8_t>& outPng);
 
-    /* gradient cache - returns most recently cached gradient/colormap texture */
     bool GetCachedGradientTexture(std::vector<uint8_t>& outData, int& outWidth, int& outHeight);
 
-    /* status / stats */
     std::string getStatusInfo() const;
-    
-    /* internal access for C API */
+
     class AnariUsdClient* getClient() const;
 
 private:
     class Impl;
     std::unique_ptr<Impl> pImpl;
 
-    /* thread-safety for public state */
     mutable std::shared_mutex statusMutex;
     std::atomic<bool> initialized{false};
     std::atomic<bool> shutdownRequested{false};

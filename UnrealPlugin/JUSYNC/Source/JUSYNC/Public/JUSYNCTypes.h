@@ -5,7 +5,6 @@
 #include "LidarPointCloudShared.h"
 #include "JUSYNCTypes.generated.h"
 
-// Forward declarations
 class UProceduralMeshComponent;
 class URealtimeMeshComponent;
 
@@ -72,7 +71,6 @@ struct JUSYNC_API FJUSYNCMeshData
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
 	TArray<FColor> VertexColors;  // ADD THIS LINE
 
-	// Update validation and helper functions
 	bool HasVertexColors() const {
 		return VertexColors.Num() > 0;
 	}
@@ -98,7 +96,6 @@ struct JUSYNC_API FJUSYNCMeshData
 	bool HasUVs() const { return UVs.Num() > 0; }
 };
 
-// RealtimeMesh-specific vertex structure
 USTRUCT(BlueprintType)
 struct JUSYNC_API FJUSYNCRealtimeMeshVertex
 {
@@ -125,7 +122,6 @@ struct JUSYNC_API FJUSYNCRealtimeMeshVertex
 	}
 };
 
-// RealtimeMesh-optimized data structure
 USTRUCT(BlueprintType)
 struct JUSYNC_API FJUSYNCRealtimeMeshData
 {
@@ -153,12 +149,10 @@ struct JUSYNC_API FJUSYNCRealtimeMeshData
 			(Triangles.Num() % 3 == 0);
 	}
 
-	// Conversion methods
 	static FJUSYNCRealtimeMeshData FromStandardMesh(const FJUSYNCMeshData& StandardMesh);
 	FJUSYNCMeshData ToStandardMesh() const;
 };
 
-// Point cloud data for USD GeomPoints primitives
 USTRUCT(BlueprintType)
 struct JUSYNC_API FJUSYNCPointCloudData
 {
@@ -194,9 +188,6 @@ struct JUSYNC_API FJUSYNCPointCloudData
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
 	bool bHasNormals = false;
 
-	// Optional LiDAR-ready point buffer. When bHasLidarPoints is true, the
-	// spawner can move this array directly into ULidarPointCloud without
-	// rebuilding it from Positions/Colors/Widths.
 	TArray64<FLidarPointCloudPoint> LidarPoints;
 	bool bHasLidarPoints = false;
 
@@ -368,7 +359,6 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCWorkerStatusReceived, const T
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCWorkerCountReceived, int32, WorkerCount);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCPointCloudReceived, const TArray<FJUSYNCPointCloudData>&, PointCloudData);
 
-// Live update notification from broker (NOTIFY_FILE_UPDATE=300, NOTIFY_COMMIT_COMPLETE=301, V2=302)
 UENUM(BlueprintType)
 enum class EJUSYNCNotificationType : uint8
 {
@@ -397,7 +387,6 @@ struct JUSYNC_API FJUSYNCNotification
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
     int64 Timestamp;
 
-    // V2 fields: hash tracking for diff streaming (int64 for UHT BlueprintType compat)
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Hash")
     int64 HashLo;           // hash128[0] of new data
 
@@ -421,6 +410,7 @@ struct JUSYNC_API FJUSYNCNotification
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCNotificationReceived, const FJUSYNCNotification&, Notification);
 
 // Typed scene / property update protocol events (NOTIFY_SCENE_UPDATE=303, NOTIFY_PROPERTY_UPDATE=304)
+
 UENUM(BlueprintType)
 enum class EJUSYNCSceneChangeType : uint8
 {
@@ -527,49 +517,39 @@ struct JUSYNC_API FJUSYNCProtocolDiagnostics
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCProtocolDiagnosticsReceived, const FJUSYNCProtocolDiagnostics&, Diagnostics);
 
-// ========== BENCHMARKING STRUCTURES ==========
 
-/**
- * Benchmark result for a single operation
- */
 USTRUCT(BlueprintType)
 struct JUSYNC_API FJUSYNCBenchmarkResult
 {
 	GENERATED_BODY()
 
-	// Test identification
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	FString TestName;
 
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	FDateTime Timestamp;
 
-	// Timing metrics (ms)
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float TotalTimeMs;
 
-	// Complexity metrics
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int32 TriangleCount;
 
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int32 VertexCount;
 
-	// Memory metrics (bytes)
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int64 RAMBeforeBytes;
 
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int64 RAMAfterBytes;
 
-	// Performance metrics
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float FPS;
 
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float FrameTimeMs;
 
-	// Additional metrics
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int32 ActorCount;
 
@@ -579,15 +559,12 @@ struct JUSYNC_API FJUSYNCBenchmarkResult
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float SuccessRate;
 
-	// Splitting metrics (for large meshes that exceed RMC limits)
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int32 SplitMeshCount;
 
-	// CPU Usage metrics (percentage)
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float CPUUsagePercent;
 
-	// GPU/VRAM metrics (bytes)
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int64 VRAMBeforeBytes;
 
@@ -597,22 +574,18 @@ struct JUSYNC_API FJUSYNCBenchmarkResult
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int64 VRAMPeakBytes;
 
-	// Detailed RAM metrics
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int64 RAMPeakBytes;
 
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int64 RAMDuringBytes;
 
-	// Thread metrics
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int32 ActiveThreadCount;
 
-	// GPU utilization (percentage)
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float GPUUsagePercent;
 
-	// Hitch detection metrics (frame time spikes)
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int32 HitchCount;
 
@@ -622,30 +595,21 @@ struct JUSYNC_API FJUSYNCBenchmarkResult
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float MaxHitchDurationMs;
 
-	// Measured interactive-window duration (ms). 0 = window not run.
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float InteractWindowMs;
 
-	// Connect start -> first rendered frame with at least one spawned actor (ms). 0 = not captured.
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float FirstFrameMs;
 
-	// Connect start -> last actor of the initial spawn (ms). 0 = not captured.
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float FullSceneMs;
 
-	// Slowest frame inside the interactive window (ms). 0 = not measured.
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float FrameTimeMaxMs;
 
-	// True only if FPS/FrameTimeMs came from the real interactive window.
-	// False means "not measured" (reported as 0), never a synthetic value.
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	bool bFPSMeasured;
 
-	// Network/transfer totals captured from the middleware client report
-	// (benchmark_client.json): total payload received, ZMQ chunk messages,
-	// and file counters for this result's session.
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int64 BytesReceived;
 
@@ -658,13 +622,9 @@ struct JUSYNC_API FJUSYNCBenchmarkResult
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int64 FilesCompleted;
 
-	// Total time from connect start to the last byte of the transfer (ms),
-	// from the middleware client report (timing_ms.connect_to_last_byte_ms).
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float DownloadTotalMs;
 
-	// Cluster-side (ANARI-USD) telemetry folded into this run, fetched live
-	// from the broker at benchmark finalize: per-worker + combined totals.
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int32 ClusterWorkerCount;
 
@@ -689,12 +649,9 @@ struct JUSYNC_API FJUSYNCBenchmarkResult
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float ClusterStoreMsTotal;
 
-	// Full JSON object string (workers[] + totals + broker) embedded verbatim
-	// into the per-result "cluster" field of benchmark_results.json.
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	FString ClusterReport;
 
-	// ----- Pipeline stage timings (written by AJUSYNCBenchmarkActor) -----
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float ConnectTimeMs;
 
@@ -719,7 +676,6 @@ struct JUSYNC_API FJUSYNCBenchmarkResult
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float TeardownTimeMs;
 
-	// ----- Network / data metrics -----
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	float NetworkThroughput_MBps;
 
@@ -729,7 +685,6 @@ struct JUSYNC_API FJUSYNCBenchmarkResult
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int64 TotalBytesDownloaded;
 
-	// ----- Parse / spawn counts -----
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark")
 	int32 MeshCount;
 
@@ -805,37 +760,26 @@ struct JUSYNC_API FJUSYNCBenchmarkResult
 	}
 };
 
-/**
- * Benchmark configuration
- */
 USTRUCT(BlueprintType)
 struct JUSYNC_API FJUSYNCBenchmarkConfig
 {
 	GENERATED_BODY()
 
-	// Enable/disable benchmarking
 	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Benchmark")
 	bool bEnableBenchmarking = false;
 
-	// Output directory for benchmark files
 	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Benchmark")
 	FString OutputDirectory;
 
-	// Append timestamp to filename
 	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Benchmark")
 	bool bAppendTimestamp = true;
 
-	// Output format (0 = CSV, 1 = JSON, 2 = Both)
 	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Benchmark")
 	int32 OutputFormat = 0;
 
-	// Duration (seconds) of the interactive FPS measurement window that the
-	// harness opens after the scene is fully spawned (StartInteractiveWindow).
 	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Benchmark")
 	float InteractiveWindowSeconds = 5.0f;
 
-	// True when this session is a cold start: fresh UE session, no leftover
-	// actors or cache from a previous run (see benchmark/RUNNER_PROTOCOL.md).
 	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Benchmark")
 	bool bColdStart = false;
 
@@ -850,21 +794,15 @@ struct JUSYNC_API FJUSYNCBenchmarkConfig
 	}
 };
 
-// ========== PERFORMANCE METRICS STRUCTURES ==========
 
-/**
- * Comprehensive performance metrics for real-time monitoring
- */
 USTRUCT(BlueprintType)
 struct JUSYNC_API FJUSYNCMetricsData
 {
 	GENERATED_BODY()
 
-	// Timestamp
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics")
 	FDateTime Timestamp;
 
-	// ===== MEMORY USAGE METRICS =====
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Memory")
 	float SystemRAM_Used_GB;
 
@@ -889,7 +827,6 @@ struct JUSYNC_API FJUSYNCMetricsData
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Memory")
 	float AvailableRAM_GB;
 
-	// ===== MESH SPLITTING METRICS =====
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Splitting")
 	int32 TotalMeshesProcessed;
 
@@ -911,7 +848,6 @@ struct JUSYNC_API FJUSYNCMetricsData
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Splitting")
 	float AverageChunksPerSplit;
 
-	// ===== PERFORMANCE TIMING METRICS =====
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Performance")
 	float FrameTime_ms;
 
@@ -936,7 +872,6 @@ struct JUSYNC_API FJUSYNCMetricsData
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Performance")
 	float IdleTime_ms;
 
-	// ===== COMPONENT METRICS =====
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Components")
 	int32 TotalRMCComponents;
 
@@ -958,7 +893,6 @@ struct JUSYNC_API FJUSYNCMetricsData
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Components")
 	int32 VerticesRendered_Millions;
 
-	// ===== STREAMING METRICS =====
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Streaming")
 	float StreamingBandwidth_MBps;
 
@@ -980,7 +914,6 @@ struct JUSYNC_API FJUSYNCMetricsData
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Streaming")
 	FString MemoryPressure;
 
-	// ===== QUALITY METRICS =====
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Quality")
 	int32 CurrentLODLevel;
 
@@ -1005,7 +938,6 @@ struct JUSYNC_API FJUSYNCMetricsData
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Quality")
 	float VisualFidelity_Percent;
 
-	// ===== ERROR METRICS =====
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Errors")
 	int32 TotalErrors;
 
@@ -1027,7 +959,6 @@ struct JUSYNC_API FJUSYNCMetricsData
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Errors")
 	FString WarningLevel;
 
-	// ===== HARDWARE METRICS =====
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Hardware")
 	float CPUUsage_Percent;
 
@@ -1052,12 +983,10 @@ struct JUSYNC_API FJUSYNCMetricsData
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Metrics|Hardware")
 	float GPUTemperature_C;
 
-	// Constructor
 	FJUSYNCMetricsData()
 	{
 		Timestamp = FDateTime::Now();
 
-		// Initialize all metrics to zero/default values
 		SystemRAM_Used_GB = 0.0f;
 		SystemRAM_Total_GB = 0.0f;
 		VRAM_Used_GB = 0.0f;
@@ -1127,37 +1056,28 @@ struct JUSYNC_API FJUSYNCMetricsData
 		GPUTemperature_C = 0.0f;
 	}
 
-	// Helper methods
 	FString ToFormattedString() const;
 	FString ToCSV() const;
 	FString ToJSON() const;
 };
 
-/**
- * Metrics configuration
- */
 USTRUCT(BlueprintType)
 struct JUSYNC_API FJUSYNCMetricsConfig
 {
 	GENERATED_BODY()
 
-	// Enable/disable metrics collection
 	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
 	bool bEnableMetrics = true;
 
-	// Collection frequency (seconds)
 	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
 	float CollectionInterval_Seconds = 1.0f;
 
-	// Maximum history size
 	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
 	int32 MaxHistorySize = 3600; // 1 hour at 1-second intervals
 
-	// Enable real-time display
 	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
 	bool bEnableDisplay = true;
 
-	// Export settings
 	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
 	bool bAutoExport = false;
 
@@ -1167,7 +1087,6 @@ struct JUSYNC_API FJUSYNCMetricsConfig
 	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
 	float ExportInterval_Seconds = 60.0f;
 
-	// Which metrics to collect
 	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
 	bool bCollectMemoryMetrics = true;
 
@@ -1213,5 +1132,4 @@ struct JUSYNC_API FJUSYNCMetricsConfig
 	}
 };
 
-// Metrics collection delegate
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCMetricsUpdated, const FJUSYNCMetricsData&, MetricsData);

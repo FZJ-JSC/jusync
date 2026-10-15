@@ -114,10 +114,6 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|LiveUpdate", meta = (DisplayName = "Enable Live Updates"))
     bool bEnableLiveUpdates;
 
-    /**
-     * Slow backstop poll interval. Broker push notifications are the primary
-     * update path; this only catches missed notifications. Set to 0 to disable.
-     */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|LiveUpdate", meta = (EditCondition = "bEnableLiveUpdates", EditConditionHides))
     float LiveUpdatePollInterval;
 
@@ -130,13 +126,46 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pipeline", meta = (ClampMin = "1", ClampMax = "64"))
     int32 MaxSpawnsPerFrame;
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pipeline")
+    TArray<FString> IgnoredElementPatterns;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pipeline")
+    bool bCollapseElementVariants;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|LiveUpdate", meta = (ClampMin = "0.0", ClampMax = "30.0"))
     float CommitCompleteCooldownSeconds;
+
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Morph")
+    bool bMorphEnabled;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Morph", meta = (ClampMin = "0", ClampMax = "30000"))
+    int32 MeshBlendMs;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Morph", meta = (ClampMin = "8", ClampMax = "30000"))
+    int32 MeshMaxBlendMs;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Morph", meta = (ClampMin = "0", ClampMax = "6"))
+    int32 CloudSteps;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Morph", meta = (ClampMin = "0", ClampMax = "30000"))
+    int32 CloudBlendMs;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Morph", meta = (ClampMin = "8", ClampMax = "30000"))
+    int32 CloudMaxBlendMs;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Morph")
+    bool bCloudFixedSize;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Morph", meta = (ClampMin = "0.0", ClampMax = "2.0", EditCondition = "bCloudFixedSize"))
+    float CloudScreenSizePct;
+
+    UFUNCTION(BlueprintCallable, CallInEditor, Category = "JUSYNC|Spawner|Morph")
+    void ApplyMorphSettings();
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Diagnostics")
     bool bEnablePerfLogging;
 
-    // Point cloud settings
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud", meta = (ClampMin = "0.0"))
     float PointCloudSize;
 
@@ -182,7 +211,6 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud", meta = (InlineEditConditionToggle))
     bool bUseGradientColors;
 
-    // Parsed-file cache
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Cache")
     bool bEnableMeshCache;
 
@@ -195,7 +223,6 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Cache", meta = (EditCondition = "bEnableMeshCache", EditConditionHides))
     bool bCachePointClouds;
 
-    // Time-step animation
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Animation")
     bool bEnableTimeStepAnimation;
 
@@ -205,13 +232,6 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Animation", meta = (EditCondition = "bEnableTimeStepAnimation", EditConditionHides))
     bool bLoopTimeStepAnimation;
 
-    // Automatic benchmark session. When enabled, a pipeline run auto-records
-    // one benchmark result: TTF (connect -> first frame / full scene) is
-    // stamped by the pipeline, an interactive window opens once the initial
-    // spawn completes, and the result + client report are written (CSV/JSON)
-    // shortly after the window closes, or when the session/PIE ends. Nothing
-    // is synthesised: an unmeasured FPS is reported as 0 with fps_measured
-    // false, per benchmark/RUNNER_PROTOCOL.md.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Benchmark")
     bool bEnableBenchmarking;
 
@@ -221,7 +241,6 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Benchmark", meta = (EditCondition = "bEnableBenchmarking", EditConditionHides))
     FString BenchmarkOutputDirectory;
 
-    // 0 = CSV only, 1 = JSON only, 2 = CSV + JSON
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Benchmark", meta = (EditCondition = "bEnableBenchmarking", EditConditionHides))
     int32 BenchmarkOutputFormat;
 
@@ -237,8 +256,6 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Benchmark", meta = (EditCondition = "bEnableBenchmarking", EditConditionHides))
     bool bExportClientBenchmarkReport;
 
-    // Fetch the cluster-side (ANARI-USD) benchmark summary live from the broker
-    // at finalize and fold it (per-worker + combined totals) into the result.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Benchmark", meta = (EditCondition = "bEnableBenchmarking", EditConditionHides))
     bool bIncludeClusterBenchmark;
 
@@ -315,7 +332,6 @@ private:
     void PipelineDownloadNext(UJUSYNCSubsystem* Subsystem);
     void ApplyPointCloudSettingsToSpawner(FJUSYNCPointCloudSpawner* Spawner);
 
-    // Benchmark session helpers
     void MaybeStartBenchmarkSession();
     void ScheduleBenchmarkInteractiveWindow();
     void FinalizeBenchmarkSession();
@@ -325,7 +341,7 @@ private:
     int32 CalculateDynamicTimeout(int64 FileSizeBytes) const;
     void LoadFileThroughPipeline(const FString& Filename, int32 Rank, int64 Size, uint64 HashLo, uint64 HashHi, int32 FileIndex, bool bIsInitial);
     void ApplyParsedFileData(FJUSYNCParsedFileResult&& Result);
-    AActor* SpawnOrUpdateMesh(FJUSYNCCompactMeshRef& Mesh, const FString& Filename, bool bIsRefresh, TArray<AActor*>& ReplacementActors, RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams = nullptr, const TArray<AActor*>* OldMeshActors = nullptr, bool bForceGradientSpawn = false);
+    AActor* SpawnOrUpdateMesh(FJUSYNCCompactMeshRef& Mesh, const FString& Filename, bool bIsRefresh, TArray<AActor*>& ReplacementActors, RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams = nullptr, const TArray<AActor*>* OldMeshActors = nullptr, bool bForceGradientSpawn = false, int32 Rank = 0);
     void DestroyUnreplacedMeshActors(const FString& Filename, const TArray<AActor*>& OldMeshActors, const TArray<AActor*>& ReplacementActors);
     void DestroyUnreplacedPCActors(const FString& Filename, const TArray<AActor*>& OldPCActors, const TSet<FString>& NewPCKeys);
 
@@ -357,7 +373,21 @@ private:
         TArray<FString>& OutPngFiles, TArray<int64>& OutPngSizes, TArray<int32>& OutPngRanks) const;
     bool QueueRefreshFile(const FString& Filename, int32 Rank, int64 Size, uint64 HashLo, uint64 HashHi);
     void UpdateTrackedFileMetadata(const FString& Filename, int32 Rank, int64 Size, uint64 HashLo, uint64 HashHi);
+
+    // Recovers the rank that owns a file. A notification can arrive without an
+    // owner, and asking the broker with rank -1 broadcasts the fetch to every
+    // worker while rank 0's own copy is never served, so a -1 file request stalls
+    // instead of falling back. Resolve it, and only then fall back to rank 0.
+    int32 ResolveFileRank(const FString& Filename, int32 KnownRank) const;
     int32 DestroyFileActors(const FString& Filename);
+
+    TMap<FString, TPair<int32, FString>> ElementVariantWinners;
+    TSet<FString> IgnoredVariantFiles;
+
+    int32 CollapseElementVariants(TArray<FString>& Files, TArray<int64>& Sizes,
+        TArray<int32>& Ranks, TArray<uint64>& HashLo, TArray<uint64>& HashHi);
+
+    bool IsSuppressedElementVariant(const FString& Filename);
 
     void ChainRefreshNext();
     void RetryRemainingFiles();
@@ -392,6 +422,7 @@ private:
     {
         FJUSYNCCompactMeshRef Mesh;
         FString Filename;
+        int32 Rank = 0;
         FVector Loc = FVector::ZeroVector;
         FRotator Rot = FRotator::ZeroRotator;
         FVector Scale = FVector::OneVector;
@@ -412,9 +443,6 @@ private:
     int32 PendingParseTasks;
     int32 PipelineNextIndex;
     int32 PipelineActive;
-    // Initial-download stall watchdog (Tick -> CheckAllDownloadsComplete): a
-    // missed async completion can leave PipelineActive stuck above zero, which
-    // strands the spawner in Downloading and blocks every live update.
     double DownloadStallSince;
     float DownloadWatchdogAcc;
     bool bIsCancelled;
@@ -423,21 +451,11 @@ private:
     TArray<int32> FailedFileIndices;
     TArray<int32> ParseFailedIndices;
 
-    // Live update state
     FTimerHandle LiveUpdateTimerHandle;
     float LiveUpdatePollAccumulator = 0.0f;
 
-    // Initial file-list retry: the broker can come up before any scene files are
-    // committed (e.g. ANARI-usd device binds :5556 at device-creation time while
-    // ParaView's first renderFrame commit lands seconds-to-minutes later). Latching
-    // Error on the first empty response made UE-vs-sender boot order a hard
-    // dependency; retry with a small delay and only error out after exhausting.
     FTimerHandle InitialFileListRetryTimerHandle;
     int32 InitialFileListRetryCount = 0;
-    // "Data ready" event from the broker: the first pushed notification
-    // (FileUpdateV2/CommitComplete) is the authoritative signal that the sender
-    // scene exists, so it triggers the initial file-list fetch directly instead
-    // of relying only on the polling retry.
     bool bInitialKickInFlight = false;
     TMap<FString, AActor*> FileToActorMap;
     TMap<FString, TArray<AActor*>> FilenameToActors;
@@ -451,7 +469,6 @@ private:
     bool bSceneDiffInFlight;
     bool bInitialSpawnDone;
 
-    // Benchmark session state
     bool bBenchmarkSessionActive = false;
     bool bBenchmarkWindowScheduled = false;
     bool bBenchmarkFinalized = false;
@@ -462,7 +479,6 @@ private:
     int64 BenchmarkSceneTriangles = 0;
     FTimerHandle BenchmarkFinalizeTimerHandle;
 
-    // Persistent V2-seen file→rank map.
     TMap<FString, int32> SeenV2Files;
     FTimerHandle SpawnThrottleTimer;
 
@@ -470,19 +486,15 @@ private:
     TUniquePtr<FJUSYNCFileChangeTracker> ChangeTracker;
     TUniquePtr<FJUSYNCAnimationController> AnimationController;
 
-    // P2 latest-wins: middleware abort tokens for in-flight live-update
-    // downloads (filename -> JusyncAbortCreate_C handle). Game thread only.
-    // A superseding notification triggers the token so the stale transfer is
-    // dropped mid-stream instead of downloading + parsing old bytes.
     TMap<FString, uint64> ActiveDownloadAborts;
 
-    // Cancel + free every registered token (pipeline restart / cancel).
     void AbortAllInFlightDownloads();
 
     struct FDeferredSpawnEntry
     {
         TArray<FJUSYNCCompactMeshRef> Meshes;
         FString Filename;
+        int32 Rank = 0;
         TArray<AActor*> OldActors;
         TArray<AActor*> ReplacementActors;
         int32 ExpectedNewMeshes = 0;
@@ -496,6 +508,7 @@ private:
     {
         FJUSYNCCompactMeshRef Mesh;
         FString Filename;
+        int32 Rank = 0;
         bool bIsRefresh = false;
         TArray<AActor*> OldActors;
         int32 ExpectedNewMeshes = 1;

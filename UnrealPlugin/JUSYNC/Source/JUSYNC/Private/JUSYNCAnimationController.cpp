@@ -35,7 +35,7 @@ void FJUSYNCAnimationController::Pause()
 void FJUSYNCAnimationController::ShowAll()
 {
     bPlaying = false;
-    for (const TPair<AActor*, int64>& Pair : ActorToStep)
+    for (const TPair<AActor*, FActorSlot>& Pair : ActorSlots)
     {
         if (Pair.Key && Pair.Key->IsValidLowLevel())
         {
@@ -44,7 +44,7 @@ void FJUSYNCAnimationController::ShowAll()
     }
 }
 
-void FJUSYNCAnimationController::AddActor(const FString& Filename, AActor* Actor)
+void FJUSYNCAnimationController::AddActor(const FString& Filename, AActor* Actor, const FString& InElementName)
 {
     if (!Actor)
     {
@@ -66,7 +66,20 @@ void FJUSYNCAnimationController::AddActor(const FString& Filename, AActor* Actor
     }
 
     Step->Actors.Add(Actor);
-    ActorToStep.Add(Actor, Order);
+
+    const JUSYNCElementNames::FVariant Variant = InElementName.IsEmpty()
+        ? JUSYNCElementNames::Parse(Filename)
+        : JUSYNCElementNames::ParseElement(InElementName);
+
+    FActorSlot& Slot = ActorSlots.FindOrAdd(Actor);
+    if (Slot.Seq == 0)
+    {
+        Slot.Seq = ++NextSeq;
+    }
+    Slot.Order = Order;
+    Slot.Element = Variant.Element;
+    Slot.Uniq = Variant.Uniq;
+
     ApplyVisibility();
 }
 
@@ -77,20 +90,19 @@ void FJUSYNCAnimationController::RemoveActor(AActor* Actor)
         return;
     }
 
-    int64* Order = ActorToStep.Find(Actor);
-    if (Order)
+    if (FActorSlot* Slot = ActorSlots.Find(Actor))
     {
-        FTimeStep* Step = TimeSteps.Find(*Order);
+        FTimeStep* Step = TimeSteps.Find(Slot->Order);
         if (Step)
         {
             Step->Actors.Remove(Actor);
             if (Step->Actors.Num() == 0 && Step->Files.Num() == 0)
             {
-                TimeSteps.Remove(*Order);
-                SortedOrders.Remove(*Order);
+                TimeSteps.Remove(Slot->Order);
+                SortedOrders.Remove(Slot->Order);
             }
         }
-        ActorToStep.Remove(Actor);
+        ActorSlots.Remove(Actor);
     }
 }
 
@@ -111,7 +123,8 @@ void FJUSYNCAnimationController::Clear()
 {
     TimeSteps.Empty();
     SortedOrders.Empty();
-    ActorToStep.Empty();
+    ActorSlots.Empty();
+    NextSeq = 0;
     CurrentIndex = 0;
     Accumulator = 0.0f;
     bPlaying = false;
@@ -163,11 +176,6 @@ int64 FJUSYNCAnimationController::DetectTimeStepOrder(const FString& Filename, F
     OutLabel = FPaths::GetBaseFilename(Filename);
     const FString Base = FPaths::GetBaseFilename(Filename);
 
-    // Preferred: the JUSYNC / ANARI-USD writers encode the sample time after
-    // the last "__" (e.g. "..._Geom__0.250000"). Order by the real value so
-    // fractional and integral seconds sort correctly — the legacy last-digit-run
-    // parser collapses 0.000000/1.000000/2.000000 -> 0 and
-    // 0.250000/1.250000 -> 250000, merging distinct time steps into one bucket.
     const int32 TimeSep = Base.Find(TEXT("__"), ESearchCase::IgnoreCase, ESearchDir::FromEnd);
     if (TimeSep != INDEX_NONE)
     {
@@ -177,18 +185,49 @@ int64 FJUSYNCAnimationController::DetectTimeStepOrder(const FString& Filename, F
         {
             TimeTok = TimeTok.Left(UniqueSuffix);
         }
+
+        // MPI clip keys carry the owning rank between the separator and the time
+        // ("__r1_0.500000"), so a bare IsNumeric() test fails and the fallback
+        // below then reads the trailing decimals as the order - collapsing every
+        // timestep of every rank onto one step. Drop the rank token first.
+        if (TimeTok.StartsWith(TEXT("r"), ESearchCase::IgnoreCase))
+        {
+            const int32 RankSep = TimeTok.Find(TEXT("_"), ESearchCase::CaseSensitive, ESearchDir::FromStart);
+            if (RankSep > 1)
+            {
+                const FString RankDigits = TimeTok.Mid(1, RankSep - 1);
+                if (RankDigits.IsNumeric())
+                {
+                    TimeTok = TimeTok.Mid(RankSep + 1);
+                }
+            }
+        }
+
         if (!TimeTok.IsEmpty() && TimeTok.IsNumeric())
         {
             return static_cast<int64>(FCString::Atod(*TimeTok) * 1000000.0 + 0.5);
         }
     }
 
-    // Fallback: last contiguous digit run (legacy datasets, e.g. cloud_00000020).
+    // A trailing rank mark is not a time step. Without this, "cloud_r1" and
+    // "cloud_r10" are bucketed as steps 1 and 10 and one instant of a partitioned
+    // element is spread over several animation steps; only MPI keys carry "_rN".
+    FString Stripped = Base;
+    const int32 RankUnderscore = Stripped.Find(TEXT("_r"), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+    if (RankUnderscore != INDEX_NONE)
+    {
+        const FString RankTail = Stripped.Mid(RankUnderscore + 2);
+        if (RankTail.IsNumeric() && !RankTail.Contains(TEXT(".")))
+        {
+            Stripped = Stripped.Left(RankUnderscore);
+        }
+    }
+
     int32 Start = INDEX_NONE;
     int32 End = INDEX_NONE;
-    for (int32 i = Base.Len() - 1; i >= 0; --i)
+    for (int32 i = Stripped.Len() - 1; i >= 0; --i)
     {
-        if (FChar::IsDigit(Base[i]))
+        if (FChar::IsDigit(Stripped[i]))
         {
             End = i + 1;
         }
@@ -211,7 +250,7 @@ int64 FJUSYNCAnimationController::DetectTimeStepOrder(const FString& Filename, F
     int64 Order = 0;
     for (int32 i = Start; i < End; ++i)
     {
-        Order = Order * 10 + static_cast<int64>(Base[i] - TEXT('0'));
+        Order = Order * 10 + static_cast<int64>(Stripped[i] - TEXT('0'));
     }
     return Order;
 }
@@ -245,22 +284,83 @@ void FJUSYNCAnimationController::ApplyVisibility()
 {
     if (SortedOrders.Num() <= 1)
     {
-        for (const TPair<AActor*, int64>& Pair : ActorToStep)
+        TSet<AActor*> Winners;
+        ComputeElementWinners(INDEX_NONE, Winners);
+        for (const TPair<AActor*, FActorSlot>& Pair : ActorSlots)
         {
             if (Pair.Key && Pair.Key->IsValidLowLevel())
             {
-                Pair.Key->SetActorHiddenInGame(false);
+                Pair.Key->SetActorHiddenInGame(!Winners.Contains(Pair.Key));
             }
         }
         return;
     }
 
     const int64 CurrentOrder = SortedOrders.IsValidIndex(CurrentIndex) ? SortedOrders[CurrentIndex] : INDEX_NONE;
-    for (const TPair<AActor*, int64>& Pair : ActorToStep)
+    TSet<AActor*> Winners;
+    ComputeElementWinners(CurrentOrder, Winners);
+
+    for (const TPair<AActor*, FActorSlot>& Pair : ActorSlots)
     {
         if (Pair.Key && Pair.Key->IsValidLowLevel())
         {
-            Pair.Key->SetActorHiddenInGame(Pair.Value != CurrentOrder);
+            const bool bVisible = (Pair.Value.Order == CurrentOrder) && Winners.Contains(Pair.Key);
+            Pair.Key->SetActorHiddenInGame(!bVisible);
+        }
+    }
+}
+
+void FJUSYNCAnimationController::ComputeElementWinners(int64 OrderFilter, TSet<AActor*>& OutWinners) const
+{
+    OutWinners.Empty(ActorSlots.Num());
+
+    TMap<FString, FActorSlot> Best;
+    Best.Reserve(ActorSlots.Num());
+
+    for (const TPair<AActor*, FActorSlot>& Pair : ActorSlots)
+    {
+        if (!Pair.Key || !Pair.Key->IsValidLowLevel())
+        {
+            continue;
+        }
+        if (OrderFilter != INDEX_NONE && Pair.Value.Order != OrderFilter)
+        {
+            continue;
+        }
+
+        const FString Key = Pair.Value.Element.IsEmpty()
+            ? FString::Printf(TEXT("%p"), Pair.Key)
+            : Pair.Value.Element;
+
+        FActorSlot* Cur = Best.Find(Key);
+        const bool bNewer = !Cur
+            || Pair.Value.Uniq > Cur->Uniq
+            || (Pair.Value.Uniq == Cur->Uniq && Pair.Value.Seq > Cur->Seq);
+        if (bNewer)
+        {
+            Best.Add(Key, Pair.Value);
+        }
+    }
+
+    for (const TPair<AActor*, FActorSlot>& Pair : ActorSlots)
+    {
+        if (!Pair.Key || !Pair.Key->IsValidLowLevel())
+        {
+            continue;
+        }
+        if (OrderFilter != INDEX_NONE && Pair.Value.Order != OrderFilter)
+        {
+            continue;
+        }
+        const FString Key = Pair.Value.Element.IsEmpty()
+            ? FString::Printf(TEXT("%p"), Pair.Key)
+            : Pair.Value.Element;
+        if (const FActorSlot* Cur = Best.Find(Key))
+        {
+            if (Cur->Seq == Pair.Value.Seq)
+            {
+                OutWinners.Add(Pair.Key);
+            }
         }
     }
 }

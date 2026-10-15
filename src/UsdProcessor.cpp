@@ -1,14 +1,12 @@
 #include "UsdProcessor.h"
 #include "MiddlewareLogging.h"
 
-// GPU acceleration includes (optional - gracefully degrade if not available)
 #ifdef ENABLE_CUDA_ACCELERATION
 #include "GpuContext.h"
 #include "GpuKernels.h"
 #include "GpuValidation.h"
 #endif
 
-// Standard library includes with enhanced safety
 #include <algorithm>
 #include <cstring>
 #include <fstream>
@@ -24,10 +22,7 @@
 #include <future>
 #include <vector>
 #include <string_view>
-// <execution> header: available in libstdc++ (GCC) but NOT in libc++ (clang)
-// PAR_POLICY macro expands to "std::execution::par," on GCC, empty on clang
 #if defined(__clang__)
-// libc++ has no parallel execution policies - algorithms run sequentially
 #define PAR_POLICY
 #else
 #include <execution>
@@ -35,22 +30,15 @@
 #endif
 #include <numeric>      // For parallel reduce
 
-// zstd: broker USD payloads arrive zstd-frame-wrapped (magic-detected,
-// self-describing). JUSYNC_HAS_ZSTD is defined by CMake when libzstd was found.
 #if defined(JUSYNC_HAS_ZSTD)
 #include <zstd.h>
-// ZSTD_getErrorCode() and the ZSTD_error_* enum live in zstd_errors.h; older
-// libzstd releases (<= 1.5.5, e.g. Ubuntu's libzstd-dev) do not expose them
-// via zstd.h, so include it explicitly for portable comparisons.
 #include <zstd_errors.h>
 #endif
 
-// Include TinyUSDZ (LightUSD dev) with error handling
 #include "lightusd.hh"
 #include "usdGeom.hh"   // GeomMesh, GeomPoints, GPrim, GeomPrimvar
 #include "xform.hh"     // Xformable, XformOp
 
-// STB Image with safety wrappers
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_FAILURE_USERMSG
 #define STBI_MAX_DIMENSIONS 16384
@@ -142,12 +130,6 @@ const std::vector<lightusd::value::normal3f>* JusyncGetMeshNormalsZeroCopy(
     return nullptr;
 }
 
-// Resolves VTK's face-varying (per-corner) float2 primvar arrays - exported
-// WITHOUT an accompanying :indices attribute - into per-vertex UVs by taking
-// the first UV each vertex appears with in faceVertexIndices. Returns false
-// when the array length does not match the corner count, e.g. texture coords
-// exported from a different pipeline stage than the triangulated points, so
-// the caller can drop the channel instead of poisoning the whole mesh.
 bool JusyncResolveFaceVaryingUVs(
     lightusd::GeomMesh& mesh,
     const std::vector<lightusd::value::texcoord2f>& cornerUVs,
@@ -188,21 +170,18 @@ bool JusyncResolveFaceVaryingUVs(
 
 namespace anari_usd_middleware {
 
-// Implementation class with enhanced safety features
 class UsdProcessor::UsdProcessorImpl {
 public:
     UsdProcessorImpl() {
         MIDDLEWARE_LOG_INFO("UsdProcessorImpl created with enhanced safety features");
         processingStartTime = std::chrono::steady_clock::now();
-        
-        // Pre-compile regex patterns for performance
+
         try {
             regexPatterns.nonePattern = std::regex("0: None");
             regexPatterns.assetPattern = std::regex("asset:images/");
             regexPatterns.texCoordPattern = std::regex("texCoord2f");
         } catch (const std::regex_error& e) {
             MIDDLEWARE_LOG_ERROR("Failed to compile regex patterns: %s", e.what());
-            // Fall back to runtime compilation if pre-compilation fails
         }
     }
 
@@ -210,78 +189,70 @@ public:
         MIDDLEWARE_LOG_INFO("UsdProcessorImpl destroyed");
     }
 
-    // Stream-based preprocessing for large files - OPTIMIZED VERSION
     std::vector<uint8_t> preprocessUsdContentStreaming(const std::vector<uint8_t>& buffer) {
         MIDDLEWARE_LOG_INFO("Streaming preprocessing of USD content, size: %zu", buffer.size());
-        
+
         if (buffer.empty() || buffer.size() > safety::MAX_BUFFER_SIZE) {
             return buffer;
         }
-        
-        // For very large files, use chunked processing
+
         const size_t CHUNK_SIZE = 64 * 1024; // 64KB chunks
         std::vector<uint8_t> result;
         result.reserve(buffer.size() * 1.1); // Reserve 10% extra
-        
+
         const char* data = reinterpret_cast<const char*>(buffer.data());
         size_t remaining = buffer.size();
         size_t position = 0;
-        
-        // Pre-compile regex patterns once
+
         if (regexPatterns.nonePattern.mark_count() == 0) {
             regexPatterns.nonePattern = std::regex("0: None");
             regexPatterns.assetPattern = std::regex("asset:images/");
             regexPatterns.texCoordPattern = std::regex("texCoord2f");
         }
-        
-        // Use faster string search/replace for common patterns
+
         const std::string nonePatternStr = "0: None";
         const std::string assetPatternStr = "asset:images/";
         const std::string texCoordPatternStr = "texCoord2f";
         const std::string noneReplacement = "0: []";
         const std::string assetReplacement = "@./images/";
         const std::string texCoordReplacement = "texCoord2f[]";
-        
+
         while (remaining > 0) {
             size_t chunkSize = std::min(CHUNK_SIZE, remaining);
             std::string chunk(data + position, chunkSize);
-            
-            // Apply optimized replacements
+
             size_t pos = 0;
             while ((pos = chunk.find(nonePatternStr, pos)) != std::string::npos) {
                 chunk.replace(pos, nonePatternStr.length(), noneReplacement);
                 pos += noneReplacement.length();
             }
-            
+
             pos = 0;
             while ((pos = chunk.find(assetPatternStr, pos)) != std::string::npos) {
                 chunk.replace(pos, assetPatternStr.length(), assetReplacement);
                 pos += assetReplacement.length();
             }
-            
+
             pos = 0;
             while ((pos = chunk.find(texCoordPatternStr, pos)) != std::string::npos) {
                 chunk.replace(pos, texCoordPatternStr.length(), texCoordReplacement);
                 pos += texCoordReplacement.length();
             }
-            
-            // Append processed chunk to result
+
             result.insert(result.end(), chunk.begin(), chunk.end());
-            
+
             position += chunkSize;
             remaining -= chunkSize;
         }
-        
-        MIDDLEWARE_LOG_INFO("Streaming preprocessing complete: %zu -> %zu bytes", 
+
+        MIDDLEWARE_LOG_INFO("Streaming preprocessing complete: %zu -> %zu bytes",
                           buffer.size(), result.size());
         return result;
     }
-    
-    // Enhanced preprocessing with comprehensive validation
+
     std::vector<uint8_t> preprocessUsdContent(const std::vector<uint8_t>& buffer) {
         MIDDLEWARE_LOG_INFO("Preprocessing USD content of size %zu", buffer.size());
 
-        // Validate input buffer
         if (buffer.empty()) {
             MIDDLEWARE_LOG_ERROR("Cannot preprocess empty buffer");
             return buffer;
@@ -293,10 +264,6 @@ public:
             return buffer;
         }
 
-        // Check for large geometry early to avoid unnecessary processing.
-        // Use a buffered string_view find over the head of the buffer instead of
-        // a per-byte strncmp loop (up to 3 comparisons per byte for the first 1MB
-        // of every large file).
         const size_t dataSize = buffer.size();
         bool hasLargeGeometry = false;
         {
@@ -313,8 +280,6 @@ public:
 
         if (hasLargeGeometry) {
             MIDDLEWARE_LOG_INFO("Large geometry detected via streaming scan - applying CRITICAL '0: None' fix only");
-            // MUST still fix "0: None" -> "0: []" even for geometry files, or TinyUSDZ will fail
-            // Only apply the single critical replacement that TinyUSDZ requires
             std::string fileContent(reinterpret_cast<const char*>(buffer.data()), buffer.size());
             const std::string nonePatternStr = "0: None";
             const std::string noneReplacement = "0: []";
@@ -327,7 +292,6 @@ public:
             return std::vector<uint8_t>(fileContent.begin(), fileContent.end());
         }
 
-        // Use streaming processing for large files, regular processing for small files
         const size_t STREAMING_THRESHOLD = 10 * 1024 * 1024; // 10MB
         if (buffer.size() > STREAMING_THRESHOLD) {
             MIDDLEWARE_LOG_INFO("Large file detected (%zu bytes), using streaming preprocessing", buffer.size());
@@ -335,11 +299,9 @@ public:
         }
 
         try {
-            // Convert buffer to string with size validation (only for small files)
             std::string fileContent;
             fileContent.assign(reinterpret_cast<const char*>(buffer.data()), buffer.size());
 
-            // Apply optimized string replacements (faster than regex)
             try {
                 const std::string nonePatternStr = "0: None";
                 const std::string assetPatternStr = "asset:images/";
@@ -373,8 +335,6 @@ public:
                 return buffer;
             }
 
-            // Conditional "line 34" patch: find line by scanning newlines, no split
-            // Find the start of line 34 (0-indexed: the 34th newline-delimited line)
             {
                 size_t lineStart = 0;
                 size_t lineNum = 0;
@@ -414,9 +374,7 @@ public:
         }
     }
 
-    // Enhanced memory monitoring
     bool checkMemoryUsage(size_t additionalBytes = 0) const {
-        // Simple memory usage estimation
         static std::atomic<size_t> currentMemoryUsage{0};
         size_t newUsage = currentMemoryUsage.load() + additionalBytes;
 
@@ -431,14 +389,7 @@ public:
     }
 
 public:
-    // GPU acceleration methods (public for use from UsdProcessor methods)
  #ifdef ENABLE_CUDA_ACCELERATION
-    /**
-     * Transform vertices with GPU acceleration and CPU fallback
-     * @param points Input points from TinyUSDZ
-     * @param transform World transformation matrix
-     * @param outPoints Output transformed points
-     */
     void transformVerticesWithGpu(
         const std::vector<lightusd::value::point3f>& points,
         const glm::mat4& transform,
@@ -448,22 +399,18 @@ public:
             return;
         }
 
-        // Pre-allocate output
         outPoints.resize(points.size());
 
-        // Try GPU if threshold met and available
         bool gpuSuccess = false;
         std::vector<glm::vec3> gpuResult;
-        
+
  #ifdef ENABLE_CUDA_ACCELERATION
-        // Log GPU availability status for debugging
         MIDDLEWARE_LOG_INFO("🔥 GPU Acceleration Check: vertices=%zu, threshold=10000, isAvailable=%d",
                            points.size(), GpuContext::isAvailable() ? 1 : 0);
-        
+
         if (GpuContext::isAvailable() && points.size() >= 10000) {
             MIDDLEWARE_LOG_INFO("🚀 Attempting GPU vertex transformation for %zu vertices", points.size());
-            
-            // Convert input to glm::vec3 for GPU kernel
+
             std::vector<glm::vec3> inputVertices(points.size());
             for (size_t i = 0; i < points.size(); ++i) {
                 inputVertices[i] = glm::vec3(
@@ -473,9 +420,7 @@ public:
                 );
             }
 
-            // Try GPU transformation
             if (GpuKernels::transformVertices(inputVertices, transform, gpuResult)) {
-                // Validate GPU results
                 if (GpuValidation::validateTransformVertices(gpuResult, inputVertices, transform)) {
                     outPoints = std::move(gpuResult);
                     gpuSuccess = true;
@@ -489,62 +434,50 @@ public:
         }
  #endif
 
-        // CPU fallback if GPU not used or failed
         if (!gpuSuccess) {
             const float* m = &transform[0][0];
-            
+
             auto transformVertex = [m](const lightusd::value::point3f& pt) -> glm::vec3 {
                 const float x = static_cast<float>(pt.x);
                 const float y = static_cast<float>(pt.y);
                 const float z = static_cast<float>(pt.z);
-                
-                // Fast NaN/Inf check using integer representation
+
                 const int32_t* ix = reinterpret_cast<const int32_t*>(&x);
                 const int32_t* iy = reinterpret_cast<const int32_t*>(&y);
                 const int32_t* iz = reinterpret_cast<const int32_t*>(&z);
-                
-                // Check if any component is NaN or Inf (exponent bits all 1s)
+
                 if ((*ix & 0x7F800000) == 0x7F800000 ||
                     (*iy & 0x7F800000) == 0x7F800000 ||
                     (*iz & 0x7F800000) == 0x7F800000) {
                     return glm::vec3(0.0f, 0.0f, 0.0f);
                 }
 
-                // Manual matrix multiplication - optimized
                 const float tx = m[0] * x + m[4] * y + m[8] * z + m[12];
                 const float ty = m[1] * x + m[5] * y + m[9] * z + m[13];
                 const float tz = m[2] * x + m[6] * y + m[10] * z + m[14];
-                
-                // Fast validation of transformed vertex
+
                 const int32_t* itx = reinterpret_cast<const int32_t*>(&tx);
                 const int32_t* ity = reinterpret_cast<const int32_t*>(&ty);
                 const int32_t* itz = reinterpret_cast<const int32_t*>(&tz);
-                
+
                 if ((*itx & 0x7F800000) == 0x7F800000 ||
                     (*ity & 0x7F800000) == 0x7F800000 ||
                     (*itz & 0x7F800000) == 0x7F800000) {
                     return glm::vec3(x, y, z);
                 }
-                
+
                 return glm::vec3(tx, ty, tz);
             };
-            
-            // PARALLEL vertex processing using std::transform
+
             std::transform(PAR_POLICY
                           points.begin(), points.end(),
                           outPoints.begin(),
                           transformVertex);
-            
+
             MIDDLEWARE_LOG_DEBUG("CPU vertex transformation complete: %zu vertices", points.size());
         }
     }
 
-    /**
-     * Transform normals with GPU acceleration and CPU fallback
-     * @param normals Input normals from TinyUSDZ
-     * @param normalMatrix 3x3 normal transformation matrix
-     * @param outNormals Output transformed normals
-     */
     void transformNormalsWithGpu(
         const std::vector<lightusd::value::normal3f>& normals,
         const glm::mat3& normalMatrix,
@@ -561,8 +494,7 @@ public:
  #ifdef ENABLE_CUDA_ACCELERATION
         if (GpuContext::isAvailable() && normals.size() >= 10000) {
             MIDDLEWARE_LOG_DEBUG("Attempting GPU normal transformation for %zu normals", normals.size());
-            
-            // Convert input
+
             std::vector<glm::vec3> inputNormals(normals.size());
             for (size_t i = 0; i < normals.size(); ++i) {
                 inputNormals[i] = glm::vec3(
@@ -572,7 +504,6 @@ public:
                 );
             }
 
-            // Try GPU transformation
             if (GpuKernels::transformNormals(inputNormals, normalMatrix, gpuResult)) {
                 if (GpuValidation::validateTransformNormals(gpuResult, inputNormals, normalMatrix)) {
                     outNormals = std::move(gpuResult);
@@ -585,14 +516,12 @@ public:
         }
  #endif
 
-        // CPU fallback
         if (!gpuSuccess) {
             auto transformNormal = [normalMatrix](const lightusd::value::normal3f& nrm) -> glm::vec3 {
-                // Fast NaN/Inf check
                 const int32_t* ix = reinterpret_cast<const int32_t*>(&nrm.x);
                 const int32_t* iy = reinterpret_cast<const int32_t*>(&nrm.y);
                 const int32_t* iz = reinterpret_cast<const int32_t*>(&nrm.z);
-                
+
                 if ((*ix & 0x7F800000) == 0x7F800000 ||
                     (*iy & 0x7F800000) == 0x7F800000 ||
                     (*iz & 0x7F800000) == 0x7F800000) {
@@ -604,31 +533,24 @@ public:
                                   static_cast<float>(nrm.z));
                 glm::vec3 transformedNormal = normalMatrix * normalVec;
 
-                // Fast length calculation and normalization
                 float lengthSquared = glm::dot(transformedNormal, transformedNormal);
                 if (lengthSquared > safety::EPSILON * safety::EPSILON) {
                     float invLength = 1.0f / std::sqrt(lengthSquared);
                     return transformedNormal * invLength;
                 }
-                
+
                 return glm::vec3(0.0f, 1.0f, 0.0f);  // Default up vector
             };
 
-            // PARALLEL normal processing
             std::transform(PAR_POLICY
                           normals.begin(), normals.end(),
                           outNormals.begin(),
                           transformNormal);
-            
+
             MIDDLEWARE_LOG_DEBUG("CPU normal transformation complete: %zu normals", normals.size());
         }
     }
 
-    /**
-     * Process UVs with GPU acceleration and CPU fallback
-     * @param uvs Input UV coordinates from TinyUSDZ
-     * @param outUVs Output processed UVs
-     */
     void processUVsWithGpu(
         const std::vector<lightusd::value::texcoord2f>& uvs,
         std::vector<glm::vec2>& outUVs)
@@ -644,14 +566,12 @@ public:
  #ifdef ENABLE_CUDA_ACCELERATION
         if (GpuContext::isAvailable() && uvs.size() >= 10000) {
             MIDDLEWARE_LOG_DEBUG("Attempting GPU UV processing for %zu UVs", uvs.size());
-            
-            // Convert input
+
             std::vector<glm::vec2> inputUVs(uvs.size());
             for (size_t i = 0; i < uvs.size(); ++i) {
                 inputUVs[i] = glm::vec2(uvs[i].s, uvs[i].t);
             }
 
-            // Try GPU processing
             if (GpuKernels::processUVs(inputUVs, gpuResult)) {
                 if (GpuValidation::validateProcessUVs(gpuResult, inputUVs)) {
                     outUVs = std::move(gpuResult);
@@ -664,9 +584,7 @@ public:
         }
  #endif
 
-        // CPU fallback
         if (!gpuSuccess) {
-            // PARALLEL UV extraction and processing
             std::transform(PAR_POLICY
                           uvs.begin(), uvs.end(),
                           outUVs.begin(),
@@ -674,36 +592,32 @@ public:
                               return glm::vec2(uv.s, uv.t);
                           });
 
-            // Normalize and validate UVs (parallel)
             std::for_each(PAR_POLICY outUVs.begin(), outUVs.end(), [](glm::vec2& uv) {
-                // Fast NaN/Inf check using integer representation
                 const int32_t* ix = reinterpret_cast<const int32_t*>(&uv.x);
                 const int32_t* iy = reinterpret_cast<const int32_t*>(&uv.y);
-                
+
                 if ((*ix & 0x7F800000) == 0x7F800000 || (*iy & 0x7F800000) == 0x7F800000) {
                     uv = glm::vec2(0.0f, 0.0f);
                 } else {
-                    // Clamp UV coordinates to reasonable range
                     uv.x = std::clamp(uv.x, -10.0f, 10.0f);
                     uv.y = std::clamp(uv.y, -10.0f, 10.0f);
                 }
             });
-            
+
             MIDDLEWARE_LOG_DEBUG("CPU UV processing complete: %zu UVs", uvs.size());
         }
     }
  #endif
 
 private:
-    // Pre-compiled regex patterns for performance
     struct RegexPatterns {
         std::regex nonePattern;
         std::regex assetPattern;
         std::regex texCoordPattern;
-        
+
         RegexPatterns() = default;
     };
-    
+
     RegexPatterns regexPatterns;
     std::chrono::steady_clock::time_point processingStartTime;
 
@@ -711,16 +625,10 @@ public:
     std::atomic<size_t> memoryLimitBytes{std::numeric_limits<int64_t>::max()}; // unlimited, synced by setMemoryLimit
     std::vector<std::string> extractClipsFromString(std::string_view content);
 
-    // Per-file cache of the (name, type) that yielded vertex colors for a
-    // previous mesh in the same file: meshes inside one USD file are usually
-    // homogeneous, so later meshes skip the multi-name x multi-type probe.
-    // Cleared at the start of every LoadUSDBufferFromRaw.
-    // type: 0 = color4f[], 1 = color3f[]
     std::string colorCacheName;
     int colorCacheType = -1;
 };
 
-// Enhanced MeshData validation methods
 std::pair<glm::vec3, glm::vec3> UsdProcessor::MeshData::getBounds() const {
     if (points.empty()) {
         return {glm::vec3(0.0f), glm::vec3(0.0f)};
@@ -767,12 +675,10 @@ bool UsdProcessor::MeshData::validateGeometry() const {
     return true;
 }
 
-// Constructor and destructor with enhanced safety
 UsdProcessor::UsdProcessor() : pImpl(std::make_unique<UsdProcessorImpl>()) {
     MIDDLEWARE_LOG_INFO("UsdProcessor created with enhanced safety features");
     stats.reset();
-    
-    // Initialize GPU context on startup
+
 #ifdef ENABLE_CUDA_ACCELERATION
     MIDDLEWARE_LOG_INFO("🔥 Initializing GPU acceleration support...");
     if (GpuContext::getInstance().initialize()) {
@@ -790,12 +696,10 @@ UsdProcessor::~UsdProcessor() {
     MIDDLEWARE_LOG_INFO("UsdProcessor destroyed");
     shutdownRequested.store(true);
 
-    // Wait for any ongoing processing to complete
     std::unique_lock<std::shared_mutex> lock(processingMutex);
     MIDDLEWARE_LOG_INFO("UsdProcessor shutdown complete");
 }
 
-// Enhanced texture creation with comprehensive validation
 UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vector<uint8_t>& buffer,
                                                                const std::string& expectedFormat) {
     std::shared_lock<std::shared_mutex> lock(processingMutex);
@@ -804,7 +708,6 @@ UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vecto
 
     TextureData textureData;
 
-    // MEMORY SAFETY: Validate input buffer
     if (buffer.empty()) {
         MIDDLEWARE_LOG_ERROR("CreateTextureFromBuffer: Empty buffer");
         stats.processingErrors.fetch_add(1);
@@ -818,7 +721,6 @@ UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vecto
         return textureData;
     }
 
-    // MEMORY SAFETY: Check buffer data pointer validity
     if (!buffer.data()) {
         MIDDLEWARE_LOG_ERROR("Buffer has null data pointer despite non-zero size: %zu", buffer.size());
         stats.processingErrors.fetch_add(1);
@@ -828,10 +730,8 @@ UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vecto
     try {
         int width, height, channels;
 
-        // Use STB image with enhanced error handling
         stbi_set_flip_vertically_on_load(0); // Don't flip for consistency
 
-        // MEMORY SAFETY: Validate buffer size for STB processing
         if (buffer.size() > INT_MAX) {
             MIDDLEWARE_LOG_ERROR("Buffer too large for STB image processing: %zu bytes (max: %d)",
                                 buffer.size(), INT_MAX);
@@ -839,7 +739,6 @@ UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vecto
             return textureData;
         }
 
-        // MEMORY SAFETY: Double-check buffer pointer before passing to STB
         const unsigned char* bufferPtr = buffer.data();
         if (!bufferPtr) {
             MIDDLEWARE_LOG_ERROR("Buffer data pointer is null before STB processing");
@@ -861,7 +760,6 @@ UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vecto
             return textureData;
         }
 
-        // MEMORY SAFETY: Validate dimensions returned by STB
         if (width <= 0 || height <= 0) {
             MIDDLEWARE_LOG_ERROR("Invalid image dimensions from STB: %dx%d", width, height);
             stbi_image_free(imageData);
@@ -869,9 +767,7 @@ UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vecto
             return textureData;
         }
 
-        // MEMORY SAFETY: Check for potential overflow in size calculation
         if (width > 0 && height > 0) {
-            // Check if multiplication would overflow
             size_t maxAllowedWidth = safety::MAX_BUFFER_SIZE / static_cast<size_t>(height) / 4;
             if (static_cast<size_t>(width) > maxAllowedWidth) {
                 MIDDLEWARE_LOG_ERROR("Image dimensions would cause overflow: %dx%d", width, height);
@@ -881,7 +777,6 @@ UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vecto
             }
         }
 
-        // Calculate expected data size with overflow protection
         size_t expectedDataSize = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
         if (expectedDataSize > safety::MAX_BUFFER_SIZE) {
             MIDDLEWARE_LOG_ERROR("Decoded image too large: %zu bytes (max: %zu)",
@@ -891,20 +786,17 @@ UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vecto
             return textureData;
         }
 
-        // MEMORY SAFETY: Validate imageData pointer after STB processing
         if (!imageData) {
             MIDDLEWARE_LOG_ERROR("STB returned null image data pointer");
             stats.processingErrors.fetch_add(1);
             return textureData;
         }
 
-        // Handle gradient line extraction (height == 2)
         if (height == 2) {
             MIDDLEWARE_LOG_INFO("Detected gradient image, extracting top row");
 
             size_t rowSize = static_cast<size_t>(width) * 4;
 
-            // MEMORY SAFETY: Validate row size before allocation
             if (rowSize == 0 || rowSize > safety::MAX_BUFFER_SIZE) {
                 MIDDLEWARE_LOG_ERROR("Invalid gradient row size: %zu", rowSize);
                 stbi_image_free(imageData);
@@ -917,10 +809,8 @@ UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vecto
                 textureData.data.reserve(rowSize);
                 textureData.data.resize(rowSize);
 
-                // MEMORY SAFETY: Safe copy with bounds checking
                 std::memcpy(textureData.data.data(), imageData, rowSize);
 
-                // Verify the copy worked correctly
                 if (textureData.data.size() != rowSize) {
                     MIDDLEWARE_LOG_ERROR("Gradient data copy size mismatch: expected %zu, got %zu",
                                         rowSize, textureData.data.size());
@@ -951,16 +841,13 @@ UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vecto
             return textureData;
         }
 
-        // Standard image processing
         try {
             textureData.data.clear();
             textureData.data.reserve(expectedDataSize);
             textureData.data.resize(expectedDataSize);
 
-            // MEMORY SAFETY: Safe copy with validation
             std::memcpy(textureData.data.data(), imageData, expectedDataSize);
 
-            // Verify the copy worked correctly
             if (textureData.data.size() != expectedDataSize) {
                 MIDDLEWARE_LOG_ERROR("Image data copy size mismatch: expected %zu, got %zu",
                                     expectedDataSize, textureData.data.size());
@@ -990,7 +877,6 @@ UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vecto
 
         stbi_image_free(imageData);
 
-        // Validate final texture data
         if (!textureData.isValid()) {
             MIDDLEWARE_LOG_ERROR("Created texture data failed validation");
             textureData.clear();
@@ -1021,7 +907,6 @@ UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vecto
     }
 }
 
-// Thin wrapper: delegates to pointer-based overload
 bool UsdProcessor::LoadUSDBuffer(const std::vector<uint8_t>& buffer,
                                  const std::string& fileName,
                                  std::vector<MeshData>& outMeshData,
@@ -1031,8 +916,7 @@ bool UsdProcessor::LoadUSDBuffer(const std::vector<uint8_t>& buffer,
 }
 
 // Pointer-based overload: TRUE zero-copy when no preprocessing is required.
-// Callers pass raw buffer + size directly (e.g., from TArray<uint8> or external memory).
-// A single working copy is only made for the "0: None"/"asset:images/"/"texCoord2f" fix.
+
 bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_size,
                                         const std::string& fileName,
                                         std::vector<MeshData>& outMeshData,
@@ -1046,18 +930,16 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
 
     MIDDLEWARE_LOG_INFO("Loading USD from buffer, size: %zu, filename: %s", buffer_size, fileName.c_str());
 
-    // Clear output data first
     outMeshData.clear();
     if (outPointCloudData) {
         outPointCloudData->clear();
     }
 
     // The UsdProcessor instance is thread_local and reused across files:
-    // invalidate the per-file vertex-color probe cache.
+
     pImpl->colorCacheName.clear();
     pImpl->colorCacheType = -1;
 
-    // Validate inputs
     if (buffer_size == 0) {
         MIDDLEWARE_LOG_ERROR("Cannot load USD from empty buffer");
         stats.processingErrors.fetch_add(1);
@@ -1082,21 +964,12 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
             progressCallback(0.1f, "Preprocessing USD content");
         }
 
-        // ---- Self-describing wire format: zstd framing -------------------------
-        // The broker zstd-compresses USD payloads at store time. The frame is
-        // detected by the zstd magic (0xFD2FB528) in the first 4 bytes, so no
-        // wire-protocol change is involved: uncompressed payloads pass through
-        // untouched, and compressed ones are transparently decompressed here
-        // (the single C API choke point every parse path funnels through).
         const uint8_t* wirePtr = buffer;
         size_t wireSize = buffer_size;
-        // Reused across parses on this thread: keeps the (large) decompressed
-        // allocation and its capacity alive instead of paying for a fresh heap
-        // round-trip on every file.
         static thread_local std::vector<uint8_t> decompressed;
 #if defined(JUSYNC_HAS_ZSTD)
         // Explicit byte compare (not an endianness-dependent uint32_t compare):
-        // zstd frames begin with 28 B5 2F FD on the wire.
+
         if (wireSize >= 4 &&
             wirePtr[0] == 0x28 && wirePtr[1] == 0xB5 &&
             wirePtr[2] == 0x2F && wirePtr[3] == 0xFD) {
@@ -1121,8 +994,6 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
                     }
                     dstCapacity = static_cast<size_t>(contentSize);
                 } else {
-                    // Unknown content size: start small and grow if the static API
-                    // reports dstSize_tooSmall, rather than guessing a fixed ratio.
                     const size_t initialGuess = std::max<size_t>(
                         1u << 20,
                         wireSize < (size_t(1) << 60) ? wireSize * 4 : size_t(1) << 60);
@@ -1170,31 +1041,13 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
         }
 #endif // JUSYNC_HAS_ZSTD
 
-        // Binary USDC detection (checked AFTER zstd, since the broker compresses
-        // binary USD). The ASCII text transforms below must NOT run on binary
-        // content: a byte replacement inside a USDC string table would corrupt
-        // its length-prefixed records.
         const bool isBinaryUsdc = wireSize >= 8 && std::memcmp(wirePtr, "PXR-USDC", 8) == 0;
 
-        // TRUE ZERO-COPY fast path: scan the raw buffer for any byte that would
-        // require a transform. Binary (.usdc) files never need one. For ASCII
-        // .usda, note that both empty and real timeSampled arrays ("0: None",
-        // "0: [(x,y,z)...]") are handled natively by TinyUSDZ (verified
-        // empirically), so they do NOT force a copy.
-        //
-        // Only the genuinely length-changing text substitutions below
-        // (which cannot be done in the read-only caller buffer) remain.
-        // When none are present we hand the caller's pointer straight to
-        // TinyUSDZ with ZERO copies.
         const std::string assetPatternStr = "asset:images/";
         const std::string assetReplacement = "@./images/";
         const std::string texCoordPatternStr = "texCoord2f";
         const std::string texCoordReplacement = "texCoord2f[]";
 
-        // Zero-copy scan for any transform-forcing token. A buffered string_view
-        // find uses block-wise comparison instead of the old per-byte loop (up to
-        // 2 memcmps per byte across the entire buffer). Skipped entirely for
-        // binary USDC (see isBinaryUsdc).
         bool needsPreprocess = false;
         if (!isBinaryUsdc && wireSize > 0) {
             const std::string_view raw(reinterpret_cast<const char*>(wirePtr), wireSize);
@@ -1204,13 +1057,6 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
             }
         }
 
-        // Holds the single transformed copy when preprocessing is required.
-        // Kept at function scope so it stays alive for the whole parse + reference
-        // resolution pass; when not needed it is empty and parsePtr points at the
-        // caller's original buffer (the true zero-copy path).
-        // thread_local: the transformed text buffer is large and only needed for
-        // files that actually contain a rewrite-forcing token, so reusing the
-        // allocation across parses on the same thread avoids a per-file realloc.
         static thread_local std::string content;
         static thread_local std::string fixedContent; // holds fixed content for clip extraction
 
@@ -1218,8 +1064,6 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
         size_t parseSize = wireSize;
 
         if (needsPreprocess) {
-            // Copy exactly once, then transform in place. This replaces the old
-            // two-copy chain (std::string content -> std::vector processedBuffer).
             content.assign(reinterpret_cast<const char*>(wirePtr), wireSize);
 
             size_t pos = 0;
@@ -1233,7 +1077,6 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
                 pos += texCoordReplacement.length();
             }
 
-            // Check if this contains large geometry arrays
             if (content.find("int[] faceVertexIndices") != std::string::npos ||
                 content.find("point3f[] points") != std::string::npos ||
                 content.find("float3[] points") != std::string::npos) {
@@ -1248,7 +1091,6 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
             MIDDLEWARE_LOG_INFO("USD content requires no rewrite - parsing caller buffer directly (true zero-copy)");
         }
 
-        // LIMITED DEBUG: Only show first 200 characters for debugging
         if (parseSize > 200) {
             std::string preview(reinterpret_cast<const char*>(parsePtr), 200);
             preview += "... [truncated for debug]";
@@ -1262,7 +1104,6 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
             progressCallback(0.2f, "Detecting file format");
         }
 
-        // Detect file format
         bool isUSDZ = (fileName.find(".usdz") != std::string::npos);
         if (isUSDZ) {
             MIDDLEWARE_LOG_INFO("Detected USDZ format file");
@@ -1272,7 +1113,6 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
             progressCallback(0.3f, "Loading USD stage");
         }
 
-        // Load USD stage with enhanced options
         lightusd::Stage stage;
         std::string warnings, errors;
         lightusd::USDLoadOptions options;
@@ -1294,7 +1134,6 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
         if (!loadResult) {
             MIDDLEWARE_LOG_ERROR("TinyUSDZ_load_FAILED: file='%s' size=%zu errors='%s' warnings='%s'",
                 fileName.c_str(), parseSize, errors.c_str(), warnings.c_str());
-            // Log first 300 chars of buffer to diagnose if it's actually USD content
             size_t previewLen = std::min(parseSize, static_cast<size_t>(300));
             std::string preview(reinterpret_cast<const char*>(parsePtr), previewLen);
             MIDDLEWARE_LOG_ERROR("TinyUSDZ_buffer_preview: '...%s'...", preview.c_str());
@@ -1312,7 +1151,6 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
             progressCallback(0.5f, "Processing primitives");
         }
 
-        // Process main stage
         glm::mat4 identity(1.0f);
         size_t initialMeshCount = outMeshData.size();
 
@@ -1338,12 +1176,9 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
             progressCallback(0.7f, "Resolving references");
         }
 
-        // Enhanced reference resolution
         if (referenceResolutionEnabled.load() && (outMeshData.empty() || hasEmptyGeometry(outMeshData))) {
             MIDDLEWARE_LOG_INFO("Attempting reference resolution for missing geometry");
 
-            // resolveReferences needs a std::vector<uint8_t>; build a view only
-            // on this rare reference-resolution path (which already re-reads from disk).
             std::vector<uint8_t> refBuffer(parsePtr, parsePtr + parseSize);
             if (!resolveReferences(stage, refBuffer, fileName, outMeshData, progressCallback, &fixedContent)) {
                 MIDDLEWARE_LOG_WARNING("Reference resolution completed with some failures");
@@ -1354,7 +1189,6 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
             progressCallback(0.9f, "Validating mesh data");
         }
 
-        // Validate all mesh data
         auto it = outMeshData.begin();
         while (it != outMeshData.end()) {
             if (!it->isValid()) {
@@ -1369,12 +1203,10 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
             progressCallback(1.0f, "Processing complete");
         }
 
-        // Update statistics
         stats.filesProcessed.fetch_add(1);
         stats.meshesExtracted.fetch_add(outMeshData.size());
         stats.totalBytesProcessed.fetch_add(buffer_size);
 
-        // LIMITED DEBUG: Only show mesh statistics for RealtimeMesh, not full data
         MIDDLEWARE_LOG_INFO("USD processing complete: %zu valid meshes extracted for RealtimeMesh", outMeshData.size());
 
         for (size_t i = 0; i < outMeshData.size(); ++i) {
@@ -1398,13 +1230,11 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
 }
 
 
-// Enhanced disk loading with file validation
 bool UsdProcessor::LoadUSDFromDisk(const std::string& filePath,
                                   std::vector<MeshData>& outMeshData,
                                   ProgressCallback progressCallback) {
     MIDDLEWARE_LOG_INFO("Loading USD from disk: %s", filePath.c_str());
 
-    // Validate file path
     if (!validateFilePath(filePath, true)) {
         MIDDLEWARE_LOG_ERROR("Invalid file path: %s", filePath.c_str());
         return false;
@@ -1415,7 +1245,6 @@ bool UsdProcessor::LoadUSDFromDisk(const std::string& filePath,
             progressCallback(0.1f, "Reading file from disk");
         }
 
-        // Read file with size validation
         std::ifstream file(filePath, std::ios::binary | std::ios::ate);
         if (!file.is_open()) {
             MIDDLEWARE_LOG_ERROR("Failed to open file: %s", filePath.c_str());
@@ -1442,7 +1271,6 @@ bool UsdProcessor::LoadUSDFromDisk(const std::string& filePath,
             progressCallback(0.2f, "File loaded, processing USD");
         }
 
-        // Use existing buffer processing
         return LoadUSDBuffer(buffer, filePath, outMeshData, nullptr, progressCallback);
 
     } catch (const std::exception& e) {
@@ -1452,7 +1280,6 @@ bool UsdProcessor::LoadUSDFromDisk(const std::string& filePath,
     }
 }
 
-// Configuration methods with validation
 void UsdProcessor::setMaxRecursionDepth(int32_t maxDepth) {
     if (maxDepth >= 1 && maxDepth <= 1000) {
         maxRecursionDepth.store(maxDepth);
@@ -1498,13 +1325,11 @@ void UsdProcessor::resetProcessingStats() {
     MIDDLEWARE_LOG_INFO("Processing statistics reset");
 }
 
-// Enhanced format validation
 bool UsdProcessor::validateUSDFormat(const std::vector<uint8_t>& buffer, const std::string& fileName) {
     if (buffer.empty() || fileName.empty()) {
         return false;
     }
 
-    // Check file extension
     std::string extension = std::filesystem::path(fileName).extension().string();
     std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);
 
@@ -1512,12 +1337,10 @@ bool UsdProcessor::validateUSDFormat(const std::vector<uint8_t>& buffer, const s
         return false;
     }
 
-    // Basic content validation
     if (buffer.size() < 10) { // Minimum reasonable size
         return false;
     }
 
-    // Check for USD magic bytes or text patterns — use string_view, no copy
     size_t checkLen = std::min(buffer.size(), static_cast<size_t>(1000));
     std::string_view content(reinterpret_cast<const char*>(buffer.data()), checkLen);
 
@@ -1527,7 +1350,6 @@ bool UsdProcessor::validateUSDFormat(const std::vector<uint8_t>& buffer, const s
             content.find("over ") != std::string::npos);
 }
 
-// Static utility methods
 std::vector<std::string> UsdProcessor::getSupportedExtensions() {
     return {".usd", ".usda", ".usdc", ".usdz"};
 }
@@ -1543,7 +1365,6 @@ bool UsdProcessor::isSupportedExtension(const std::string& extension) {
     return std::find(supported.begin(), supported.end(), ext) != supported.end();
 }
 
-// Private helper methods implementation
 
 bool UsdProcessor::ProcessPrim(void* prim,
                                std::vector<MeshData>& meshDataArray,
@@ -1552,7 +1373,6 @@ bool UsdProcessor::ProcessPrim(void* prim,
                                int32_t depth) {
     MIDDLEWARE_VALIDATE_POINTER(prim, "ProcessPrim");
 
-    // Check recursion depth limit
     if (depth >= maxRecursionDepth.load()) {
         MIDDLEWARE_LOG_WARNING("Maximum recursion depth reached: %d", depth);
         return false;
@@ -1571,7 +1391,6 @@ bool UsdProcessor::ProcessPrim(void* prim,
                            usdPrim.prim_type_name().c_str(),
                            depth);
 
-        // Get and validate local transform
         glm::mat4 localTransform = GetLocalTransform(prim);
         if (!validateTransform(localTransform)) {
             MIDDLEWARE_LOG_WARNING("Invalid transform for prim: %s, using identity",
@@ -1579,7 +1398,6 @@ bool UsdProcessor::ProcessPrim(void* prim,
             localTransform = glm::mat4(1.0f);
         }
 
-        // Compute world transform
         glm::mat4 worldTransform = parentTransform * localTransform;
         if (!validateTransform(worldTransform)) {
             MIDDLEWARE_LOG_ERROR("Invalid world transform computed for prim: %s",
@@ -1587,7 +1405,6 @@ bool UsdProcessor::ProcessPrim(void* prim,
             return false;
         }
 
-        // Check for point cloud primitive FIRST (def Points)
         const lightusd::GeomPoints* pts = usdPrim.as<lightusd::GeomPoints>();
         if (pts) {
             MIDDLEWARE_LOG_INFO("Found point cloud primitive: %s", usdPrim.element_name().c_str());
@@ -1607,9 +1424,6 @@ bool UsdProcessor::ProcessPrim(void* prim,
             }
         }
 
-        // Check for point instancer (def PointInstancer) — ANARI instanced
-        // point clouds stream as time-sampled PointInstancer positions; flatten
-        // them into a cloud (tinyusdz parses the prim but nothing consumed it).
         const lightusd::GeomPointInstancer* inst =
             usdPrim.as<lightusd::GeomPointInstancer>();
         if (inst && outPointCloudData) {
@@ -1626,13 +1440,11 @@ bool UsdProcessor::ProcessPrim(void* prim,
             }
         }
 
-        // Check if this is a mesh primitive (skip if already handled as point cloud)
         if (!pts) {
             const lightusd::GeomMesh* mesh = usdPrim.as<lightusd::GeomMesh>();
             if (mesh) {
                 MIDDLEWARE_LOG_DEBUG("Found mesh primitive: %s", usdPrim.element_name().c_str());
 
-                // Check memory limits before processing
                 if (!checkMemoryLimit(sizeof(MeshData) + 1000000)) { // Estimate 1MB per mesh
                     MIDDLEWARE_LOG_ERROR("Memory limit would be exceeded processing mesh: %s",
                                         usdPrim.element_name().c_str());
@@ -1662,22 +1474,18 @@ bool UsdProcessor::ProcessPrim(void* prim,
             }
         }
 
-        // Process children recursively - optimized parallel processing
         const auto& children = usdPrim.children();
         const size_t childCount = children.size();
-        
+
         if (childCount > 1 && depth < 3) { // Limit parallelism depth to avoid overhead
-            // Use parallel processing only for significant workloads
-            // Threshold based on expected processing time
             const size_t PARALLEL_THRESHOLD = 4; // Process at least 4 children in parallel
-            
+
             if (childCount >= PARALLEL_THRESHOLD) {
-                // Use parallel processing with reduced thread creation overhead
                 std::vector<std::future<bool>> futures;
                 futures.reserve(childCount);
                 std::vector<std::vector<MeshData>> childResults(childCount);
                 std::vector<std::vector<PointCloudData>> childPCResults(childCount);
-                
+
                 for (size_t i = 0; i < childCount; ++i) {
                     futures.push_back(std::async(std::launch::async, [&, i]() {
                         std::vector<MeshData> localMeshData;
@@ -1693,12 +1501,10 @@ bool UsdProcessor::ProcessPrim(void* prim,
                         return result;
                     }));
                 }
-                
-                // Collect results efficiently
+
                 for (size_t i = 0; i < futures.size(); ++i) {
                     try {
                         futures[i].get(); // Wait for completion
-                        // Merge mesh results
                         auto& result = childResults[i];
                         if (!result.empty()) {
                             meshDataArray.reserve(meshDataArray.size() + result.size());
@@ -1706,7 +1512,6 @@ bool UsdProcessor::ProcessPrim(void* prim,
                                                 std::make_move_iterator(result.begin()),
                                                 std::make_move_iterator(result.end()));
                         }
-                        // Merge point cloud results
                         auto& pcResult = childPCResults[i];
                         if (!pcResult.empty() && outPointCloudData) {
                             outPointCloudData->reserve(outPointCloudData->size() + pcResult.size());
@@ -1719,7 +1524,6 @@ bool UsdProcessor::ProcessPrim(void* prim,
                     }
                 }
             } else {
-                // Sequential processing for small numbers
                 for (const auto& child : children) {
                     if (!ProcessPrim(const_cast<lightusd::Prim*>(&child),
                                     meshDataArray, outPointCloudData, worldTransform, depth + 1)) {
@@ -1729,7 +1533,6 @@ bool UsdProcessor::ProcessPrim(void* prim,
                 }
             }
         } else {
-            // Sequential processing for small numbers or deep recursion
             for (const auto& child : children) {
                 if (!ProcessPrim(const_cast<lightusd::Prim*>(&child),
                                 meshDataArray, outPointCloudData, worldTransform, depth + 1)) {
@@ -1759,13 +1562,9 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
 
     try {
         lightusd::GeomMesh* geomMesh = static_cast<lightusd::GeomMesh*>(mesh);
-                // NEW: Extract subdivision scheme
-        // NEW: Extract subdivision scheme
         std::string subdivScheme = "none";
         try {
-            // TinyUSDZ returns the value directly, not via pointer
             auto subdivValue = geomMesh->subdivisionScheme.get_value();
-            // Convert SubdivisionScheme enum to string
             if (subdivValue == lightusd::GeomMesh::SubdivisionScheme::CatmullClark) {
                 subdivScheme = "catmullClark";
             } else if (subdivValue == lightusd::GeomMesh::SubdivisionScheme::Loop) {
@@ -1782,7 +1581,6 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         }
         outMeshData.subdivisionScheme = subdivScheme;
 
-        // NEW: Extract doubleSided attribute
         try {
             bool doubleSidedValue = geomMesh->doubleSided.get_value();
             outMeshData.doubleSided = doubleSidedValue;
@@ -1793,10 +1591,6 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         }
 
 
-        // Extract points with validation.
-        // Zero-copy fast path: a static (non-timesampled) `points` attribute is
-        // read straight from LightUSD's internal storage; only timesampled or
-        // connected attributes fall back to the by-value copy.
         std::vector<lightusd::value::point3f> pointsCopy;
         const std::vector<lightusd::value::point3f>* pointsPtr =
             JusyncGetStaticVector<lightusd::value::point3f>(geomMesh->points);
@@ -1816,15 +1610,12 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             return false;
         }
 
-        // Performance optimization: Only log debug info for large meshes or in debug mode
         if (points.size() > 10000) {
             MIDDLEWARE_LOG_DEBUG("Extracting large mesh with %zu points", points.size());
         }
 
-        // Start timing for performance measurement
         auto vertexStartTime = std::chrono::high_resolution_clock::now();
 
-        // Fast NaN/Inf test via raw bits (exponent all set)
         auto isFiniteFloat = [](float v) -> bool {
             const int32_t* i = reinterpret_cast<const int32_t*>(&v);
             return (*i & 0x7F800000) != 0x7F800000;
@@ -1833,11 +1624,6 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             return isFiniteFloat(p.x) && isFiniteFloat(p.y) && isFiniteFloat(p.z);
         };
 
-        // Transform and validate points. In the common case the world transform
-        // is identity, and value::point3f and glm::vec3 are layout-compatible
-        // float[3]s — the whole array is then a single memcpy plus a parallel
-        // non-finite scan (zeroing the rare bad vertices) instead of per-vertex
-        // matrix math.
         const bool identityTransform =
             worldTransform[0][0] == 1.0f && worldTransform[0][1] == 0.0f &&
             worldTransform[0][2] == 0.0f && worldTransform[0][3] == 0.0f &&
@@ -1879,21 +1665,17 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             outMeshData.points.clear();
             outMeshData.points.resize(points.size());  // Pre-allocate exact size
 
-            // Extract matrix components for faster access
             const float* m = &worldTransform[0][0];
 
-            // Helper lambda for vertex transformation
             auto transformVertex = [m, &nonFiniteCount](const lightusd::value::point3f& pt) -> glm::vec3 {
                 const float x = static_cast<float>(pt.x);
                 const float y = static_cast<float>(pt.y);
                 const float z = static_cast<float>(pt.z);
 
-                // Fast NaN/Inf check using integer representation
                 const int32_t* ix = reinterpret_cast<const int32_t*>(&x);
                 const int32_t* iy = reinterpret_cast<const int32_t*>(&y);
                 const int32_t* iz = reinterpret_cast<const int32_t*>(&z);
 
-                // Check if any component is NaN or Inf (exponent bits all 1s)
                 if ((*ix & 0x7F800000) == 0x7F800000 ||
                     (*iy & 0x7F800000) == 0x7F800000 ||
                     (*iz & 0x7F800000) == 0x7F800000) {
@@ -1901,12 +1683,10 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
                     return glm::vec3(0.0f, 0.0f, 0.0f);
                 }
 
-                // Manual matrix multiplication - optimized
                 const float tx = m[0] * x + m[4] * y + m[8] * z + m[12];
                 const float ty = m[1] * x + m[5] * y + m[9] * z + m[13];
                 const float tz = m[2] * x + m[6] * y + m[10] * z + m[14];
 
-                // Fast validation of transformed vertex
                 const int32_t* itx = reinterpret_cast<const int32_t*>(&tx);
                 const int32_t* ity = reinterpret_cast<const int32_t*>(&ty);
                 const int32_t* itz = reinterpret_cast<const int32_t*>(&tz);
@@ -1921,7 +1701,6 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
                 return glm::vec3(tx, ty, tz);
             };
 
-            // PARALLEL vertex processing using std::transform
             std::transform(PAR_POLICY
                           points.begin(), points.end(),
                           outMeshData.points.begin(),
@@ -1933,12 +1712,11 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         if (nonFiniteDetected > 0) {
             MIDDLEWARE_LOG_WARNING("%zu non-finite vertices detected and zeroed", nonFiniteDetected);
         }
-        
-        // Log performance metrics
+
         auto vertexEndTime = std::chrono::high_resolution_clock::now();
         auto vertexDuration = std::chrono::duration_cast<std::chrono::microseconds>(
             vertexEndTime - vertexStartTime).count();
-        
+
         if (points.size() > 1000) {
             MIDDLEWARE_LOG_DEBUG("Parallel vertex processing: %zu vertices in %lld µs (%.2f µs/vertex)",
                                points.size(), vertexDuration,
@@ -1951,6 +1729,7 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         }
 
         // Extract and triangulate faces (zero-copy fast path, copy fallback)
+
         std::vector<int32_t> fvcCopy;
         const std::vector<int32_t>* fvcPtr =
             JusyncGetStaticVector<int32_t>(geomMesh->faceVertexCounts);
@@ -1969,7 +1748,6 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         }
         const auto& faceVertexIndices = *fviPtr;
 
-        // int32 -> uint32 is bit-identical (two's complement): a memcpy
         outMeshData.faceVertexCounts.resize(faceVertexCounts.size());
         if (!faceVertexCounts.empty()) {
             std::memcpy(outMeshData.faceVertexCounts.data(), faceVertexCounts.data(),
@@ -2024,6 +1802,7 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         }
 
         // Extract normals (zero-copy fast path, copy fallback)
+
         std::vector<lightusd::value::normal3f> normalsCopy;
         const std::vector<lightusd::value::normal3f>* normalsPtr =
             JusyncGetMeshNormalsZeroCopy(*geomMesh);
@@ -2038,18 +1817,16 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
                                      normals.size(), points.size());
             } else {
                 auto normalStartTime = std::chrono::high_resolution_clock::now();
-                
+
                 outMeshData.normals.clear();
                 outMeshData.normals.resize(normals.size());  // Pre-allocate exact size
                 glm::mat3 normalMatrix = glm::mat3(worldTransform);
 
-                // Helper lambda for normal transformation
                 auto transformNormal = [normalMatrix](const lightusd::value::normal3f& nrm) -> glm::vec3 {
-                    // Fast NaN/Inf check
                     const int32_t* ix = reinterpret_cast<const int32_t*>(&nrm.x);
                     const int32_t* iy = reinterpret_cast<const int32_t*>(&nrm.y);
                     const int32_t* iz = reinterpret_cast<const int32_t*>(&nrm.z);
-                    
+
                     if ((*ix & 0x7F800000) == 0x7F800000 ||
                         (*iy & 0x7F800000) == 0x7F800000 ||
                         (*iz & 0x7F800000) == 0x7F800000) {
@@ -2061,38 +1838,35 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
                                       static_cast<float>(nrm.z));
                     glm::vec3 transformedNormal = normalMatrix * normalVec;
 
-                    // Fast length calculation and normalization
                     float lengthSquared = glm::dot(transformedNormal, transformedNormal);
                     if (lengthSquared > safety::EPSILON * safety::EPSILON) {
                         float invLength = 1.0f / std::sqrt(lengthSquared);
                         return transformedNormal * invLength;
                     }
-                    
+
                     return glm::vec3(0.0f, 1.0f, 0.0f);  // Default up vector
                 };
 
-                // PARALLEL normal processing
                 std::transform(PAR_POLICY
                              normals.begin(), normals.end(),
                              outMeshData.normals.begin(),
                              transformNormal);
 
-                // Count invalid normals for logging
                 size_t invalidNormalCount = std::count_if(PAR_POLICY
                                                         outMeshData.normals.begin(),
                                                         outMeshData.normals.end(),
                                                         [](const glm::vec3& n) {
                                                             return n == glm::vec3(0.0f, 1.0f, 0.0f);
                                                         });
-                
+
                 if (invalidNormalCount > 0) {
                     MIDDLEWARE_LOG_DEBUG("%zu invalid normals replaced with default up vector", invalidNormalCount);
                 }
-                
+
                 auto normalEndTime = std::chrono::high_resolution_clock::now();
                 auto normalDuration = std::chrono::duration_cast<std::chrono::microseconds>(
                     normalEndTime - normalStartTime).count();
-                
+
                 if (normals.size() > 1000) {
                     MIDDLEWARE_LOG_DEBUG("Parallel normal processing: %zu normals in %lld µs",
                                        normals.size(), normalDuration);
@@ -2100,7 +1874,6 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             }
         }
 
-        // If no normals provided, calculate them
         if (outMeshData.normals.empty()) {
             if (!calculateMeshNormals(outMeshData.points, outMeshData.indices, outMeshData.normals)) {
                 MIDDLEWARE_LOG_WARNING("Failed to calculate normals for mesh: %s",
@@ -2108,10 +1881,8 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             }
         }
 
-        // Extract UV coordinates
         extractUVCoordinates(geomMesh, outMeshData);
 
-        // ✅ NEW: Extract vertex colors from primvars:color.timeSamples
         extractVertexColors(geomMesh, outMeshData);
 
         MIDDLEWARE_LOG_DEBUG("Successfully extracted mesh: %zu vertices, %zu triangles, %zu normals, %zu UVs, %zu colors",
@@ -2133,15 +1904,7 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
     if (!mesh) return;
 
     try {
-        // Clear any existing vertex colors
         meshData.vertex_colors.clear();
-        // Try to get vertex colors from primvars:color.
-        //
-        // Zero-copy fast path: locate the primvar's Attribute directly in the
-        // prim's property storage and read the typed array in place. The
-        // non-strict Value::as<> also matches raw float3[]/float4[] payloads
-        // (the old code probed those types separately). Bare names only: the
-        // helper prepends "primvars:" itself.
         const std::vector<std::string> colorNames = {
             "color", "displayColor", "Cd"  // Common in Houdini/Maya
         };
@@ -2154,7 +1917,6 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
         const lightusd::Attribute* colorAttr = nullptr;
         int colorType = -1;  // 0 = color4f[], 1 = color3f[]
 
-        // 1) Try the (name, type) cached from a previous mesh in this file
         if (!pImpl->colorCacheName.empty()) {
             if (const lightusd::Attribute* a = JusyncFindPrimvarAttribute(*mesh, pImpl->colorCacheName)) {
                 if (!a->is_blocked() && !a->is_connection() &&
@@ -2172,7 +1934,6 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             }
         }
 
-        // 2) Otherwise probe the known names
         if (!colorAttr) {
             for (const auto& name : colorNames) {
                 const lightusd::Attribute* a = JusyncFindPrimvarAttribute(*mesh, name);
@@ -2208,7 +1969,6 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
                             static_cast<float>(c.a)
                         );
                     } else {
-                        // Default white color for invalid values
                         meshData.vertex_colors[i] = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
                     }
                 }
@@ -2226,15 +1986,12 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
                             1.0f  // Default alpha
                         );
                     } else {
-                        // Default white color for invalid values
                         meshData.vertex_colors[i] = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
                     }
                 }
             }
             foundColors = true;
         } else {
-            // 3) Legacy fallback (indexed/timesampled/unusual types): the
-            //    old GeomPrimvar copy path, kept for exact behavior parity.
             lightusd::GeomPrimvar colorPrimvar;
             std::string primvarErr;
             const std::vector<std::string> legacyNames = {
@@ -2332,16 +2089,13 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             }
         }
         if (foundColors) {
-            // Validate that color count matches vertex count
             if (meshData.vertex_colors.size() != meshData.points.size()) {
                 MIDDLEWARE_LOG_WARNING("Vertex color count (%zu) doesn't match vertex count (%zu) for mesh: %s",
                                      meshData.vertex_colors.size(), meshData.points.size(), meshData.elementName.c_str());
 
-                // Resize to match vertex count
                 if (meshData.vertex_colors.size() > meshData.points.size()) {
                     meshData.vertex_colors.resize(meshData.points.size());
                 } else {
-                    // Fill missing colors with white
                     while (meshData.vertex_colors.size() < meshData.points.size()) {
                         meshData.vertex_colors.push_back(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
                     }
@@ -2382,7 +2136,6 @@ glm::mat4 UsdProcessor::GetLocalTransform(void* prim) {
                     case lightusd::XformOp::OpType::Translate: {
                         lightusd::value::double3 trans;
                         if (op.get_interpolated_value(&trans)) {
-                            // Validate translation values
                             if (std::isfinite(trans[0]) && std::isfinite(trans[1]) && std::isfinite(trans[2])) {
                                 glm::vec3 translation(static_cast<float>(trans[0]),
                                                     static_cast<float>(trans[1]),
@@ -2419,7 +2172,6 @@ glm::mat4 UsdProcessor::GetLocalTransform(void* prim) {
                         lightusd::value::double3 rot;
                         if (op.get_interpolated_value(&rot)) {
                             if (std::isfinite(rot[0]) && std::isfinite(rot[1]) && std::isfinite(rot[2])) {
-                                // Apply rotations in XYZ order
                                 localTransform = glm::rotate(localTransform,
                                     glm::radians(static_cast<float>(rot[0])), glm::vec3(1.0f, 0.0f, 0.0f));
                                 localTransform = glm::rotate(localTransform,
@@ -2447,7 +2199,6 @@ glm::mat4 UsdProcessor::GetLocalTransform(void* prim) {
             }
         }
 
-        // Validate final transformation matrix
         if (!validateTransform(localTransform)) {
             MIDDLEWARE_LOG_ERROR("Final transformation matrix is invalid, returning identity");
             return glm::mat4(1.0f);
@@ -2461,20 +2212,17 @@ glm::mat4 UsdProcessor::GetLocalTransform(void* prim) {
     }
 }
 
-// MISSING METHOD IMPLEMENTATIONS - These were causing linker errors
 
 void UsdProcessor::ExtractReferencePaths(const lightusd::Stage& stage,
                                         std::vector<std::string>& outReferencePaths) {
     MIDDLEWARE_LOG_INFO("Extracting reference paths from stage");
 
-    // Process each root prim
     for (const auto& rootPrim : stage.root_prims()) {
         ExtractReferencePathsFromPrim(rootPrim, outReferencePaths);
     }
 }
 
 std::vector<std::string> UsdProcessor::ExtractClipsFromRawContent(const std::vector<uint8_t>& buffer) {
-    // Pass the buffer straight through (no full-buffer std::string copy).
     return pImpl->extractClipsFromString(
         std::string_view(reinterpret_cast<const char*>(buffer.data()), buffer.size()));
 }
@@ -2482,11 +2230,8 @@ std::vector<std::string> UsdProcessor::ExtractClipsFromRawContent(const std::vec
 std::vector<std::string> UsdProcessor::UsdProcessorImpl::extractClipsFromString(std::string_view content) {
     std::vector<std::string> clipPaths;
 
-    // Look for clips patterns in the USD content (regex compiled once, not per call).
     static const std::regex clipsPattern(R"(asset\[\]\s+assetPaths\s*=\s*\[@([^@]+)@\])");
 
-    // std::regex_iterator<const char*> matches std::string_view (const char* base);
-    // std::sregex_iterator is only bound to std::string iterators.
     std::regex_iterator<const char*> it(content.data(), content.data() + content.size(), clipsPattern);
     const std::regex_iterator<const char*> end;
 
@@ -2502,13 +2247,10 @@ std::vector<std::string> UsdProcessor::UsdProcessorImpl::extractClipsFromString(
 
 void UsdProcessor::ExtractReferencePathsFromPrim(const lightusd::Prim& prim,
                                                 std::vector<std::string>& outReferencePaths) {
-    // Check for references in this prim.
-    // In LightUSD dev this is a list of (ListEditQual, vector<Reference>) pairs.
     if (prim.metas().references.has_value()) {
         const auto& refs = prim.metas().references.value();
 
         for (const auto& entry : refs) {
-            // `entry.second` is the vector<Reference> for this list-edit op
             for (const auto& ref : entry.second) {
                 std::string assetPath = ref.asset_path.GetAssetPath();
                 if (!assetPath.empty()) {
@@ -2519,7 +2261,6 @@ void UsdProcessor::ExtractReferencePathsFromPrim(const lightusd::Prim& prim,
         }
     }
 
-    // Check for payloads in this prim (same list-of-pairs layout).
     if (prim.metas().payload.has_value()) {
         const auto& pl = prim.metas().payload.value();
 
@@ -2534,7 +2275,6 @@ void UsdProcessor::ExtractReferencePathsFromPrim(const lightusd::Prim& prim,
         }
     }
 
-    // Recursively check child prims
     for (const auto& child : prim.children()) {
         ExtractReferencePathsFromPrim(child, outReferencePaths);
     }
@@ -2551,9 +2291,7 @@ void UsdProcessor::ListPrimHierarchy(const lightusd::Prim& prim, int depth) {
     }
 }
 
-// Additional private helper methods
     bool UsdProcessor::validateTransform(const glm::mat4& transform) const {
-    // Check for finite values (you already do this)
     for (int i = 0; i < 4; ++i) {
         for (int j = 0; j < 4; ++j) {
             if (!std::isfinite(transform[i][j])) {
@@ -2562,7 +2300,6 @@ void UsdProcessor::ListPrimHierarchy(const lightusd::Prim& prim, int depth) {
         }
     }
 
-    // ADD THIS: Check determinant to avoid singular matrices
     float det = glm::determinant(transform);
     if (std::abs(det) < safety::EPSILON) {
         MIDDLEWARE_LOG_WARNING("Matrix is singular (determinant near zero)");
@@ -2583,7 +2320,6 @@ bool UsdProcessor::validateFilePath(const std::string& filePath, bool checkExist
         return false;
     }
 
-    // Check for dangerous path patterns
     if (filePath.find("..") != std::string::npos) {
         MIDDLEWARE_LOG_ERROR("Path traversal detected in file path: %s", filePath.c_str());
         return false;
@@ -2614,11 +2350,9 @@ bool UsdProcessor::checkMemoryLimit(size_t additionalBytes) const {
 
 void UsdProcessor::normalizeUVCoordinates(std::vector<glm::vec2>& uvs) {
     for (auto& uv : uvs) {
-        // Clamp UV coordinates to reasonable range
         uv.x = std::clamp(uv.x, -10.0f, 10.0f);
         uv.y = std::clamp(uv.y, -10.0f, 10.0f);
 
-        // Validate finite values
         if (!std::isfinite(uv.x) || !std::isfinite(uv.y)) {
             MIDDLEWARE_LOG_WARNING("Non-finite UV coordinate detected, setting to (0,0)");
             uv = glm::vec2(0.0f, 0.0f);
@@ -2628,31 +2362,27 @@ void UsdProcessor::normalizeUVCoordinates(std::vector<glm::vec2>& uvs) {
 
 void UsdProcessor::normalizeUVCoordinatesParallel(std::vector<glm::vec2>& uvs) {
     if (uvs.size() < 1000) {
-        // For small UV sets, sequential is faster due to parallel overhead
         normalizeUVCoordinates(uvs);
         return;
     }
-    
+
     auto startTime = std::chrono::high_resolution_clock::now();
-    
-    // PARALLEL UV normalization
+
     std::for_each(PAR_POLICY uvs.begin(), uvs.end(), [](glm::vec2& uv) {
-        // Fast NaN/Inf check using integer representation
         const int32_t* ix = reinterpret_cast<const int32_t*>(&uv.x);
         const int32_t* iy = reinterpret_cast<const int32_t*>(&uv.y);
-        
+
         if ((*ix & 0x7F800000) == 0x7F800000 || (*iy & 0x7F800000) == 0x7F800000) {
             uv = glm::vec2(0.0f, 0.0f);
         } else {
-            // Clamp UV coordinates to reasonable range
             uv.x = std::clamp(uv.x, -10.0f, 10.0f);
             uv.y = std::clamp(uv.y, -10.0f, 10.0f);
         }
     });
-    
+
     auto endTime = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime).count();
-    
+
     if (uvs.size() > 10000) {
         MIDDLEWARE_LOG_DEBUG("Parallel UV normalization: %zu UVs in %lld µs", uvs.size(), duration);
     }
@@ -2668,7 +2398,6 @@ bool UsdProcessor::validateMeshIndices(std::vector<uint32_t>& indices, size_t ve
         return false;
     }
 
-    // Validate all indices are within bounds
     for (size_t i = 0; i < indices.size(); ++i) {
         if (indices[i] >= vertexCount) {
             MIDDLEWARE_LOG_ERROR("Index %u at position %zu exceeds vertex count %zu",
@@ -2691,13 +2420,11 @@ bool UsdProcessor::calculateMeshNormals(const std::vector<glm::vec3>& points,
         outNormals.clear();
         outNormals.resize(points.size(), glm::vec3(0.0f));
 
-        // Calculate face normals and accumulate vertex normals
         for (size_t i = 0; i < indices.size(); i += 3) {
             uint32_t idx0 = indices[i];
             uint32_t idx1 = indices[i + 1];
             uint32_t idx2 = indices[i + 2];
 
-            // Validate indices
             if (idx0 >= points.size() || idx1 >= points.size() || idx2 >= points.size()) {
                 continue;
             }
@@ -2706,24 +2433,20 @@ bool UsdProcessor::calculateMeshNormals(const std::vector<glm::vec3>& points,
             const glm::vec3& v1 = points[idx1];
             const glm::vec3& v2 = points[idx2];
 
-            // Calculate face normal
             glm::vec3 edge1 = v1 - v0;
             glm::vec3 edge2 = v2 - v0;
             glm::vec3 faceNormal = glm::cross(edge1, edge2);
 
-            // Validate face normal
             float length = glm::length(faceNormal);
             if (length > safety::EPSILON) {
                 faceNormal = faceNormal / length;
 
-                // Accumulate to vertex normals
                 outNormals[idx0] += faceNormal;
                 outNormals[idx1] += faceNormal;
                 outNormals[idx2] += faceNormal;
             }
         }
 
-        // Normalize vertex normals
         for (auto& normal : outNormals) {
             float length = glm::length(normal);
             if (length > safety::EPSILON) {
@@ -2746,11 +2469,7 @@ void UsdProcessor::extractUVCoordinates(lightusd::GeomMesh* mesh, MeshData& mesh
 
     try {
         auto uvStartTime = std::chrono::high_resolution_clock::now();
-        
-        // Support multiple UV sets.
-        // Bare names only: the helper prepends "primvars:" itself.
-        // Zero-copy fast path with a legacy GeomPrimvar fallback for indexed
-        // or unusual types.
+
         const std::vector<std::string> uvNames = {
             "st", "st1", "st2", "uv", "uv0", "uv1", "map1", "attribute0"
         };
@@ -2781,13 +2500,6 @@ void UsdProcessor::extractUVCoordinates(lightusd::GeomMesh* mesh, MeshData& mesh
                 continue;
             }
 
-            // VTK's ANARI pass can export face-varying texture coordinates as a
-            // bare float2[] primvar WITHOUT :indices (one tuple per face corner,
-            // not per vertex). Such an array cannot drive per-vertex UVs, and
-            // keeping it makes MeshData::validateGeometry() reject the WHOLE mesh
-            // (uvs.size() != points.size()), dropping the actor entirely. Resolve
-            // per-corner arrays to per-vertex by taking the first UV seen for
-            // each vertex via faceVertexIndices; anything else is dropped.
             if (meshData.points.empty() || uvs->size() != meshData.points.size()) {
                 std::vector<glm::vec2> resolved;
                 if (!meshData.points.empty() &&
@@ -2812,7 +2524,6 @@ void UsdProcessor::extractUVCoordinates(lightusd::GeomMesh* mesh, MeshData& mesh
                 std::vector<glm::vec2> uvChannel;
                 uvChannel.resize(uvs->size());  // Pre-allocate exact size
 
-                // PARALLEL UV extraction
                 std::transform(PAR_POLICY
                              uvs->begin(), uvs->end(),
                              uvChannel.begin(),
@@ -2820,7 +2531,6 @@ void UsdProcessor::extractUVCoordinates(lightusd::GeomMesh* mesh, MeshData& mesh
                                  return glm::vec2(uv.s, uv.t);
                              });
 
-                // Normalize and validate UVs (parallel)
                 normalizeUVCoordinatesParallel(uvChannel);
 
                 meshData.uvSets.push_back(std::move(uvChannel));  // Move to avoid copy
@@ -2830,14 +2540,13 @@ void UsdProcessor::extractUVCoordinates(lightusd::GeomMesh* mesh, MeshData& mesh
             }
         }
 
-        // Backward compatibility: copy first UV set to uvs
         if (!meshData.uvSets.empty()) {
             meshData.uvs = meshData.uvSets[0];
-            
+
             auto uvEndTime = std::chrono::high_resolution_clock::now();
             auto uvDuration = std::chrono::duration_cast<std::chrono::microseconds>(
                 uvEndTime - uvStartTime).count();
-            
+
             MIDDLEWARE_LOG_DEBUG("Mesh '%s' has %zu UV channels processed in %lld µs",
                                meshData.elementName.c_str(), meshData.uvSets.size(), uvDuration);
 
@@ -2853,7 +2562,6 @@ void UsdProcessor::extractUVCoordinates(lightusd::GeomMesh* mesh, MeshData& mesh
 }
 
 
-// Helper methods for reference resolution
 bool UsdProcessor::hasEmptyGeometry(const std::vector<MeshData>& meshData) const {
     for (const auto& mesh : meshData) {
         if (mesh.points.empty()) {
@@ -2874,11 +2582,9 @@ bool UsdProcessor::resolveReferences(const lightusd::Stage& stage,
             progressCallback(0.0f, "Extracting reference paths");
         }
 
-        // Extract reference paths
         std::vector<std::string> referencePaths;
         ExtractReferencePaths(stage, referencePaths);
 
-        // Extract clips from raw content — use pre-existing string if available (avoids copy)
         std::vector<std::string> clipPaths;
         if (preExistingContent) {
             clipPaths = pImpl->extractClipsFromString(*preExistingContent);
@@ -2894,23 +2600,19 @@ bool UsdProcessor::resolveReferences(const lightusd::Stage& stage,
 
         MIDDLEWARE_LOG_INFO("Found %zu reference/clip paths to process", referencePaths.size());
 
-        // Get base directory using TinyUSDZ's function
         std::string baseDir = lightusd::io::GetBaseDir(fileName);
         MIDDLEWARE_LOG_INFO("Base directory: %s", baseDir.c_str());
         if (baseDir.empty()) {
-            // Extract directory from the full file path
             std::filesystem::path filePath(fileName);
             baseDir = filePath.parent_path().string();
             MIDDLEWARE_LOG_INFO("Using parent directory as base: %s", baseDir.c_str());
 
             if (baseDir.empty()) {
-                // If still empty, use current working directory
                 baseDir = std::filesystem::current_path().string();
                 MIDDLEWARE_LOG_INFO("Using current directory as base: %s", baseDir.c_str());
             }
         }
 
-        // Process each reference
         size_t processedCount = 0;
         for (const auto& refPath : referencePaths) {
             if (shutdownRequested.load()) {
@@ -3001,9 +2703,6 @@ bool UsdProcessor::ExtractPointCloudData(lightusd::GeomPoints* geomPoints,
     try {
         auto startTime = std::chrono::high_resolution_clock::now();
 
-        // ── Extract point positions (zero-copy fast path, copy fallback) ──
-        // TypedAttribute<Animatable<...>>: static values are read through
-        // get_scalar_ref(); timesampled values fall back to Animatable::get().
         std::vector<lightusd::value::point3f> pointsCopy;
         const std::vector<lightusd::value::point3f>* rawPoints =
             JusyncGetStaticVector<lightusd::value::point3f>(geomPoints->points);
@@ -3040,7 +2739,6 @@ bool UsdProcessor::ExtractPointCloudData(lightusd::GeomPoints* geomPoints,
         MIDDLEWARE_LOG_INFO("Extracted %zu point positions from %s",
             outData.positions.size(), outData.elementName.c_str());
 
-        // ── Extract normals (zero-copy fast path, copy fallback) ──
         {
             std::vector<lightusd::value::normal3f> normalDataCopy;
             const std::vector<lightusd::value::normal3f>* normalData =
@@ -3063,7 +2761,6 @@ bool UsdProcessor::ExtractPointCloudData(lightusd::GeomPoints* geomPoints,
             }
         }
 
-        // ── Extract widths (zero-copy fast path, copy fallback) ──
         {
             std::vector<float> widthDataCopy;
             const std::vector<float>* widthData =
@@ -3080,8 +2777,6 @@ bool UsdProcessor::ExtractPointCloudData(lightusd::GeomPoints* geomPoints,
             }
         }
 
-        // ── Extract attribute0 (zero-copy fast path, legacy fallback) ──
-        // Bare names only: the helper prepends "primvars:" itself.
         outData.scalarAttributes.clear();
         const std::vector<std::string> attrNames = {
             "attribute0", "st", "map1"
@@ -3114,8 +2809,6 @@ bool UsdProcessor::ExtractPointCloudData(lightusd::GeomPoints* geomPoints,
             }
         }
 
-        // ── Extract direct colors (zero-copy fast path, legacy fallback) ──
-        // Use the bare primvar name; the helper prepends "primvars:".
         {
             const lightusd::Attribute* attr = JusyncFindPrimvarAttribute(*geomPoints, "color");
             const std::vector<lightusd::value::color4f>* rawColors = nullptr;
@@ -3168,9 +2861,6 @@ bool UsdProcessor::ExtractPointInstancerAsCloud(
     }
 
     try {
-        // ── Instance positions (zero-copy static value, timeSamples fallback) ──
-        // The ANARI-USD writer emits `point3f[] positions.timeSamples` per
-        // timestep commit; evaluate at time 0 (single-sample layers).
         std::vector<lightusd::value::point3f> pointsCopy;
         const std::vector<lightusd::value::point3f>* rawPoints =
             JusyncGetStaticVector<lightusd::value::point3f>(instancer->positions);
@@ -3200,7 +2890,6 @@ bool UsdProcessor::ExtractPointInstancerAsCloud(
         MIDDLEWARE_LOG_INFO("Extracted %zu instancer positions from %s",
             outData.positions.size(), outData.elementName.c_str());
 
-        // ── primvars:color (static value, then time-sampled via GeomPrimvar) ──
         {
             std::vector<lightusd::value::color4f> colors;
             bool haveColors = false;
@@ -3239,7 +2928,6 @@ bool UsdProcessor::ExtractPointInstancerAsCloud(
             }
         }
 
-        // ── attribute0 scalar (drives client-side gradient color bake) ──
         outData.scalarAttributes.clear();
         {
             const std::vector<std::string> attrNames = {
@@ -3278,8 +2966,6 @@ bool UsdProcessor::ExtractPointInstancerAsCloud(
             }
         }
 
-        // NOTE: invisibleIds / protoIndices / orientations / scales are ignored
-        // for point-style display (each instance position = one point).
 
         return true;
 
@@ -3301,12 +2987,10 @@ bool UsdProcessor::BakeColorsFromGradient(PointCloudData& pointCloud,
     size_t pointCount = pointCloud.scalarAttributes.size();
     pointCloud.vertex_colors.resize(pointCount);
 
-    // Parallel bake using TBB or std::async
     size_t batchSize = 100000; // Process in batches for millions of points
     for (size_t start = 0; start < pointCount; start += batchSize) {
         size_t end = std::min(start + batchSize, pointCount);
         for (size_t i = start; i < end; i++) {
-            // attribute0.x is the scalar colormap value in [0, 1]
             float scalar = pointCloud.scalarAttributes[i].x;
             int idx = static_cast<int>(scalar * (texWidth - 1));
             idx = std::clamp(idx, 0, texWidth - 1);

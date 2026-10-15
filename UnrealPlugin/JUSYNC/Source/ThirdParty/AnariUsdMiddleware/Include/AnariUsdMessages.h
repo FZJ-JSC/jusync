@@ -1,10 +1,7 @@
 #pragma once
 
-// Compatibility wrapper.
-//
 // The canonical protocol definitions live in AnariUsdProtocol.h.
-// This header keeps the old anari_usd_middleware:: names working for existing
-// middleware code.
+
 
 #include "AnariUsdProtocol.h"
 

@@ -4,16 +4,56 @@
 #include "Engine/Engine.h"
 #include "Async/ParallelFor.h"
 #include "HAL/PlatformTime.h"
+#include "JUSYNCElementNames.h"
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
 #include "LidarPointCloud.h"
 #include "LidarPointCloudComponent.h"
 #include "LidarPointCloudActor.h"
+#include "LidarPointCloudSettings.h"
 
-// 1 (default): streamed clouds build their octree on Epic's async import thread
-// (ULidarPointCloud::CreateFromData + FLidarPointCloudAsyncParameters) and swap
-// into the component on completion - the game thread never sits in the multi-second
 // SetData. 0: legacy in-place SetData on the game thread.
+
+static TAutoConsoleVariable<int32> CVarJusyncCloudMorphSteps(
+    TEXT("jusync.Morph.CloudSteps"), 4,
+    TEXT("Number of pre-interpolated cloud builds streamed between successive .geo time samples (1..6)."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarJusyncCloudBlendMs(
+    TEXT("jusync.Morph.CloudBlendMs"), 0,
+    TEXT("Fixed cloud blend window in ms; 0 = auto (measured sample gap clamped by CloudMaxBlendMs)."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarJusyncCloudMaxBlendMs(
+    TEXT("jusync.Morph.CloudMaxBlendMs"), 2000,
+    TEXT("Cap in ms for the auto cloud blend window."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarJusyncCloudSmooth(
+    TEXT("jusync.Morph.CloudSmooth"), 1,
+    TEXT("Per-frame smooth morphing of streamed clouds via in-place point updates (1) vs stepped ramp (0)."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarJusyncCloudRenderSmoothing(
+    TEXT("jusync.Morph.CloudRenderSmoothing"), 0,
+    TEXT("1 = keep LidarPointCloud render-data smoothing during morphs (default 0 = disable for upload consistency)."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarJusyncCloudFixedSize(
+    TEXT("jusync.Morph.CloudFixedSize"), 1,
+    TEXT("1 (default) = render streamed clouds with FixedScreenSize scaling (octree-independent point size)."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarJusyncCloudScreenSize(
+    TEXT("jusync.Morph.CloudScreenSize"), 0.25f,
+    TEXT("Point size (screen-fraction units) used while jusync.Morph.CloudFixedSize is on."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<FString> CVarJusyncIgnoreElements(
+    TEXT("jusync.Spawner.IgnoreElements"), TEXT(""),
+    TEXT("Comma-separated substrings (or * patterns); elements with matching names are skipped, e.g. \"_u1\"."),
+    ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarJusyncAsyncCloudBuild(
     TEXT("jusync.AsyncCloudBuild"), 1,
     TEXT("Build streamed point clouds off the game thread (Epic async CreateFromData) and swap on completion."),
@@ -22,11 +62,6 @@ static TAutoConsoleVariable<int32> CVarJusyncAsyncCloudBuild(
 
 namespace
 {
-    // ULidarPointCloud refuses a cloud whose bounds are degenerate on any axis
-    // (min == max) - e.g. genuinely planar simulation data (a z=0 slice / flat
-    // sheet), which otherwise silently spawns as an EMPTY actor with
-    // "Provided bounds are incorrect". Nudge a single point per flat axis by a
-    // sub-visual epsilon so the octree can be built. 0.01 cm is invisible.
     void JUSYNCPadDegenerateBounds(TArray64<FLidarPointCloudPoint>& Points)
     {
         if (Points.Num() == 0)
@@ -148,9 +183,6 @@ void FJUSYNCPointCloudSpawner::FlushExpiredNoColorClouds()
 
     for (FPendingNoColorCloud& Pending : ToFlush)
     {
-        // Expired entries spawn WITHOUT the gradient rather than ping-ponging
-        // in the queue forever (which also pins PendingAsyncPCS and blocks
-        // initial-spawn completion / live updates).
         EnqueuePointCloud(MoveTemp(Pending.Data), Pending.Rank, /*bAllowNoGradient=*/!bLUTReady);
     }
 }
@@ -175,13 +207,59 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudRef&& PCRef, i
 
 void FJUSYNCPointCloudSpawner::EnqueuePointCloud(const FJUSYNCPointCloudData& PCData, int32 InRank)
 {
-    // Copy once, then move into the async task via the rvalue overload.
     EnqueuePointCloud(FJUSYNCPointCloudData(PCData), InRank);
+}
+
+bool FJUSYNCPointCloudSpawner::IsElementFiltered(const FString& ElementName) const
+{
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    const FString Spec = CVarJusyncIgnoreElements.GetValueOnGameThread();
+#else
+    const FString Spec;
+#endif
+    if (Spec.IsEmpty() || ElementName.IsEmpty())
+    {
+        return false;
+    }
+
+    TArray<FString> Parts;
+    Spec.ParseIntoArray(Parts, TEXT(","));
+    for (FString& Part : Parts)
+    {
+        Part.TrimStartAndEndInline();
+        if (Part.IsEmpty())
+        {
+            continue;
+        }
+        const bool bMatched = (Part.Contains(TEXT("*")) || Part.Contains(TEXT("?")))
+            ? ElementName.MatchesWildcard(Part, ESearchCase::CaseSensitive)
+            : ElementName.Contains(Part);
+        if (bMatched)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData, int32 InRank, bool bAllowNoGradient)
 {
     if (!PCData.IsValid() || !Owner.IsValid() || bShuttingDown.load()) return;
+
+    // Rankless data would key its morph chain like rank 0 and blend rank 0's
+    // previous positions into this sample, so say so instead of only showing it
+    // as a warp.
+    if (InRank < 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("JUSYNC Spawner: cloud '%s' arrived with no owner rank; morph state keyed as rank 0"), *PCData.ElementName);
+    }
+
+    if (IsElementFiltered(PCData.ElementName))
+    {
+        UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: SKIPPED filtered PC '%s' (%d points)"),
+               *PCData.ElementName, PCData.PointCount);
+        return;
+    }
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (PCData.HasLidarPoints())
@@ -236,7 +314,6 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
 
                 if (LocalLUT.Num() > 0)
                 {
-                    // ParallelFor'd: per-point LUT lookup writes only Points[i].
                     ParallelFor(static_cast<int32>(Points.Num()), [&](int32 i)
                     {
                         const float Attr0 = (i < Widths.Num()) ? Widths[i] : 0.0f;
@@ -253,9 +330,7 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
             FPointCloudReadyEntry Entry;
             Entry.Points = MoveTemp(Points);
             Entry.ElementName = ElementName;
-            Entry.Key = ElementName.IsEmpty()
-                ? FString::Printf(TEXT("jusync_pc_r%d"), InRank)
-                : FString::Printf(TEXT("%s_r%d"), *ElementName, InRank);
+            Entry.Key = JUSYNCElementNames::MakeRankedElementKey(ElementName, InRank);
             Entry.Rank = InRank;
             Entry.PointSize = PointSize;
             Entry.bSpawned = false;
@@ -311,8 +386,6 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
     UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: queued PC '%s' for async conversion (%d points)"),
            *PCData.ElementName, PCData.PointCount);
 
-    // Spawn async task — doesn't block the game thread. The rvalue overload
-    // moves the arrays into the task instead of copying the whole cloud.
     AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
         [this, PointCount = PCData.PointCount, Positions = MoveTemp(PCData.Positions),
           Colors = MoveTemp(PCData.Colors), bHasColors = bLegacyHasColors,
@@ -320,7 +393,6 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
           InRank]()
     {
 #ifdef WITH_ANARI_USD_MIDDLEWARE
-        // Capture gradient LUT lazily at conversion time (after possible SetGradientLUT)
         TArray<FColor> LocalLUT;
         {
             FScopeLock Lock(&this->GradientMutex);
@@ -328,8 +400,6 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
         }
         bool bUseGradient = LocalLUT.Num() > 0;
 
-        // Build LiDAR points on background thread (parallel: every index
-        // reads its own input slots and writes its own output slot).
         TArray64<FLidarPointCloudPoint> Points;
         Points.SetNum(PointCount);
         ParallelFor(PointCount, [&](int32 i)
@@ -342,23 +412,23 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
             }
             else if (bUseGradient && Widths.Num() > i)
             {
-                // attribute0 scalar value (0-1) maps to gradient LUT index
                 float Attr0 = Widths[i];
                 int32 LUTIdx = FMath::Clamp(FMath::RoundToInt(Attr0 * (LocalLUT.Num() - 1)), 0, LocalLUT.Num() - 1);
                 Col = LocalLUT[LUTIdx];
             }
             else
             {
-                Col = FColor::White;
+                // Neutral gray instead of white: uncolored / recolor-pending clouds used to
+                // flash pure-white (a glare "glow") until the gradient LUT recolored them.
+                Col = FColor(128, 128, 128);
             }
             Points[i] = FLidarPointCloudPoint(Pos.X, Pos.Y, Pos.Z, Col.R / 255.f, Col.G / 255.f, Col.B / 255.f, Col.A / 255.f);
         });
 
-        // Marshal to game thread
         FPointCloudReadyEntry Entry;
         Entry.Points = MoveTemp(Points);
         Entry.ElementName = ElementName;
-        Entry.Key = FString::Printf(TEXT("%s_r%d"), *ElementName, InRank);
+        Entry.Key = JUSYNCElementNames::MakeRankedElementKey(ElementName, InRank);
         Entry.Rank = InRank;
         Entry.PointSize = PointSize;
         Entry.bSpawned = false;
@@ -376,8 +446,8 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
                     FScopeLock Lock(&QueueMutex);
                     ReadyQueue.Add(MoveTemp(Entry));
 
-                    // Threshold flush: if queue exceeds 8, drain immediately.
                     // QueueMutex is already held by the enclosing game-thread task.
+
                     if (ReadyQueue.Num() >= 8)
                     {
                         DrainReadyQueueLocked();
@@ -415,22 +485,12 @@ ULidarPointCloud* FJUSYNCPointCloudSpawner::GetOrCreateCloudForComponent(ULidarP
         Comp->SetPointCloud(Cloud);
     }
 
-    // Static (non-dynamic) optimization builds the octree LOD hierarchy, which gives distance-
-    // based decimation: far nodes render a coarse LOD, close nodes the full-resolution LOD.
-    // Dynamic optimization skips the LOD pipeline entirely (no granular density control).
     Cloud->SetOptimizedForDynamicData(false);
     return Cloud;
 }
 
-// ---------------------------------------------------------------------------
-// Async streaming rebuild: Epic's sanctioned async path (CreateFromData +
-// FLidarPointCloudAsyncParameters builds the octree on a worker thread; see
-// LidarPointCloud.cpp CreateFromData_Internal). Exactly ONE build in flight
-// per actor key; later updates for the same key are stashed latest-wins and
-// start when the current build finishes. The finished asset is swapped in on
-// the game thread; the old asset becomes unreferenced for GC.
-// ---------------------------------------------------------------------------
-void FJUSYNCPointCloudSpawner::StartAsyncCloudBuild(const FString& Key, FPointCloudReadyEntry&& Entry, AActor* Actor)
+void FJUSYNCPointCloudSpawner::StartAsyncCloudBuild(const FString& Key, FPointCloudReadyEntry&& Entry, AActor* Actor,
+                                                    double EarliestApply, bool bChainStep, bool bChainFinal)
 {
     if (Entry.Points.Num() == 0 || bShuttingDown.load())
     {
@@ -446,7 +506,6 @@ void FJUSYNCPointCloudSpawner::StartAsyncCloudBuild(const FString& Key, FPointCl
 
     if (F->bBuilding)
     {
-        // Latest-wins: replace the stash outright (old stashed points freed here).
         F->PendingReplacement = MoveTemp(Entry);
         F->bHasPending = true;
         UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: build in flight for '%s' - stashed newer update (latest-wins)"), *Key);
@@ -459,13 +518,23 @@ void FJUSYNCPointCloudSpawner::StartAsyncCloudBuild(const FString& Key, FPointCl
     F->bBuilding = true;
     F->BuildStarted = FPlatformTime::Seconds();
 
+    F->EarliestApply = EarliestApply;
+    F->bDeferred = false;
+    F->bChainStep = bChainStep;
+    F->bChainFinal = bChainFinal;
+    F->bChainAborted = false;
+
+    F->RampPos.SetNum(F->Points->Num());
+    for (int64 i = 0; i < F->Points->Num(); ++i)
+    {
+        F->RampPos[i] = (*F->Points)[i].Location;
+    }
+
     const uint64 Generation = F->Generation;
     const int32 NumPts = static_cast<int32>(F->Points->Num());
 
     // Completion fires on Epic's build worker thread; swap work hops to the GT.
-    // The worker may outlive shutdown waits, so it must not dereference the
-    // spawner: it decrements the shared outstanding count directly, and the
-    // GT hop is dropped via the alive flag if the spawner died meanwhile.
+
     FLidarPointCloudAsyncParameters Params(
         /*bUseAsync=*/true,
         /*ProgressCallback=*/nullptr,
@@ -488,21 +557,72 @@ void FJUSYNCPointCloudSpawner::StartAsyncCloudBuild(const FString& Key, FPointCl
     JUSYNCPadDegenerateBounds(*F->Points);
     ULidarPointCloud* NewCloud = ULidarPointCloud::CreateFromData(*F->Points, Params);
     // GT-only strong ref: keeps the asset GC-safe while the worker fills it.
+
     F->CloudRef = MakeUnique<TStrongObjectPtr<UObject>>(NewCloud);
 
-    UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: started async build '%s' (%d points)"), *Key, NumPts);
+    UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: started async build '%s' (%d points)%s"), *Key, NumPts,
+           bChainStep ? (bChainFinal ? TEXT(" [ramp final]") : TEXT(" [ramp step]")) : TEXT(""));
 }
 
 void FJUSYNCPointCloudSpawner::OnAsyncCloudBuildFinished(const FString& Key, uint64 Generation, bool bSuccess)
 {
     TSharedRef<FInFlightCloudBuild>* Found = InFlightBuilds.Find(Key);
-    if (Found && (*Found)->Generation == Generation && (*Found)->bBuilding)
+    if (Found && (*Found)->Generation == Generation && ((*Found)->bBuilding || (*Found)->bDeferred))
     {
         FInFlightCloudBuild& F = **Found;
         const double BuildMs = (FPlatformTime::Seconds() - F.BuildStarted) * 1000.0;
+        const double NowSeconds = FPlatformTime::Seconds();
 
         delete F.Points;
         F.Points = nullptr;
+
+        F.bDeferred = false;
+
+        if (F.bChainAborted)
+        {
+            bSuccess = false;
+            F.bChainAborted = false;
+            F.bChainStep = false;
+            F.bChainFinal = false;
+        }
+
+        if (bSuccess && F.bHasPending)
+        {
+            if (ULidarPointCloud* Stale = F.CloudRef.IsValid()
+                ? Cast<ULidarPointCloud>(F.CloudRef->Get()) : nullptr)
+            {
+                Stale->MarkAsGarbage();
+            }
+            F.CloudRef.Reset();
+            F.bBuilding = false;
+
+            FPointCloudReadyEntry Next = MoveTemp(F.PendingReplacement);
+            F.bHasPending = false;
+
+            AActor* NextActor = F.Actor.Get();
+            if (!IsValid(NextActor))
+            {
+                NextActor = AllocateActor();
+            }
+            if (NextActor)
+            {
+                ApplyTransformToActor(NextActor);
+                double NextApply = 0.0;
+                if (const FCloudSmoothMorph* M = SmoothMorphs.Find(Key))
+                {
+                    NextApply = M->T0 + M->Duration; // land when the glide ends
+                }
+                StartAsyncCloudBuild(Key, MoveTemp(Next), NextActor, NextApply);
+            }
+            return;
+        }
+
+        if (bSuccess && (NowSeconds < F.EarliestApply || SmoothMorphs.Contains(Key)))
+        {
+            F.bBuilding = false; // worker is done; only the SWAP is pending now
+            F.bDeferred = true;
+            return;
+        }
 
         ULidarPointCloud* Cloud = F.CloudRef.IsValid() ? Cast<ULidarPointCloud>(F.CloudRef->Get()) : nullptr;
         F.CloudRef.Reset(); // ownership moves to the component (swap) or GC (drop)
@@ -521,11 +641,62 @@ void FJUSYNCPointCloudSpawner::OnAsyncCloudBuildFinished(const FString& Key, uin
                 {
                     const double SwapStart = FPlatformTime::Seconds();
                     ReplacedCloud = Comp->GetPointCloud();
+
+                    const TArray<int32>* Map = CloudWalkInputIdx.Find(Key);
+                    if (Map && IsValid(ReplacedCloud) && F.RampPos.Num() > 0)
+                    {
+                        const FVector3f NewNegOffset = (FVector3f)(-Cloud->LocationOffset);
+                        float ResidMax = 0.f;
+                        int32 Slot = 0, Checked = 0, Unmatched = 0;
+                        const auto Probe = [&](FLidarPointCloudPoint* P)
+                        {
+                            const int32 Src = (Slot < Map->Num()) ? (*Map)[Slot] : INDEX_NONE;
+                            ++Slot;
+                            if (Src == INDEX_NONE || Src >= F.RampPos.Num())
+                            {
+                                ++Unmatched;
+                                return;
+                            }
+                            ++Checked;
+                            const FVector3f NewWalk = F.RampPos[Src] + NewNegOffset;
+                            ResidMax = FMath::Max(ResidMax, (P->Location - NewWalk).Length());
+                        };
+                        ReplacedCloud->ExecuteActionOnAllPoints(Probe, /*bVisibleOnly*/false);
+                        UE_LOG(LogTemp, Display,
+                               TEXT("JUSYNC CloudMorph: SMOOTH RESID '%s' checked=%d unmatched=%d residMax=%.4fcm oldOff=%.2f newOff=%.2f map=%d ramp=%d walk=%d"),
+                               *Key, Checked, Unmatched, ResidMax,
+                               ReplacedCloud->LocationOffset.Size(), Cloud->LocationOffset.Size(),
+                               Map->Num(), F.RampPos.Num(), (int32)ReplacedCloud->GetNumPoints());
+                    }
+
+                    Cloud->SetOptimizedForDynamicData(true);
+
                     Comp->SetPointCloud(Cloud);
                     ApplyVisualSettings(Comp);
                     Actor->SetActorHiddenInGame(false);
                     F.bEverSwapped = true;
                     bSwapped = true;
+
+                    if (F.RampPos.Num() > 0 && F.bChainStep)
+                    {
+                        UE_LOG(LogTemp, Log, TEXT("JUSYNC CloudRamp: %s swapped in for '%s' (%d pts displayed)"),
+                               F.bChainFinal ? TEXT("final") : TEXT("step"), *Key, F.RampPos.Num());
+                    }
+                    if (F.RampPos.Num() > 0)
+                    {
+                        CloudDisplayPos.Add(Key, MoveTemp(F.RampPos));
+                    }
+
+                    SmoothMorphs.Remove(Key);
+                    CloudWalkInputIdx.Remove(Key);
+
+                    const bool bFinishedChain = F.bChainFinal;
+                    F.bChainStep = false;
+                    F.bChainFinal = false;
+                    if (bFinishedChain)
+                    {
+                        RampChains.Remove(Key);
+                    }
 
                     if (bPerfLogging)
                     {
@@ -554,19 +725,9 @@ void FJUSYNCPointCloudSpawner::OnAsyncCloudBuildFinished(const FString& Key, uin
         }
         else if (bSwapped && IsValid(ReplacedCloud) && ReplacedCloud != Cloud)
         {
-            // Detached last-frame asset: nothing renders it anymore, so flag
-            // it for GC immediately instead of waiting for the default purge
-            // interval (streamed clouds would otherwise pile up between sweeps).
             ReplacedCloud->MarkAsGarbage();
-            ++ReplacementsSinceGC;
-            if (ReplacementsSinceGC >= GCSwapInterval)
-            {
-                const double GCStart = FPlatformTime::Seconds();
-                CollectGarbage(RF_NoFlags, true);
-                ReplacementsSinceGC = 0;
-                UE_LOG(LogTemp, Display, TEXT("JUSYNC PERF GC sweep %0.1f ms"),
-                       (FPlatformTime::Seconds() - GCStart) * 1000.0);
-            }
+            // (gc.TimeBetweenPurgingPendingKillObjects) without user-visible hitches.
+
         }
 
         if (F.bHasPending)
@@ -580,7 +741,12 @@ void FJUSYNCPointCloudSpawner::OnAsyncCloudBuildFinished(const FString& Key, uin
             if (Actor)
             {
                 ApplyTransformToActor(Actor);
-                StartAsyncCloudBuild(Key, MoveTemp(Next), Actor);
+                double NextApply = 0.0;
+                if (const FCloudSmoothMorph* M = SmoothMorphs.Find(Key))
+                {
+                    NextApply = M->T0 + M->Duration;
+                }
+                StartAsyncCloudBuild(Key, MoveTemp(Next), Actor, NextApply);
             }
         }
             else if (!bSwapped)
@@ -589,10 +755,291 @@ void FJUSYNCPointCloudSpawner::OnAsyncCloudBuildFinished(const FString& Key, uin
                    *Key, bSuccess ? TEXT("discarded") : TEXT("FAILED"), BuildMs);
             if (IsValid(Actor) && !F.bEverSwapped)
             {
-                // First frame never landed: give the actor back and forget the key.
                 ReleaseActor(Actor);
                 InFlightBuilds.Remove(Key);
             }
+        }
+    }
+}
+
+namespace JUSyncCloudRamp
+{
+    static float StepFraction(int32 K, int32 Total)
+    {
+        return FMath::Clamp(float(K) / float(FMath::Max(Total, 1)), 0.f, 1.f);
+    }
+}
+
+bool FJUSYNCPointCloudSpawner::ShouldStartCloudRamp(const FString& Key, double NowSeconds) const
+{
+    const bool bBlendPossible = CVarJusyncCloudSmooth.GetValueOnGameThread() > 0
+        || CVarJusyncCloudMorphSteps.GetValueOnGameThread() > 0;
+    if (!bBlendPossible || bShuttingDown.load())
+    {
+        return false;
+    }
+
+    const TArray<FVector3f>* Display = CloudDisplayPos.Find(Key);
+    if (!Display || Display->Num() == 0)
+    {
+        return false;
+    }
+
+    return (NowSeconds - CloudLastArrival.FindRef(Key)) >= 0.012;
+}
+
+void FJUSYNCPointCloudSpawner::KickRampStep(const FString& Key, FCloudRampChain& Chain)
+{
+    if (Chain.bFinalKicked || Chain.Step >= Chain.TotalSteps)
+    {
+        return;
+    }
+
+    // One build in flight per key (pipeline invariant): wait for the slot.
+
+    if (const TSharedRef<FInFlightCloudBuild>* F = InFlightBuilds.Find(Key))
+    {
+        if ((*F)->bBuilding || (*F)->bDeferred)
+        {
+            return;
+        }
+    }
+
+    ++Chain.Step;
+    const bool bFinal = (Chain.Step == Chain.TotalSteps);
+    double ApplyAt = Chain.T0 + Chain.Duration * double(Chain.Step) / double(Chain.TotalSteps);
+
+    const double NowSeconds = FPlatformTime::Seconds();
+    if (ApplyAt <= NowSeconds + 0.0005)
+    {
+        ApplyAt = NowSeconds + Chain.Duration / double(Chain.TotalSteps);
+        Chain.T0 = ApplyAt - Chain.Duration * double(Chain.Step) / double(Chain.TotalSteps);
+    }
+
+    if (bFinal)
+    {
+        Chain.bFinalKicked = true;
+        StartAsyncCloudBuild(Key, MoveTemp(Chain.Entry), Chain.Actor, ApplyAt, /*bChainStep*/true, /*bChainFinal*/true);
+        return;
+    }
+
+    const int32 PointCount = Chain.Entry.Points.Num();
+    TArray64<FLidarPointCloudPoint> Lerped = Chain.Entry.Points; // 20 B/pt copy per step
+    const float S = JUSyncCloudRamp::StepFraction(Chain.Step, Chain.TotalSteps);
+
+    for (int32 i = 0; i < PointCount; ++i)
+    {
+        FLidarPointCloudPoint& P = Lerped[i];
+        if (Chain.PrevPos.IsValidIndex(i))
+        {
+            P.Location = FMath::Lerp(Chain.PrevPos[i], P.Location, S);
+        }
+    }
+
+    FPointCloudReadyEntry StepEntry;
+    StepEntry.Key = Key;
+    StepEntry.Points = MoveTemp(Lerped);
+    StartAsyncCloudBuild(Key, MoveTemp(StepEntry), Chain.Actor, ApplyAt, /*bChainStep*/true, /*bChainFinal*/false);
+}
+
+void FJUSYNCPointCloudSpawner::AbortDeferredSwap(const FString& Key)
+{
+    if (TSharedRef<FInFlightCloudBuild>* F = InFlightBuilds.Find(Key))
+    {
+        if ((*F)->bChainStep && ((*F)->bBuilding || (*F)->bDeferred))
+        {
+            (*F)->bChainAborted = true;
+        }
+    }
+}
+
+void FJUSYNCPointCloudSpawner::TickCloudRamps(double NowSeconds)
+{
+    for (TPair<FString, TSharedRef<FInFlightCloudBuild>>& Pair : InFlightBuilds)
+    {
+        FInFlightCloudBuild& F = *Pair.Value;
+        if (F.bDeferred && NowSeconds >= F.EarliestApply)
+        {
+            OnAsyncCloudBuildFinished(Pair.Key, F.Generation, true);
+        }
+    }
+
+    for (auto It = RampChains.CreateIterator(); It; ++It)
+    {
+        FCloudRampChain& Chain = It.Value();
+
+        if (!IsValid(Chain.Actor) || FindActorByElementKey(It.Key()) != Chain.Actor)
+        {
+            It.RemoveCurrent();
+            continue;
+        }
+
+        KickRampStep(It.Key(), Chain);
+    }
+}
+
+
+namespace JUSyncCloudSmooth
+{
+    static inline int32 QKey(const FVector3f& V)
+    {
+        const FIntVector Q(
+            FMath::RoundToInt(V.X * 100.f),
+            FMath::RoundToInt(V.Y * 100.f),
+            FMath::RoundToInt(V.Z * 100.f));
+        return GetTypeHash(Q);
+    }
+
+    static ULidarPointCloud* GetDisplayedCloud(AActor* Actor)
+    {
+        if (ALidarPointCloudActor* LA = Cast<ALidarPointCloudActor>(Actor))
+        {
+            if (ULidarPointCloudComponent* Comp = LA->GetPointCloudComponent())
+            {
+                return Comp->GetPointCloud();
+            }
+        }
+        return nullptr;
+    }
+}
+
+bool FJUSYNCPointCloudSpawner::StartCloudSmoothMorph(const FString& Key, FPointCloudReadyEntry& Entry, AActor* Actor,
+                                                     double T0, double Duration)
+{
+    const int32 NewCount = Entry.Points.Num();
+    ULidarPointCloud* Cloud = JUSyncCloudSmooth::GetDisplayedCloud(Actor);
+    const TArray<FVector3f>* Displayed = CloudDisplayPos.Find(Key);
+    if (NewCount == 0 || Duration <= 0.0 || !IsValid(Cloud) || !Displayed || Displayed->Num() == 0)
+    {
+        return false;
+    }
+
+    FCloudSmoothMorph Morph;
+    Morph.Actor = Actor;
+    Morph.T0 = T0;
+    Morph.Duration = Duration;
+
+    const int32 ExpectedPts = Displayed->Num();
+    Morph.Start.Reserve(ExpectedPts);
+    Morph.End.Reserve(ExpectedPts);
+
+    const TArray<int32>* KnownMap = CloudWalkInputIdx.Find(Key);
+    const bool bReuseMap = (KnownMap && KnownMap->Num() == ExpectedPts);
+
+    const FVector3f NegOffset = (FVector3f)(-Cloud->LocationOffset);
+
+    TMap<int32, int32> QuantToInput;
+    if (!bReuseMap)
+    {
+        QuantToInput.Reserve(ExpectedPts);
+        for (int32 i = 0; i < ExpectedPts; ++i)
+        {
+            QuantToInput.Add(JUSyncCloudSmooth::QKey((*Displayed)[i] + NegOffset), i);
+        }
+    }
+
+    const TArray64<FLidarPointCloudPoint>& NewPts = Entry.Points;
+    TArray<int32> WalkToInput;
+    WalkToInput.Reserve(ExpectedPts);
+    int32 Held = 0;
+
+    const auto Capture = [&](FLidarPointCloudPoint* P)
+    {
+        int32 Src = INDEX_NONE;
+        if (bReuseMap)
+        {
+            Src = (*KnownMap)[Morph.Start.Num()];
+        }
+        else if (const int32* Found = QuantToInput.Find(JUSyncCloudSmooth::QKey(P->Location)))
+        {
+            Src = *Found;
+        }
+        WalkToInput.Add(Src);
+
+        Morph.Start.Add(P->Location);
+        Morph.End.Add((Src != INDEX_NONE && Src < NewCount) ? NewPts[Src].Location + NegOffset : P->Location);
+        Morph.NewColors.Add((Src != INDEX_NONE && Src < NewCount) ? NewPts[Src].Color : P->Color);
+        if (Src == INDEX_NONE || Src >= NewCount)
+        {
+            ++Held;
+        }
+    };
+    Cloud->ExecuteActionOnAllPoints(Capture, /*bVisibleOnly*/false);
+
+    const int32 Walked = Morph.Start.Num();
+    if (Walked == 0)
+    {
+        return false;
+    }
+
+    if (Held > FMath::Max(64, Walked / 4))
+    {
+        UE_LOG(LogTemp, Log, TEXT("JUSYNC CloudMorph: '%s' correspondence %d/%d unmatched -> ramp fallback"),
+               *Key, Held, Walked);
+        return false;
+    }
+
+    if (!bReuseMap)
+    {
+        CloudWalkInputIdx.Add(Key, MoveTemp(WalkToInput));
+    }
+
+    if (CVarJusyncCloudRenderSmoothing.GetValueOnGameThread() <= 0)
+    {
+        ULidarPointCloudSettings* LidarSettings = GetMutableDefault<ULidarPointCloudSettings>();
+        if (LidarSettings->bUseRenderDataSmoothing)
+        {
+            LidarSettings->bUseRenderDataSmoothing = false;
+            UE_LOG(LogTemp, Log, TEXT("JUSYNC CloudMorph: disabled LidarPointCloud render-data smoothing "
+                                      "(per-frame upload consistency; re-enable via Project Settings or "
+                                      "jusync.Morph.CloudRenderSmoothing 1)"));
+        }
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("JUSYNC CloudMorph: SMOOTH START '%s' walk=%d new=%d held=%d blend=%.0fms cloudActors=%d off=%.1fcm%s"),
+           *Key, Walked, NewCount, Held, Duration * 1000.0, ElementToActor.Num(),
+           Cloud->LocationOffset.Size(), bReuseMap ? TEXT(" (retarget)") : TEXT(""));
+
+    SmoothMorphs.Add(Key, MoveTemp(Morph));
+    return true;
+}
+
+void FJUSYNCPointCloudSpawner::AdvanceCloudSmoothMorphs(double NowSeconds)
+{
+    for (auto It = SmoothMorphs.CreateIterator(); It; ++It)
+    {
+        FCloudSmoothMorph& M = It.Value();
+
+        ULidarPointCloud* Cloud = JUSyncCloudSmooth::GetDisplayedCloud(M.Actor.Get());
+        if (!IsValid(Cloud) || FindActorByElementKey(It.Key()) != M.Actor.Get())
+        {
+            CloudWalkInputIdx.Remove(It.Key());
+            It.RemoveCurrent();
+            continue;
+        }
+
+        const float U = FMath::Clamp(float((NowSeconds - M.T0) / M.Duration), 0.f, 1.f);
+        const float S = U * U * (3.f - 2.f * U); // continuous motion -> smoothstep easing is correct
+
+        int32 Slot = 0;
+        const int32 Num = M.Start.Num();
+        const auto Write = [&](FLidarPointCloudPoint* P)
+        {
+            if (Slot < Num)
+            {
+                P->Location = FMath::Lerp(M.Start[Slot], M.End[Slot], S);
+                if (Slot < M.NewColors.Num())
+                {
+                    P->Color = M.NewColors[Slot];
+                }
+                ++Slot;
+            }
+        };
+        Cloud->ExecuteActionOnAllPoints(Write, /*bVisibleOnly*/false);
+
+        if (U >= 1.f)
+        {
+            It.RemoveCurrent();
         }
     }
 }
@@ -612,9 +1059,30 @@ void FJUSYNCPointCloudSpawner::ApplyVisualSettings(ULidarPointCloudComponent* Co
     Comp->PointOrientation = PointOrientation;
     Comp->ScalingMethod = PointScaling;
 
+    if (CVarJusyncCloudFixedSize.GetValueOnGameThread() > 0)
+    {
+        Comp->ScalingMethod = ELidarPointCloudScalingMethod::FixedScreenSize;
+        Comp->PointSize = FMath::Max(0.0f, CVarJusyncCloudScreenSize.GetValueOnGameThread());
+    }
+
     if (Comp->GetPointShape() != PointShape)
     {
         Comp->SetPointShape(PointShape);
+    }
+}
+
+void FJUSYNCPointCloudSpawner::ApplySizingToActiveActors()
+{
+    for (AActor* Actor : ActiveActors)
+    {
+        if (ALidarPointCloudActor* LidarActor = Cast<ALidarPointCloudActor>(Actor))
+        {
+            if (ULidarPointCloudComponent* Comp = LidarActor->GetPointCloudComponent())
+            {
+                ApplyVisualSettings(Comp);
+                Comp->MarkRenderStateDirty();
+            }
+        }
     }
 }
 
@@ -627,7 +1095,6 @@ void FJUSYNCPointCloudSpawner::ApplyPointShapeToActiveActors(ELidarPointCloudSpr
         {
             if (ULidarPointCloudComponent* Comp = LidarActor->GetPointCloudComponent())
             {
-                // SetPointShape re-derives the material but does not dirty the render state.
                 Comp->SetPointShape(InShape);
                 Comp->MarkRenderStateDirty();
             }
@@ -707,20 +1174,73 @@ AActor* FJUSYNCPointCloudSpawner::AllocateActor()
 
     if (ActiveActors.Num() >= MaxPoolSize)
     {
-        if (AActor* Oldest = ActiveActors.Array().Num() > 0 ? ActiveActors.Array()[0] : nullptr)
+        // Reuse the cloud that has been idle longest, and only take one that is
+        // mid-morph when nothing else is left. Every rank owns a piece of the same
+        // element, so the pool is tight under multi-rank streaming; the previous
+        // "first entry" pick was TSet order and could take the actor a rank is
+        // actively ramping on, leaving that element's key pointing at an actor that
+        // now shows another rank's points.
+        AActor* Victim = nullptr;
+        FString VictimKey;
+        bool bVictimMorphing = false;
+        double VictimStamp = TNumericLimits<double>::Lowest();
+
+        for (AActor* Candidate : ActiveActors)
         {
-            if (Oldest && Oldest->IsValidLowLevel())
+            if (!Candidate || !Candidate->IsValidLowLevel())
             {
-                ActiveActors.Remove(Oldest);
-                UntrackActorElement(Oldest);
-                Oldest->SetActorHiddenInGame(false);
-#ifdef WITH_ANARI_USD_MIDDLEWARE
-                ApplyVisualSettingsToActor(Oldest);
-#endif
-                ApplyTransformToActor(Oldest);
-                ActiveActors.Add(Oldest);
-                return Oldest;
+                Victim = Candidate;
+                VictimKey.Reset();
+                bVictimMorphing = false;
+                break;
             }
+
+            const FString* Key = ActorToElement.Find(Candidate);
+            const double Stamp = (Key && CloudLastArrival.Contains(*Key))
+                ? CloudLastArrival[*Key]
+                : TNumericLimits<double>::Lowest();
+            const bool bMorphing = Key && (RampChains.Contains(*Key) || SmoothMorphs.Contains(*Key));
+
+            bool bBetter;
+            if (!Victim)
+            {
+                bBetter = true;
+            }
+            else if (bMorphing != bVictimMorphing)
+            {
+                bBetter = !bMorphing;
+            }
+            else
+            {
+                bBetter = Stamp < VictimStamp;
+            }
+
+            if (bBetter)
+            {
+                Victim = Candidate;
+                VictimKey = Key ? *Key : FString();
+                bVictimMorphing = bMorphing;
+                VictimStamp = Stamp;
+            }
+        }
+
+        if (Victim && Victim->IsValidLowLevel())
+        {
+            if (bVictimMorphing)
+            {
+                UE_LOG(LogTemp, Warning, TEXT("JUSYNC Spawner: cloud pool full (%d), reusing the actor of mid-morph element '%s' - raise PointCloudPoolSize for multi-rank streams"),
+                    MaxPoolSize, *VictimKey);
+            }
+
+            ActiveActors.Remove(Victim);
+            UntrackActorElement(Victim);
+            Victim->SetActorHiddenInGame(false);
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+            ApplyVisualSettingsToActor(Victim);
+#endif
+            ApplyTransformToActor(Victim);
+            ActiveActors.Add(Victim);
+            return Victim;
         }
         return nullptr;
     }
@@ -748,8 +1268,6 @@ AActor* FJUSYNCPointCloudSpawner::AllocateActor()
             Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
             Comp->ColorSource = ELidarPointCloudColorationMode::Data;
             ApplyVisualSettings(Comp);
-            // LOD streaming: full depth range, but render only nodes within the view frustum.
-            // r.LidarPointBudget (adaptive) then decimates far nodes to hold the target FPS.
             Comp->MinDepth = 0;
             Comp->MaxDepth = -1;
             Comp->bUseFrustumCulling = true;
@@ -838,6 +1356,20 @@ void FJUSYNCPointCloudSpawner::Tick(float DeltaTime)
     if (!Owner.IsValid()) return;
     FlushExpiredNoColorClouds();
     DrainReadyQueue();
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    const double NowSeconds = FPlatformTime::Seconds();
+    TickCloudRamps(NowSeconds);
+    AdvanceCloudSmoothMorphs(NowSeconds);
+
+    const int32 FixedNow = CVarJusyncCloudFixedSize.GetValueOnGameThread();
+    const float ScreenNow = CVarJusyncCloudScreenSize.GetValueOnGameThread();
+    if (FixedNow != LastFixedSizeState || ScreenNow != LastFixedScreenSize)
+    {
+        LastFixedSizeState = FixedNow;
+        LastFixedScreenSize = ScreenNow;
+        ApplySizingToActiveActors();
+    }
+#endif
 }
 
 void FJUSYNCPointCloudSpawner::DrainReadyQueue()
@@ -872,9 +1404,7 @@ void FJUSYNCPointCloudSpawner::DrainReadyQueueLocked()
 
         if (Entry.Key.IsEmpty())
         {
-            Entry.Key = Entry.ElementName.IsEmpty()
-                ? FString::Printf(TEXT("jusync_pc_r%d"), Entry.Rank)
-                : FString::Printf(TEXT("%s_r%d"), *Entry.ElementName, Entry.Rank);
+            Entry.Key = JUSYNCElementNames::MakeRankedElementKey(Entry.ElementName, Entry.Rank);
         }
 
         if (Entry.Points.Num() == 0)
@@ -899,13 +1429,9 @@ void FJUSYNCPointCloudSpawner::DrainReadyQueueLocked()
             }
         }
 
-        // Pooled/in-place actors keep whatever transform they were created with, so re-apply the
-        // spawner's current location/scale here; otherwise extent changes never resize them.
         ApplyTransformToActor(Actor);
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
-        // Async path (default): off-thread octree build + latest-wins swap
-        // (see StartAsyncCloudBuild).
         if (CVarJusyncAsyncCloudBuild.GetValueOnGameThread() > 0
             && Entry.Points.Num() > 0 && !Entry.bNeedsRecolor)
         {
@@ -915,7 +1441,49 @@ void FJUSYNCPointCloudSpawner::DrainReadyQueueLocked()
                 ActorToElement.Add(Actor, Entry.Key);
             }
             Actor->SetActorEnableCollision(false);
-            StartAsyncCloudBuild(Entry.Key, MoveTemp(Entry), Actor);
+
+            const double NowSeconds = FPlatformTime::Seconds();
+            const FString Key = Entry.Key;
+
+            if (bInPlaceUpdate && ShouldStartCloudRamp(Key, NowSeconds))
+            {
+                AbortDeferredSwap(Key);
+                RampChains.Remove(Key);
+
+                const int32 ForcedMs = CVarJusyncCloudBlendMs.GetValueOnGameThread();
+                const double MaxBlend = FMath::Max(CVarJusyncCloudMaxBlendMs.GetValueOnGameThread(), 8) / 1000.0;
+                const double BlendSeconds = (ForcedMs > 0)
+                    ? ForcedMs / 1000.0
+                    : FMath::Clamp(NowSeconds - CloudLastArrival.FindRef(Key), 0.008, MaxBlend);
+                CloudLastArrival.Add(Key, NowSeconds);
+
+                if (CVarJusyncCloudSmooth.GetValueOnGameThread() > 0
+                    && StartCloudSmoothMorph(Key, Entry, Actor, NowSeconds, BlendSeconds))
+                {
+                    StartAsyncCloudBuild(Key, MoveTemp(Entry), Actor, NowSeconds + BlendSeconds);
+                }
+                else
+                {
+                    FCloudRampChain& Chain = RampChains.FindOrAdd(Key);
+                    Chain.PrevPos = CloudDisplayPos.FindRef(Key);
+                    Chain.Entry = MoveTemp(Entry);
+                    Chain.Actor = Actor;
+                    Chain.T0 = NowSeconds;
+                    Chain.Duration = BlendSeconds;
+                    Chain.TotalSteps = FMath::Clamp(CVarJusyncCloudMorphSteps.GetValueOnGameThread(), 1, 6) + 1;
+
+                    UE_LOG(LogTemp, Log, TEXT("JUSYNC CloudRamp: chain START '%s' prev=%d -> new=%d pts, %d interp step(s) over %.0f ms"),
+                           *Key, Chain.PrevPos.Num(), Chain.Entry.Points.Num(), Chain.TotalSteps - 1, Chain.Duration * 1000.0);
+
+                    KickRampStep(Key, Chain); // overlaps step-1 build with the hold window
+                }
+            }
+            else
+            {
+                CloudLastArrival.Add(Key, NowSeconds);
+                RampChains.Remove(Key);
+                StartAsyncCloudBuild(Key, MoveTemp(Entry), Actor);
+            }
             ItemsProcessed++;
             continue;
         }
@@ -993,7 +1561,6 @@ void FJUSYNCPointCloudSpawner::DrainReadyQueueLocked()
 #endif
     }
 
-    // Recolor any actors that spawned white but LUT is now available
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (GradientPendingActors.Num() > 0)
     {
@@ -1021,6 +1588,14 @@ void FJUSYNCPointCloudSpawner::DestroyAllActors()
         PendingNoColorClouds.Empty();
     }
 
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    RampChains.Reset();
+    CloudDisplayPos.Reset();
+    CloudLastArrival.Reset();
+    SmoothMorphs.Reset();
+    CloudWalkInputIdx.Reset();
+#endif
+
     for (AActor* Actor : ActiveActors)
     {
         if (Actor && Actor->IsValidLowLevel()) Actor->Destroy();
@@ -1040,9 +1615,6 @@ void FJUSYNCPointCloudSpawner::DestroyAllActors()
     LastNormalCalcTime.Empty();
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
-    // Drop stashed replacements (points owned by the entry dtor). In-flight builds
-    // self-discard on completion: the actor is untracked, so the key-ownership
-    // check fails and the fresh asset is marked garbage.
     for (auto& Pair : InFlightBuilds)
     {
         Pair.Value->PendingReplacement = FPointCloudReadyEntry();

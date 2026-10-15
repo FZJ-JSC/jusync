@@ -12,7 +12,6 @@
 #include "Misc/Paths.h"
 #include "HAL/FileManager.h"
 
-// Platform-specific headers
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
 #include <windows.h>
@@ -31,10 +30,8 @@
 DEFINE_LOG_CATEGORY(LogJUSYNC)
 
 #if WITH_ANARI_USD_MIDDLEWARE
-// jusync.diag console command object (registered in RegisterModuleSystems).
 static IConsoleObject* GJusyncDiagCmd = nullptr;
 
-// Shared table printer (console command + headless harness).
 static void JusyncLogDiagTable(int32 Rows)
 {
     TArray<char> Buf;
@@ -238,7 +235,6 @@ void FJUSYNCModule::LogMiddlewareCapabilities() {
 
 void FJUSYNCModule::RegisterModuleSystems() {
 #if WITH_ANARI_USD_MIDDLEWARE
-    // jusync.diag [N|clear] — per-file streaming stage-latency journal dump (Phase 0).
     if (!GJusyncDiagCmd)
     {
         GJusyncDiagCmd = IConsoleManager::Get().RegisterConsoleCommand(
@@ -256,11 +252,11 @@ void FJUSYNCModule::RegisterModuleSystems() {
                     : 20;
                 JusyncLogDiagTable(N);
             }),
-            ECVF_Default); // user-typable diag command (UE 5.7 removed ECVF_CodeOnly, which would have hidden it anyway)
+            ECVF_Default);
     }
 
-    // Cmdline-driven headless perf harness; inert unless -JusyncAuto* flags present
     // (its ticker is tied to the process lifetime of the headless run).
+
     MaybeStartHeadlessHarness();
 #endif
 }
@@ -276,18 +272,6 @@ void FJUSYNCModule::UnregisterModuleSystems() {
 }
 
 #if WITH_ANARI_USD_MIDDLEWARE
-// ---------------------------------------------------------------------------
-// Headless streaming perf harness (cmdline-only; inert in normal runs).
-//
-//   -JusyncAutoSpawner          spawn a JUSYNCFileSpawnerActor once the game
-//                               world begins play and start its pipeline
-//   -JusyncAutoDiag=SEC[,COUNT] dump the jusync.diag table every SEC seconds
-//                               (COUNT times, default: until quit)
-//   -JusyncAutoDiagRows=N       rows per dump (default 40)
-//   -JusyncAutoQuit=SEC         force-exit SEC seconds after module startup
-//
-// Intended for: UnrealEditor-Cmd.exe <uproject> <map> -game -nullrhi ...
-// ---------------------------------------------------------------------------
 namespace
 {
     struct FJusyncHarnessState
@@ -419,7 +403,6 @@ void FJUSYNCModule::MaybeStartHeadlessHarness()
 #endif
 
 void FJUSYNCModule::CleanupPlatformSpecific() {
-    // Nothing to free: libraries are resolved via the process DLL path.
 }
 
 #undef LOCTEXT_NAMESPACE

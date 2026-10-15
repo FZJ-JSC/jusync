@@ -19,7 +19,6 @@
 #include "Engine/World.h"
 #include "TimerManager.h"
 
-// Byte conversion for GB-based memory queries
 #define GB_TO_BYTES(x) static_cast<int64>((x) * 1073741824.0)
 
 AJUSYNCBenchmarkActor::AJUSYNCBenchmarkActor()
@@ -91,7 +90,6 @@ void AJUSYNCBenchmarkActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
     Super::EndPlay(EndPlayReason);
 }
 
-// ========== MEMORY / TIMING HELPERS ==========
 
 void AJUSYNCBenchmarkActor::SnapshotRAMAndVRAM(int64& OutRAM, int64& OutVRAM)
 {
@@ -119,7 +117,6 @@ void AJUSYNCBenchmarkActor::EndStage(double& OutMs)
     OutMs = (Now - StageStartTime) * 1000.0;
 }
 
-// ========== BENCHMARK LIFECYCLE ==========
 
 void AJUSYNCBenchmarkActor::StartBenchmarkRun()
 {
@@ -146,7 +143,6 @@ void AJUSYNCBenchmarkActor::StartBenchmarkRun()
     TotalPCPoints = 0;
     SessionStartTime = FPlatformTime::Seconds();
 
-    // Take system baseline
     SnapshotRAMAndVRAM(SessionRAMStart, SessionVRAMStart);
 
     UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Bench Actor: starting benchmark (%d warmup + %d measured runs)"),
@@ -199,7 +195,6 @@ void AJUSYNCBenchmarkActor::RunPipelineIteration()
 {
     if (bIsCancelled) return;
 
-    // Reset per-run counters
     FilteredFiles.Empty();
     FilteredSizes.Empty();
     FilteredRanks.Empty();
@@ -318,11 +313,9 @@ void AJUSYNCBenchmarkActor::OnFileListReceived_Internal(const TArray<FString>& F
         return;
     }
 
-    // Record file list stage timing
     EndStage(CurrentRunTimings.FileListMs);
     CurrentRunTimings.FilesRequested = FileList.Num();
 
-    // Single-pass filtering (mirrors FileSpawnerActor)
     TArray<FString> PngFiles;
     TArray<int32> PngRanks;
     TArray<FString> LocalFiles;
@@ -484,13 +477,11 @@ void AJUSYNCBenchmarkActor::OnSingleFileDownloaded(const FString& Filename, cons
 
     NextSpawnIndex = FileIndex;
 
-    // Move heavy USD parse to background thread
     TWeakObjectPtr<AJUSYNCBenchmarkActor> WeakThis = this;
     AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakThis, Filename, FileData, FileIndex, TargetRank]() mutable
     {
         if (!WeakThis.IsValid()) return;
 
-        // Parse timing measured on the background thread
         const double ParseStart = FPlatformTime::Seconds();
 
         TArray<FJUSYNCMeshData> MeshData;
@@ -532,7 +523,6 @@ void AJUSYNCBenchmarkActor::SpawnMeshFromData(const FString& Filename, bool bPar
 {
     if (bIsCancelled) return;
 
-    // Gradient after first PC parse
     if (bParsed && bSpawnPointClouds && PointCloudData.Num() > 0 && !bGradientReady && !bGradientAttempted)
     {
         bGradientAttempted = true;
@@ -550,7 +540,6 @@ void AJUSYNCBenchmarkActor::SpawnMeshFromData(const FString& Filename, bool bPar
 
     const double MeshSpawnStart = FPlatformTime::Seconds();
 
-    // Spawn meshes on game thread
     if (bParsed && MeshData.Num() > 0)
     {
         int32 ValidMeshCount = 0;
@@ -590,7 +579,6 @@ void AJUSYNCBenchmarkActor::SpawnMeshFromData(const FString& Filename, bool bPar
 
     CurrentRunTimings.MeshSpawnMs += (FPlatformTime::Seconds() - MeshSpawnStart) * 1000.0;
 
-    // Dispatch point clouds (async via spawner)
     if (bSpawnPointClouds && PointCloudData.Num() > 0)
     {
         StartStage();
@@ -746,20 +734,17 @@ void AJUSYNCBenchmarkActor::CheckIterationComplete()
 {
     if (bIsCancelled || !bIsRunning) return;
 
-    // Not complete until all files downloaded, pipeline drained, and all PCs spawned
     if (FilesDownloaded < FilesTotal || PipelineActive > 0 || PendingAsyncPCS > 0)
     {
         return;
     }
 
-    // Ensure the point cloud spawner queue has been drained to actors
     UJUSYNCSubsystem* Subsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
     if (Subsystem && Subsystem->GetPointCloudSpawner())
     {
         Subsystem->GetPointCloudSpawner()->DrainReadyQueue();
     }
 
-    // One final check after drain (drain may enqueue more to spawn asynchronously)
     if (PendingAsyncPCS > 0)
     {
         TWeakObjectPtr<AJUSYNCBenchmarkActor> WeakThis = this;
@@ -778,7 +763,6 @@ void AJUSYNCBenchmarkActor::CheckIterationComplete()
         return;
     }
 
-    // End download stage accounts for the full download+parse+spawn window
     CurrentRunTimings.DownloadMs = (FPlatformTime::Seconds() - DownloadStageStart) * 1000.0;
 
     FinalizeRun();
@@ -788,8 +772,6 @@ void AJUSYNCBenchmarkActor::FinalizeRun()
 {
     if (bIsCancelled) return;
 
-    // Total time for the iteration = file-list completion -> full pipeline complete.
-    // Reuse the download window if it was captured; otherwise fall back to stage sum.
     if (DownloadStageStart > 0.0)
     {
         CurrentRunTimings.TotalMs = (FPlatformTime::Seconds() - DownloadStageStart) * 1000.0;
@@ -801,7 +783,6 @@ void AJUSYNCBenchmarkActor::FinalizeRun()
             CurrentRunTimings.PCSpawnMs + CurrentRunTimings.MaterialMs;
     }
 
-    // Save to BenchmarkResults (only measured runs)
     if (!bIsWarmup)
     {
         ComputeAndRecordResult();
@@ -813,18 +794,15 @@ void AJUSYNCBenchmarkActor::FinalizeRun()
 
     if (RunIndex < TotalRuns)
     {
-        // Advance to next run
         bIsWarmup = (RunIndex < WarmupRuns);
         UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Bench Actor: run %d complete, moving to run %d"), RunIndex, RunIndex + 1);
         BeginNextRun();
     }
     else
     {
-        // Benchmark complete
         bIsRunning = false;
         UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Bench Actor: benchmark complete (%d runs, %d measured)"), TotalRuns, MeasuredRuns);
 
-        // Export results
         if (!OutputDirectory.IsEmpty())
         {
             switch (OutputFormat)
@@ -866,7 +844,6 @@ void AJUSYNCBenchmarkActor::BeginNextRun()
     }
 }
 
-// ========== TIMING HELPERS ==========
 
 int32 AJUSYNCBenchmarkActor::CalculateDynamicTimeout(int64 FileSizeBytes) const
 {
@@ -1011,7 +988,6 @@ void AJUSYNCBenchmarkActor::SaveResultsToJSON(const FString& InDirectory)
     FString Filename = TEXT("benchmark_results_") + FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S")) + TEXT(".json");
     FString Path = FPaths::Combine(InDirectory, Filename);
     FString J = TEXT("{\n");
-    // Session aggregates
     int64 TotalTime = 0, TotalTris = 0, TotalVerts = 0, TotalActors = 0, TotalErrors = 0;
     float AvgSuccess = 0.0f, AvgFPS = 0.0f, AvgFrameTime = 0.0f, AvgCPU = 0.0f, AvgGPU = 0.0f;
     int64 VRAMPeak = 0, RAMPeak = 0, HitchesTotal = 0;
@@ -1030,7 +1006,6 @@ void AJUSYNCBenchmarkActor::SaveResultsToJSON(const FString& InDirectory)
     J += FString::Printf(TEXT("  \"session\": { \"tests\": %d, \"total_time_ms\": %lld, \"triangles\": %lld, \"vertices\": %lld, \"actors\": %lld, \"errors\": %lld,\n"), N, TotalTime, TotalTris, TotalVerts, TotalActors, TotalErrors);
     J += FString::Printf(TEXT("    \"avg_success_rate\": %.1f, \"avg_fps\": %.1f, \"avg_frame_ms\": %.2f, \"avg_cpu\": %.1f, \"avg_gpu\": %.1f,\n"), AvgSuccess/N, AvgFPS/N, AvgFrameTime/N, AvgCPU/N, AvgGPU/N);
     J += FString::Printf(TEXT("    \"vram_peak_gb\": %.2f, \"ram_peak_mb\": %.2f, \"hitches\": %d, \"max_hitch_ms\": %.1f }\n"), VRAMPeak/1073741824.0f, RAMPeak/1048576.0f, HitchesTotal, MaxHitchAll);
-    // Stage statistics
     J += TEXT("  \"stage_stats\": {\n");
     struct FStageField { const char* Name; float (FJUSYNCBenchmarkResult::*F); };
     const FStageField Fields[] = {

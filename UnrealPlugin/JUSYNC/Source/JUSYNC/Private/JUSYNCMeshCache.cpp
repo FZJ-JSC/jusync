@@ -109,7 +109,6 @@ bool FJUSYNCMeshCache::Get(const FString& Filename, uint64 HashLo, uint64 HashHi
         }
     }
 
-    // const Get still updates LRU by mutating the non-logical-const ordering arrays.
     const_cast<FJUSYNCMeshCache*>(this)->TouchLocked(Key);
     return true;
 }

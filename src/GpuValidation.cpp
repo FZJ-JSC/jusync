@@ -7,7 +7,6 @@ namespace anari_usd_middleware {
 
 #ifdef ENABLE_CUDA_ACCELERATION
 
-// Thread-local validation stats
 thread_local GpuValidation::ValidationStats GpuValidation::lastValidationStats;
 
 bool GpuValidation::validateTransformVertices(
@@ -17,7 +16,7 @@ bool GpuValidation::validateTransformVertices(
     float tolerance)
 {
     lastValidationStats = ValidationStats();
-    
+
     if (gpuResults.empty() || inputVertices.empty()) {
         return true;  // Empty data is valid
     }
@@ -33,17 +32,14 @@ bool GpuValidation::validateTransformVertices(
     float totalError = 0.0f;
     size_t failedCount = 0;
 
-    // Sample-based validation for large datasets (check every 100th vertex)
     size_t sampleStep = (count > 10000) ? 100 : 1;
 
     for (size_t i = 0; i < count; i += sampleStep) {
         lastValidationStats.totalComparisons++;
-        
-        // Calculate CPU reference
+
         glm::vec3 cpuResult = transformVertexCpu(inputVertices[i], transform);
         glm::vec3 gpuResult = gpuResults[i];
 
-        // Calculate error
         float error = glm::distance(cpuResult, gpuResult);
         totalError += error;
         lastValidationStats.maxError = std::max(lastValidationStats.maxError, error);
@@ -64,9 +60,8 @@ bool GpuValidation::validateTransformVertices(
     lastValidationStats.passedComparisons = lastValidationStats.totalComparisons - failedCount;
     lastValidationStats.averageError = static_cast<float>(totalError) / static_cast<float>(lastValidationStats.totalComparisons);
 
-    // Fail if more than 1% of samples failed
     bool passed = (failedCount * 100 < lastValidationStats.totalComparisons);
-    
+
     if (!passed) {
         MIDDLEWARE_LOG_ERROR("Vertex validation failed: %zu/%zu samples exceeded tolerance (%f)",
                            failedCount, lastValidationStats.totalComparisons, tolerance);
@@ -86,7 +81,7 @@ bool GpuValidation::validateTransformNormals(
     float tolerance)
 {
     lastValidationStats = ValidationStats();
-    
+
     if (gpuResults.empty() || inputNormals.empty()) {
         return true;
     }
@@ -102,16 +97,14 @@ bool GpuValidation::validateTransformNormals(
     float totalError = 0.0f;
     size_t failedCount = 0;
 
-    // Sample-based validation
     size_t sampleStep = (count > 10000) ? 100 : 1;
 
     for (size_t i = 0; i < count; i += sampleStep) {
         lastValidationStats.totalComparisons++;
-        
+
         glm::vec3 cpuResult = transformNormalCpu(inputNormals[i], normalMatrix);
         glm::vec3 gpuResult = gpuResults[i];
 
-        // For normals, use angular distance
         float dot = glm::dot(cpuResult, gpuResult);
         dot = std::clamp(dot, -1.0f, 1.0f);
         float angleError = std::acos(dot);  // Radians
@@ -130,7 +123,7 @@ bool GpuValidation::validateTransformNormals(
     lastValidationStats.averageError = totalError / static_cast<float>(lastValidationStats.totalComparisons);
 
     bool passed = (failedCount * 100 < lastValidationStats.totalComparisons);
-    
+
     if (!passed) {
         MIDDLEWARE_LOG_ERROR("Normal validation failed: %zu/%zu samples exceeded tolerance",
                            failedCount, lastValidationStats.totalComparisons);
@@ -145,7 +138,7 @@ bool GpuValidation::validateProcessUVs(
     float tolerance)
 {
     lastValidationStats = ValidationStats();
-    
+
     if (gpuResults.empty() || inputUVs.empty()) {
         return true;
     }
@@ -161,12 +154,11 @@ bool GpuValidation::validateProcessUVs(
     float totalError = 0.0f;
     size_t failedCount = 0;
 
-    // Sample-based validation
     size_t sampleStep = (count > 10000) ? 100 : 1;
 
     for (size_t i = 0; i < count; i += sampleStep) {
         lastValidationStats.totalComparisons++;
-        
+
         glm::vec2 cpuResult = processUvCpu(inputUVs[i]);
         glm::vec2 gpuResult = gpuResults[i];
 
@@ -184,7 +176,7 @@ bool GpuValidation::validateProcessUVs(
     lastValidationStats.averageError = totalError / static_cast<float>(lastValidationStats.totalComparisons);
 
     bool passed = (failedCount * 100 < lastValidationStats.totalComparisons);
-    
+
     if (!passed) {
         MIDDLEWARE_LOG_ERROR("UV validation failed: %zu/%zu samples exceeded tolerance",
                            failedCount, lastValidationStats.totalComparisons);
@@ -207,17 +199,14 @@ bool GpuValidation::validateMeshData(
     bool normalsValid = true;
     bool uvsValid = true;
 
-    // Validate vertices if data exists
     if (!inputVertices.empty() && !gpuVertices.empty()) {
         verticesValid = validateTransformVertices(gpuVertices, inputVertices, transform);
     }
 
-    // Validate normals if data exists
     if (!inputNormals.empty() && !gpuNormals.empty()) {
         normalsValid = validateTransformNormals(gpuNormals, inputNormals, normalMatrix);
     }
 
-    // Validate UVs if data exists
     if (!inputUVs.empty() && !gpuUVs.empty()) {
         uvsValid = validateProcessUVs(gpuUVs, inputUVs);
     }
@@ -229,12 +218,8 @@ const GpuValidation::ValidationStats& GpuValidation::getLastValidationStats() {
     return lastValidationStats;
 }
 
-// ============================================================================
-// CPU Reference Implementations
-// ============================================================================
 
 glm::vec3 GpuValidation::transformVertexCpu(const glm::vec3& vertex, const glm::mat4& transform) {
-    // Fast NaN/Inf check
     const int* ix = reinterpret_cast<const int*>(&vertex.x);
     const int* iy = reinterpret_cast<const int*>(&vertex.y);
     const int* iz = reinterpret_cast<const int*>(&vertex.z);
@@ -245,15 +230,13 @@ glm::vec3 GpuValidation::transformVertexCpu(const glm::vec3& vertex, const glm::
         return glm::vec3(0.0f, 0.0f, 0.0f);
     }
 
-    // Matrix multiplication (matches CUDA kernel)
-    float x = transform[0][0] * vertex.x + transform[1][0] * vertex.y + 
+    float x = transform[0][0] * vertex.x + transform[1][0] * vertex.y +
               transform[2][0] * vertex.z + transform[3][0];
-    float y = transform[0][1] * vertex.x + transform[1][1] * vertex.y + 
+    float y = transform[0][1] * vertex.x + transform[1][1] * vertex.y +
               transform[2][1] * vertex.z + transform[3][1];
-    float z = transform[0][2] * vertex.x + transform[1][2] * vertex.y + 
+    float z = transform[0][2] * vertex.x + transform[1][2] * vertex.y +
               transform[2][2] * vertex.z + transform[3][2];
 
-    // Validate output
     const int* itx = reinterpret_cast<const int*>(&x);
     const int* ity = reinterpret_cast<const int*>(&y);
     const int* itz = reinterpret_cast<const int*>(&z);
@@ -268,7 +251,6 @@ glm::vec3 GpuValidation::transformVertexCpu(const glm::vec3& vertex, const glm::
 }
 
 glm::vec3 GpuValidation::transformNormalCpu(const glm::vec3& normal, const glm::mat3& normalMatrix) {
-    // Fast NaN/Inf check
     const int* ix = reinterpret_cast<const int*>(&normal.x);
     const int* iy = reinterpret_cast<const int*>(&normal.y);
     const int* iz = reinterpret_cast<const int*>(&normal.z);
@@ -279,10 +261,8 @@ glm::vec3 GpuValidation::transformNormalCpu(const glm::vec3& normal, const glm::
         return glm::vec3(0.0f, 1.0f, 0.0f);  // Default up
     }
 
-    // Matrix multiplication
     glm::vec3 transformed = normalMatrix * normal;
 
-    // Normalize
     float lengthSquared = glm::dot(transformed, transformed);
     if (lengthSquared < 1e-10f) {
         return glm::vec3(0.0f, 1.0f, 0.0f);  // Default up
@@ -292,7 +272,6 @@ glm::vec3 GpuValidation::transformNormalCpu(const glm::vec3& normal, const glm::
 }
 
 glm::vec2 GpuValidation::processUvCpu(const glm::vec2& uv) {
-    // Fast NaN/Inf check
     const int* ix = reinterpret_cast<const int*>(&uv.x);
     const int* iy = reinterpret_cast<const int*>(&uv.y);
 
@@ -300,7 +279,6 @@ glm::vec2 GpuValidation::processUvCpu(const glm::vec2& uv) {
         return glm::vec2(0.0f, 0.0f);
     }
 
-    // Clamp to reasonable range
     return glm::vec2(
         std::clamp(uv.x, -10.0f, 10.0f),
         std::clamp(uv.y, -10.0f, 10.0f)

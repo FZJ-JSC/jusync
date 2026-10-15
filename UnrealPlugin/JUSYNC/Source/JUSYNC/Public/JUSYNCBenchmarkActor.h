@@ -7,22 +7,10 @@
 #include "JUSYNCFileSpawnerActor.h"
 #include "JUSYNCBenchmarkActor.generated.h"
 
-// Forward declarations
 class UMaterialInterface;
 class UPrimitiveComponent;
 class UJUSYNCSubsystem;
 
-/**
- * End-to-end benchmark actor for the full JUSYNC pipeline.
- *
- * Runs the complete pipeline multiple times (warmup + measured) and reports
- * per-stage timing (Connect -> FileList -> Download -> Parse -> MeshSpawn ->
- * PointCloudSpawn -> Material -> Teardown) plus memory/VRAM/throughput metrics.
- *
- * Pipeline is instrumented, not a wrapper around AJUSYNCFileSpawnerActor, so we
- * get high-resolution timestamps at each stage boundary. Drop into a level and
- * set bAutoStart = true, or call StartBenchmarkRun() from Blueprint / console.
- */
 UCLASS(Blueprintable, BlueprintType, Category = "JUSYNC|Benchmark")
 class JUSYNC_API AJUSYNCBenchmarkActor : public AActor
 {
@@ -31,7 +19,6 @@ class JUSYNC_API AJUSYNCBenchmarkActor : public AActor
 public:
     AJUSYNCBenchmarkActor();
 
-    // ========== CONNECTION CONFIG (mirrors AJUSYNCFileSpawnerActor) ==========
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Benchmark|Connection")
     FString BrokerEndpoint;
 
@@ -53,7 +40,6 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Benchmark|Pipeline", meta = (ClampMin = "1", ClampMax = "16"))
     int32 PipelineDepth;
 
-    // ========== BENCHMARK CONFIG ==========
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Benchmark|Config")
     int32 WarmupRuns;
 
@@ -69,11 +55,9 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Benchmark|Config")
     bool bAutoStart;
 
-    // Repeat each full pipeline run this many times per config? (kept simple: N total)
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Benchmark|Config")
     bool bGarbageCollectBetweenRuns;
 
-    // ========== SPAWNING CONFIG ==========
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Benchmark|Placement")
     FVector BaseSpawnLocation;
 
@@ -104,7 +88,6 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Benchmark|Placement")
     int32 MaxSpawnsPerFrame;
 
-    // ========== STATUS ==========
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark|State")
     int32 CompletedRuns;
 
@@ -114,7 +97,6 @@ public:
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Benchmark|State")
     int32 ActorsSpawned;
 
-    // Events
     UPROPERTY(BlueprintAssignable, Category = "JUSYNC|Benchmark|Events")
     FOnSpawnerAllComplete OnBenchmarkComplete;
 
@@ -127,7 +109,6 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmark")
     void ClearSpawnedActors();
 
-    // C++ only - returns per-run benchmark results
     TArray<FJUSYNCBenchmarkResult> GetResults() const;
 
 protected:
@@ -135,7 +116,6 @@ protected:
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
-    // Stage timing storage for one measured run
     struct FRunTimings
     {
         double ConnectMs = 0.0;
@@ -161,7 +141,6 @@ private:
 
     FRunTimings CurrentRunTimings;
 
-    // ========== PIPELINE STATE (copied from AJUSYNCFileSpawnerActor, simplified) ==========
     TArray<FString>           FilteredFiles;
     TArray<int64>             FilteredSizes;
     TArray<int32>             FilteredRanks;
@@ -181,7 +160,6 @@ private:
     int32 NextSpawnIndex      = 0;
     bool  bIsCancelled        = false;
 
-    // ========== TIMER / TIMING HELPERS ==========
     double SessionStartTime    = 0.0;
     double StageStartTime      = 0.0;
     double DownloadStageStart  = 0.0;  // download->spawn window start
@@ -194,13 +172,11 @@ private:
     int32  TotalRuns           = 0;
     bool   bIsWarmup           = false;
 
-    // Baseline memory measurements
     int64  SessionRAMStart     = 0;
     int64  SessionVRAMStart    = 0;
 
     FTimerHandle CompleteWaitTimerHandle;
 
-    // ========== PIPELINE (copied from AJUSYNCFileSpawnerActor) ==========
     void RunPipelineIteration();
     void ConnectToBroker();
     void RequestFileList();
@@ -220,7 +196,6 @@ private:
     void FinalizeRun();
     void BeginNextRun();
 
-    // Benchmark bookkeeping
     TArray<FJUSYNCBenchmarkResult> BenchmarkResults;
     void StartStage();
     void EndStage(double& OutMs);

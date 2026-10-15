@@ -1,12 +1,7 @@
 #pragma once
 
 // Canonical ANARI-USD / JUSYNC ZMQ wire protocol.
-//
-// IMPORTANT:
-// - This header is the single source of truth for packed ZMQ message layout.
-// - Do not change existing field order, field size, or message IDs.
-// - Add new messages as new IDs and new structs.
-// - Consumers must safely ignore unknown future message types.
+
 
 #include <algorithm>
 #include <cstdint>
@@ -23,12 +18,10 @@ inline constexpr uint32_t ANARI_USD_DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024;
 
 enum class ZmqMessageType : uint32_t
 {
-    // Worker registration / heartbeat
     WORKER_READY = 1,
     WORKER_HEARTBEAT = 2,
     BROKER_ACK = 10,
 
-    // Worker status queries
     REQ_WORKER_STATUS = 20,
     REQ_WORKER_COUNT = 21,
     RESP_WORKER_COUNT = 23,
@@ -36,7 +29,6 @@ enum class ZmqMessageType : uint32_t
     RESP_WORKER_STATUS = 22,
     RESP_WORKER_LIST = 25,
 
-    // File request / response
     REQ_LIST_FILES = 100,
     REQ_GET_FILE = 101,
     REQ_GET_FRAME = 102,
@@ -47,18 +39,15 @@ enum class ZmqMessageType : uint32_t
     RESP_NO_FILE = 203,
     RESP_ERROR = 204,
 
-    // Push notifications
     NOTIFY_FILE_UPDATE = 300,
     NOTIFY_COMMIT_COMPLETE = 301,
     NOTIFY_FILE_UPDATE_V2 = 302,
     NOTIFY_SCENE_UPDATE = 303,
     NOTIFY_PROPERTY_UPDATE = 304,
 
-    // Property query
     REQ_GET_PROPERTY = 400,
     RESP_PROPERTY = 401,
 
-    // Scene snapshot
     REQ_SCENE_SNAPSHOT = 500,
     RESP_SCENE_SNAPSHOT = 501
 };
@@ -379,21 +368,8 @@ struct ZmqFileNotification
     }
 };
 
-// ---------------------------------------------------------------------------
-// RawGeo: self-describing binary point-cloud payload streamed under the same
-// "clips/<name>_Geom__<time>" key as the USD crate, but with ".geo" extension.
-// Written by UsdBridge alongside (or instead of) USD clip exports when
-// JUSYNC_RAWGEO=1, so a streaming client can skip USD parsing entirely.
-// Clients sniff Magic — never the filename — mirroring the crate-vs-ASCII
-// content sniffing convention.
-//
 // File layout (all little-endian, packed):
-//   [JusyncRawGeoHeader]
-//   [JusyncRawGeoAttrDesc] * numAttributes
-//   positions : float3  * numPoints          (positionComponents == 3)
-//   colors    : float3/4 * numPoints         (only if colorComponents != 0)
-//   attr data : float * (attrUniformCount * components) per desc, in order
-// ---------------------------------------------------------------------------
+
 inline constexpr uint32_t JUSYNC_RAWGEO_MAGIC   = 0x3147534A; // "JSG1"
 inline constexpr uint32_t JUSYNC_RAWGEO_VERSION = 1;
 
@@ -488,11 +464,6 @@ struct ZmqBrokerAck
     }
 };
 
-// Typed scene / property update.
-//
-// Used for NOTIFY_SCENE_UPDATE (303) and NOTIFY_PROPERTY_UPDATE (304).
-// The same struct is intentionally used for both so old/new clients can share
-// one parser. `change_type` disambiguates the semantic meaning.
 struct ZmqSceneUpdate
 {
     uint32_t magic;

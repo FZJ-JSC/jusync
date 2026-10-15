@@ -9,7 +9,6 @@
 #include "TimerManager.h"
 #include "JUSYNCBlueprintLibrary.generated.h"
 
-// Forward declarations
 class URealtimeMeshComponent;
 
 UCLASS()
@@ -18,43 +17,30 @@ class JUSYNC_API UJUSYNCBlueprintLibrary : public UBlueprintFunctionLibrary
     GENERATED_BODY()
 
 public:
-    // ========== EVENT DISPATCHERS FOR ASYNC OPERATIONS ==========
 
-    // Worker count async result (use non-multicast for Blueprint function parameters)
     DECLARE_DYNAMIC_DELEGATE_OneParam(FOnWorkerCountReceived, int32, WorkerCount);
 
-    // Total worker count async result (including rank 0)
     DECLARE_DYNAMIC_DELEGATE_OneParam(FOnTotalWorkerCountReceived, int32, TotalCount);
 
-    // Worker status async result
     DECLARE_DYNAMIC_DELEGATE_OneParam(FOnWorkerStatusReceived, const TArray<FJUSYNCWorkerStatus>&, WorkerStatus);
 
-    // File list async result
     DECLARE_DYNAMIC_DELEGATE_OneParam(FOnFileListReceived, const TArray<FString>&, FileList);
 
-    // File list with sizes async result
     DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnFileListWithSizesReceived, const TArray<FString>&, FileList, const TArray<int64>&, FileSizes);
 
-    // File list with sizes and ranks async result
     DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnFileListWithSizesAndRanksReceived, const TArray<FString>&, FileList, const TArray<int64>&, FileSizes, const TArray<int32>&, FileRanks);
 
-    // File async result
     DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnFileReceived, const FString&, Filename, const TArray<uint8>&, FileData);
 
-    // Parallel file download async result - one callback per file as it completes
     DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnParallelFileReceived, const FString&, Filename, const TArray<uint8>&, FileData);
 
-    // Parallel download completion callback - when ALL files are done
     DECLARE_DYNAMIC_DELEGATE(FOnParallelDownloadComplete);
 
-    // Parallel download error callback - per-file errors
     DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnParallelDownloadError, const FString&, Filename, const FString&, ErrorMessage);
 
-    // Generic error event
     DECLARE_DYNAMIC_DELEGATE_OneParam(FOnBrokerError, FString, ErrorMessage);
 
 public:
-    // ========== CONNECTION MANAGEMENT ==========
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Connection", CallInEditor)
     static bool InitializeJUSYNCMiddleware(const FString& Endpoint = TEXT(""));
 
@@ -73,7 +59,6 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Connection")
     static void StopJUSYNCReceiving();
 
-    // ========== DEALER CLIENT FOR HPC BROKER ==========
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker", DisplayName = "Connect to ANARI USD Broker")
     static bool ConnectToANARIUSDBroker(const FString& BrokerEndpoint = TEXT("tcp://localhost:5556"), int32 TimeoutMs = 5000);
 
@@ -89,7 +74,6 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker", DisplayName = "Get Last File List With Sizes From Broker")
     static bool GetLastFileListWithSizesFromBroker(TArray<FString>& OutFileList, TArray<int64>& OutFileSizes);
 
-    // ========== LEGACY SYNC BROKER FUNCTIONS (Use async versions instead) ==========
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Legacy", DisplayName = "Request File List From Broker (Sync)")
     static bool RequestFileListFromBroker(int32 TargetRank, int32 TimeoutMs, TArray<FString>& OutFiles);
 
@@ -117,37 +101,28 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Legacy", DisplayName = "Request Worker Count Excluding Rank0 (Sync)")
     static bool RequestWorkerCountExcludingRank0(int32 TimeoutMs, int32& OutWorkerCount);
 
-    // ========== ASYNC WORKER QUERIES (NON-BLOCKING) ==========
 
-    // Async total worker count - fires event when complete, doesn't block
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request Total Worker Count Async")
     static void RequestTotalWorkerCountAsync(int32 TimeoutMs, const FOnTotalWorkerCountReceived& OnComplete, const FOnBrokerError& OnError);
 
-    // Async worker count - fires event when complete, doesn't block
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request Worker Count Async")
     static void RequestWorkerCountAsync(int32 TimeoutMs, const FOnWorkerCountReceived& OnComplete, const FOnBrokerError& OnError);
 
-    // Async worker status - fires event when complete, doesn't block
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request Worker Status Async")
     static void RequestWorkerStatusAsync(int32 TargetRank, int32 TimeoutMs, const FOnWorkerStatusReceived& OnComplete, const FOnBrokerError& OnError);
 
-    // Async file list - fires event when complete, doesn't block
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request File List Async")
     static void RequestFileListAsync(int32 TargetRank, int32 TimeoutMs, const FOnFileListReceived& OnComplete, const FOnBrokerError& OnError);
 
-    // Async file list with sizes - fires event when complete, doesn't block
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request File List With Sizes Async")
     static void RequestFileListWithSizesAsync(int32 TargetRank, int32 TimeoutMs, const FOnFileListWithSizesReceived& OnComplete, const FOnBrokerError& OnError);
 
-    // Async file list with sizes and ranks - fires event when complete, doesn't block
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request File List With Sizes And Ranks Async")
     static void RequestFileListWithSizesAndRanksAsync(int32 TargetRank, int32 TimeoutMs, const FOnFileListWithSizesAndRanksReceived& OnComplete, const FOnBrokerError& OnError);
 
-    // Async file request - fires event when complete, doesn't block
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request File Async")
     static void RequestFileAsync(const FString& Filename, int32 TargetRank, int32 TimeoutMs, const FOnFileReceived& OnComplete, const FOnBrokerError& OnError);
 
-    // Async parallel file requests - downloads multiple files simultaneously
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request Files Parallel Async")
     static void RequestFilesParallelAsync(
         const TArray<FString>& Filenames,
@@ -157,7 +132,6 @@ public:
         const FOnParallelDownloadComplete& OnComplete,
         const FOnParallelDownloadError& OnError);
 
-    // Legacy sync version for backward compatibility
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Legacy", DisplayName = "Request Files Parallel (Sync)")
     static bool RequestFilesParallelSync(
         const TArray<FString>& Filenames,
@@ -165,7 +139,6 @@ public:
         int32 TimeoutMs,
         TArray<FJUSYNCFileData>& OutFiles);
 
-    // ========== USD PROCESSING WITH PREVIEW ==========
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|USD", CallInEditor)
     static bool LoadUSDFromBuffer(const TArray<uint8>& Buffer, const FString& Filename,
         TArray<FJUSYNCMeshData>& OutMeshData, FString& OutPreview);
@@ -174,11 +147,6 @@ public:
     static bool LoadUSDFullFromBuffer(const TArray<uint8>& Buffer, const FString& Filename,
         TArray<FJUSYNCMeshData>& OutMeshData, TArray<FJUSYNCPointCloudData>& OutPointCloudData, FString& OutPreview);
 
-    /**
-     * Zero-copy variant: bypasses std::vector copy at C API boundary.
-     * Accepts raw TArray<uint8> data pointer directly to UsdProcessor.
-     * Use this for performance-critical paths (large payloads).
-     */
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|USD", CallInEditor, DisplayName = "Load USD Full No Copy (Mesh + Point Cloud)")
     static bool LoadUSDFullFromBufferNoCopy(const TArray<uint8>& Buffer, const FString& Filename,
         TArray<FJUSYNCMeshData>& OutMeshData, TArray<FJUSYNCPointCloudData>& OutPointCloudData, FString& OutPreview);
@@ -193,14 +161,11 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|USD")
     static bool ValidateUSDFormat(const TArray<uint8>& Buffer, const FString& Filename);
 
-    // ========== POINT CLOUD PROCESSING ==========
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|PointCloud", CallInEditor, DisplayName = "Load USD Point Cloud From Buffer")
     static bool LoadUSDPointCloudFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCPointCloudData>& OutPointCloudData);
 
-    // Async point cloud processing delegates
     DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnAsyncPointCloudLoaded, const TArray<FJUSYNCPointCloudData>&, PCData, bool, bSuccess, const FString&, ErrorMsg);
 
-    // ========== TEXTURE PROCESSING ==========
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Texture", CallInEditor)
     static FJUSYNCTextureData CreateTextureFromBuffer(const TArray<uint8>& Buffer);
 
@@ -219,11 +184,9 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Texture")
     static bool GetImageRowAsPNGBuffer(const TArray<uint8>& Buffer, int32 RowIndex, TArray<uint8>& OutPNGBuffer);
 
-    // Broadcast duplicate handling
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broadcast")
     static void ClearBroadcastDuplicates();
 
-    // ========== REALTIMEMESH PROCESSING ==========
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh", CallInEditor)
     static bool CreateRealtimeMeshFromJUSYNC(const FJUSYNCMeshData& MeshData,
         URealtimeMeshComponent* RealtimeMeshComponent);
@@ -233,23 +196,19 @@ public:
     static void CreateRealtimeMeshFromJUSYNC_Async(const FJUSYNCMeshData& MeshData,
         URealtimeMeshComponent* RealtimeMeshComponent);
 
-    // ========== ASYNC MATERIAL CREATION ==========
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Materials|Async", CallInEditor,
         meta = (ToolTip = "Creates dynamic material from texture and applies it to mesh component using background threads"))
     static void CreateMaterialFromTexture_Async(UTexture2D* Texture,
         URealtimeMeshComponent* TargetComponent);
 
-    // Async material creation that returns the material (for batch spawning)
     DECLARE_DYNAMIC_DELEGATE_OneParam(FOnMaterialCreated, UMaterialInstanceDynamic*, CreatedMaterial);
 
-    // Original function for backward compatibility
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh|Async", CallInEditor,
         meta = (ToolTip = "Creates dynamic material from texture and returns it via delegate for batch spawning", AutoCreateRefTerm = "OnMaterialCreated"))
     static void CreateMaterialFromTexture_Async_Return(
         UTexture2D* Texture,
         const FOnMaterialCreated& OnMaterialCreated);
 
-    // Extended version with configurable parameters
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh|Async", CallInEditor,
         meta = (ToolTip = "Creates dynamic material from texture using specified base material and texture parameter, returns via delegate", AutoCreateRefTerm = "OnMaterialCreated", DisplayName = "Create Material From Texture Async Return (Extended)"))
     static void CreateMaterialFromTexture_Async_Return_Extended(
@@ -258,7 +217,6 @@ public:
         FName TextureParameterName,
         const FOnMaterialCreated& OnMaterialCreated);
 
-    // ========== ASYNC BATCH SPAWNING ==========
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh|Async", CallInEditor,
         meta = (ToolTip = "Batch creates meshes with async processing and frame budget management"))
     static void BatchCreateRealtimeMeshesFromJUSYNC_Async(const TArray<FJUSYNCMeshData>& MeshDataArray,
@@ -272,7 +230,6 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh")
     static FJUSYNCRealtimeMeshData ConvertToRealtimeMeshFormat(const FJUSYNCMeshData& StandardMesh);
 
-    // ========== REALTIMEMESH SPAWNING ==========
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning", CallInEditor)
     static AActor* SpawnRealtimeMeshAtLocation(const FJUSYNCMeshData& MeshData,
         const FVector& SpawnLocation,
@@ -316,7 +273,6 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning")
     static TArray<FVector> GetSpawnPointLocations(const FString& TagFilter = TEXT("USDSpawnPoint"));
 
-    // ========== POINT CLOUD SPAWNING ==========
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|PointCloud Spawning", CallInEditor, DisplayName = "Spawn Point Cloud At Location")
     static AActor* SpawnPointCloudAtLocation(
         const FJUSYNCPointCloudData& PointCloudData,
@@ -329,7 +285,6 @@ public:
         const TArray<FJUSYNCPointCloudData>& PointCloudDataArray,
         const TArray<FVector>& SpawnLocations);
 
-    // Async point cloud spawn delegate
     DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnPointCloudSpawnedDyn, AActor*, SpawnedActor, bool, bSuccess);
     DECLARE_DYNAMIC_DELEGATE_OneParam(FOnPointCloudBatchSpawnedDyn, const TArray<AActor*>&, SpawnedActors);
 
@@ -348,7 +303,6 @@ public:
         const FOnPointCloudBatchSpawnedDyn& OnBatchSpawned);
 
 
-    // ========== DATA RECEPTION ==========
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Reception")
     static bool CheckForReceivedFiles(TArray<FJUSYNCFileData>& OutReceivedFiles);
 
@@ -358,7 +312,6 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Reception")
     static void ClearReceivedData();
 
-    // ========== VALIDATION & UTILITIES ==========
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Validation")
     static bool ValidateJUSYNCMeshData(const FJUSYNCMeshData& MeshData, FString& ValidationMessage);
 
@@ -386,7 +339,6 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Validation", DisplayName = "Filter File List By Extensions (Array) With Sizes")
     static void FilterFileListByExtensionsWithSizes(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<FString>& AllowedExtensions, TArray<FString>& OutFilteredFiles, TArray<int64>& OutFilteredSizes);
 
-    // ========== RANK-AWARE FILTER FUNCTIONS ==========
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Validation", DisplayName = "Filter File List By Size (With Ranks)")
     static void FilterFileListBySizeWithRanks(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<int32>& FileRanks, int32 MinimumSizeBytes,
@@ -400,8 +352,6 @@ public:
     static void FilterFileListByExtensionsWithSizesAndRanks(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<int32>& FileRanks,
         const TArray<FString>& AllowedExtensions, TArray<FString>& OutFilteredFiles, TArray<int64>& OutFilteredSizes, TArray<int32>& OutFilteredRanks);
 
-    // ========== GEOMETRY CLIP FILTER ==========
-    // Strips all shared files (manifests, materials, camera, textures) and only returns per-rank geometry clips under "clips/"
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Validation", DisplayName = "Extract Geometry Clips Only")
     static void ExtractGeometryClips(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<int32>& FileRanks,
         TArray<FString>& OutFilteredFiles, TArray<int64>& OutFilteredSizes, TArray<int32>& OutFilteredRanks);
@@ -415,14 +365,12 @@ public:
     UFUNCTION(BlueprintPure, Category = "JUSYNC|Utilities")
     static FString GetJUSYNCTextureStatistics(const FJUSYNCTextureData& TextureData);
 
-    // ========== FILE OPERATIONS ==========
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|File", CallInEditor)
     static bool LoadFileToBuffer(const FString& FilePath, TArray<uint8>& OutBuffer);
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|File", CallInEditor)
     static bool SaveBufferToFile(const TArray<uint8>& Buffer, const FString& FilePath);
 
-    // ========== DEBUG & DISPLAY ==========
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Debug", CallInEditor)
     static void DisplayDebugMessage(const FString& Message, float Duration = 5.0f,
         FLinearColor Color = FLinearColor::Green);
@@ -430,14 +378,13 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Debug", CallInEditor)
     static void LogJUSYNCMessage(const FString& Message, bool bIsError = false);
 
-    // ========== HELPER FUNCTIONS ==========
     UFUNCTION(BlueprintPure, Category = "JUSYNC|Helpers")
     static UJUSYNCSubsystem* GetJUSYNCSubsystem();
 
-    // Current GPU VRAM used by the process, in bytes (0 if it cannot be queried).
     static int64 QueryVRAMUsageBytes();
 
     // Current process CPU usage (0.0-100.0) and active thread count.
+
     static float QueryCPUUsagePercent();
     static int32 QueryActiveThreadCount();
 
@@ -450,8 +397,6 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Utilities")
     static TArray<FRotator> GenerateDefaultRotations(int32 Count, const FRotator& BaseRotation = FRotator::ZeroRotator);
 
-    // ========== Async ===============
-    // Add this declaration in the public section
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning|Legacy", DisplayName = "Batch Spawn Realtime Meshes At Locations (Sync)")
     static TArray<AActor*> BatchSpawnRealtimeMeshesAtLocationsSync(
         const TArray<FJUSYNCMeshData>& MeshDataArray,
@@ -497,16 +442,13 @@ public:
         FVector& OutScaleFactor
     );
 
-    // Internal storage for received data (public for subsystem access)
     static TArray<FJUSYNCFileData> ReceivedFiles;
     static TArray<FString> ReceivedMessages;
     static FCriticalSection DataMutex;
 
-    // Last file list retrieved from broker (for async node output)
     static TArray<FString> LastFileList;
     static FCriticalSection LastFileListMutex;
 
-    // Last file list with sizes retrieved from broker (for async node output)
     static TArray<FString> LastFileListWithSizes_Names;
     static TArray<int64> LastFileListWithSizes_Sizes;
     static FCriticalSection LastFileListWithSizesMutex;
@@ -515,12 +457,10 @@ public:
     static FString DetectUSDContentType(const TArray<uint8>& Buffer);
 
 private:
-    // Internal helper functions
     static bool ValidateBufferSize(const TArray<uint8>& Buffer, const FString& Context);
     static bool ValidateFilePath(const FString& FilePath, const FString& Context);
     static FString ExtractUSDAPreview(const TArray<uint8>& Buffer, int32 MaxLines);
 
-    // Rank extraction helper
     UFUNCTION(BlueprintPure, Category = "JUSYNC|Utilities")
     static int32 ExtractRankFromFilename(const FString& Filename);
 
@@ -534,51 +474,26 @@ private:
         float BatchDelay
     );
 
-    // ========== BENCHMARKING FUNCTIONS ==========
-
-    // (promoted to public: the spawner actor drives the benchmark session
-    // automatically and calls these statics from C++)
 
 public:
-    /**
-     * Start benchmarking for a specific test
-     */
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
     static void StartBenchmark(const FString& TestName, const FJUSYNCBenchmarkConfig& Config);
 
-    /**
-     * End benchmarking and save results
-     */
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
     static void EndBenchmark();
 
-    /**
-     * Save all benchmark results to CSV
-     */
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
     static void SaveAllBenchmarkResultsToCSV(const FString& OutputDirectory);
 
-    /**
-     * Save all benchmark results to JSON (more readable format)
-     */
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
     static void SaveAllBenchmarkResultsToJSON(const FString& OutputDirectory);
 
-    /**
-     * Clear all benchmark results
-     */
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
     static void ClearBenchmarkResults();
 
-    /**
-     * Get current benchmark results
-     */
     UFUNCTION(BlueprintPure, Category = "JUSYNC|Benchmarking")
     static TArray<FJUSYNCBenchmarkResult> GetBenchmarkResults();
 
-    /**
-     * Batch spawn with benchmarking (wraps BatchSpawnRealtimeMeshesWithMaterial)
-     */
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning|Benchmarked", CallInEditor)
     static TArray<AActor*> BatchSpawnRealtimeMeshesWithMaterial_Benchmarked(
         const TArray<FJUSYNCMeshData>& MeshDataArray,
@@ -594,53 +509,26 @@ public:
         float BatchDelay = 0.016f
     );
 
-    /**
-     * Open the interactive FPS measurement window (real frames only, no
-     * synthetic fallback). Open it after the scene is fully spawned; it
-     * closes itself after DurationSeconds.
-     */
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
     static void StartInteractiveWindow(float DurationSeconds = 5.0f);
 
-    /**
-     * Close the interactive FPS measurement window early.
-     */
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
     static void StopInteractiveWindow();
 
-    /**
-     * Measured interactive-window statistics (0 / bValid=false if not measured).
-     */
     UFUNCTION(BlueprintPure, Category = "JUSYNC|Benchmarking")
     static FJUSYNCInteractiveStats GetInteractiveWindowStats();
 
-    /**
-     * Time-to-frame session statistics (connect start -> first frame / full scene).
-     */
     UFUNCTION(BlueprintPure, Category = "JUSYNC|Benchmarking")
     static FJUSYNCBenchmarkTTF GetBenchmarkTTF();
 
-    /**
-     * Clear all benchmark timing state (interactive window + TTF session).
-     */
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
     static void ResetBenchmarkTimings();
 
-    /**
-     * Export the middleware's client-side benchmark report (benchmark_client.json)
-     * to FilePath. Contains receive bytes, file counters (raw + dedup) and
-     * connect->first/last-byte timing; cross-checkable against the cluster-side
-     * ANARI-USD benchmark_rank_*.json serving counters.
-     */
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
     static bool ExportClientBenchmarkReport(const FString& FilePath);
 
-    // ========== DYNAMIC TIMEOUT & RETRY LOGIC ==========
 
 private:
-    /**
-     * Request file with dynamic timeout and retry logic
-     */
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request File Async (Dynamic Timeout)")
     static void RequestFileAsyncDynamic(
         const FString& Filename,
@@ -650,9 +538,6 @@ private:
         int32 MaxRetries = 3,
         bool bUseExtractedRank = true);
 
-    /**
-     * Calculate dynamic timeout based on file size, rank performance, and retry count
-     */
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Utilities")
     static int32 CalculateDynamicTimeout(
         const FString& Filename,
@@ -660,32 +545,19 @@ private:
         bool bIsRetry = false,
         int32 RetryCount = 0);
 
-    /**
-     * Estimate file size from filename patterns
-     */
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Utilities")
     static int64 EstimateFileSizeFromFilename(const FString& Filename);
 
-    /**
-     * Get fallback ranks for a given target rank
-     */
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Utilities")
     static TArray<int32> GetFallbackRanks(int32 TargetRank);
 
-    /**
-     * Clear rank performance statistics
-     */
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Utilities")
     static void ClearRankPerformanceStats();
 
-    /**
-     * Get rank performance statistics as string
-     */
     UFUNCTION(BlueprintPure, Category = "JUSYNC|Utilities")
     static FString GetRankPerformanceStats();
 
 private:
-    // Rank performance tracking
     class FRankPerformanceTracker
     {
     private:
@@ -712,17 +584,13 @@ private:
 
     static FRankPerformanceTracker RankPerformanceTracker;
 
-    // Benchmark data storage
     static TArray<FJUSYNCBenchmarkResult> BenchmarkResults;
     static FString CurrentBenchmarkTest;
     static FJUSYNCBenchmarkConfig CurrentBenchmarkConfig;
     static bool bIsBenchmarking;
     static FDateTime BenchmarkSessionStartTime;
 
-    // (promoted to public: record + result builders are driven by the spawner
-    // actor's automatic benchmark session)
 public:
-    // Benchmark helper functions
     static void RecordBenchmarkResult(const FJUSYNCBenchmarkResult& Result);
     static FJUSYNCBenchmarkResult CreateBenchmarkResult(const FString& TestName, float TotalTimeMs, int32 TriangleCount, int32 VertexCount, int64 RAMBefore, int64 RAMAfter, int32 ActorCount, int32 ErrorCount, int32 SplitMeshCount);
     static FJUSYNCBenchmarkResult CreateBenchmarkResultExtended(

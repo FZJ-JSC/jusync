@@ -13,8 +13,7 @@ FJUSYNCBenchmarkTiming& FJUSYNCBenchmarkTiming::Get()
 FJUSYNCBenchmarkTiming::FJUSYNCBenchmarkTiming()
 {
 	// Per-frame game-thread tick. One registration for the process lifetime;
-	// the per-frame work is a handful of atomic-free member reads/writes.
-	// FTickerDelegate is TDelegate<bool(float)>: return true to keep ticking
+
 	TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
 		FTickerDelegate::CreateLambda([this](float DeltaTime) -> bool
 		{
@@ -34,7 +33,6 @@ FJUSYNCBenchmarkTiming::~FJUSYNCBenchmarkTiming()
 
 void FJUSYNCBenchmarkTiming::TickFrame(float DeltaTime)
 {
-	// Stamp the first rendered frame after the first actor spawn
 	if (bFirstSpawnPending)
 	{
 		bFirstSpawnPending = false;
@@ -42,9 +40,6 @@ void FJUSYNCBenchmarkTiming::TickFrame(float DeltaTime)
 		{
 			FirstFrameWall = FPlatformTime::Seconds();
 		}
-		// If full-scene completion was recorded while no frame had rendered
-		// yet (backgrounded/throttled spawn), take the full-scene timestamp on
-		// this same frame so FirstFrameMs <= FullSceneMs always holds.
 		if (bFullScenePending)
 		{
 			bFullScenePending = false;
@@ -52,7 +47,6 @@ void FJUSYNCBenchmarkTiming::TickFrame(float DeltaTime)
 		}
 	}
 
-	// Interactive window measurement (game time)
 	if (!bWindowOpen)
 	{
 		return;
@@ -62,7 +56,6 @@ void FJUSYNCBenchmarkTiming::TickFrame(float DeltaTime)
 
 	if (FramesInWindow == 0)
 	{
-		// First tick inside the window: no previous frame to diff against
 		LastTickGameTime = Now;
 	}
 	else
@@ -159,7 +152,6 @@ void FJUSYNCBenchmarkTiming::MarkFirstActorSpawned()
 	{
 		return; // already captured
 	}
-	// Actual timestamp is taken on the next rendered frame in TickFrame
 	bFirstSpawnPending = true;
 }
 
@@ -176,12 +168,9 @@ void FJUSYNCBenchmarkTiming::MarkFullScene()
 	const double Now = FPlatformTime::Seconds();
 	if (FirstFrameWall >= 0.0)
 	{
-		// A frame already rendered after the first spawn: full scene is now.
 		FullSceneWall = Now;
 		return;
 	}
-	// No rendered frame yet: defer the full-scene timestamp until the first
-	// rendered frame so the FirstFrameMs <= FullSceneMs invariant holds.
 	bFullScenePending = true;
 	FullSceneCandidateWall = Now;
 }
@@ -206,8 +195,6 @@ FJUSYNCBenchmarkTTF FJUSYNCBenchmarkTiming::GetTTF() const
 	}
 	else if (FullSceneCandidateWall > 0.0)
 	{
-		// Session ended before any frame rendered: report the scene creation
-		// time (full_scene >= first_frame still holds, first may be 0).
 		TTF.FullSceneMs = (FullSceneCandidateWall - ConnectStartWall) * 1000.0;
 	}
 	return TTF;

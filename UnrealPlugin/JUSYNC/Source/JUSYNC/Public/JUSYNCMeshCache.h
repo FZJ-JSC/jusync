@@ -5,13 +5,6 @@
 #include "JUSYNCTypes.h"
 #include "RealtimeMeshSimple.h"
 
-/**
- * Parsed-file cache keyed by filename + broker hash (size fallback).
- *
- * The cache stores raw parsed USD payload. LUT vertex-color baking is NOT baked
- * into the cached copy; callers receive a working copy and bake on demand so a
- * later gradient/LUT change does not serve stale vertex colors.
- */
 class JUSYNC_API FJUSYNCMeshCache
 {
 public:

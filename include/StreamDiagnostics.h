@@ -1,18 +1,4 @@
 #pragma once
-// JUSYNC streaming stage-latency journal (Phase 0 observability for realtime streaming).
-//
-// Header-only so both the middleware library and host plugins (Unreal) can include it
-// without CMake/Build.cs source changes; hosts reach it through the C API in
-// AnariUsdMiddleware_C.h (JusyncDiag* functions).
-//
-// One trace per file. The cycle restarts on every broker NOTIFY, so the journal always
-// reflects the newest update ("latest wins") — superseded in-flight work simply drops
-// out of view instead of polluting timings.
-//
-//   notify -> queue -> dl_start -> dl_done -> parse_start -> parse_done -> fill_done -> spawned
-//
-// Stages before fill_done are recorded by the middleware; QUEUE and SPAWNED are host
-// stages (marked via the C API). All timestamps are steady_clock ns; 0 = not reached.
 
 #include <algorithm>
 #include <array>
@@ -50,7 +36,6 @@ inline const char* stageName(int s) {
 
 class Diagnostics {
 public:
-    // Number of distinct files kept; oldest are evicted first.
     static constexpr size_t kCapacity = 512;
 
     static Diagnostics& instance() {
@@ -66,8 +51,6 @@ public:
     void setEnabled(bool v) { enabled_.store(v, std::memory_order_relaxed); }
     bool enabled() const { return enabled_.load(std::memory_order_relaxed); }
 
-    // Record the current time for `stage` of `file`. STAGE_NOTIFY resets the cycle;
-    // repeated marks of the same stage within a cycle keep the first stamp.
     void mark(const std::string& file, int stage, uint64_t bytes = 0,
               uint64_t hashLo = 0, uint64_t hashHi = 0) {
         if (!enabled() || file.empty() || stage < 0 || stage >= STAGE_COUNT) return;
@@ -95,24 +78,18 @@ public:
         if (hashHi) tr.hashHi = hashHi;
     }
 
-    // ms between two stages of `file`; -1 if either stamp is missing.
     double gapMs(const std::string& file, int from, int to) const {
         std::lock_guard<std::mutex> lock(mu_);
         auto it = traces_.find(file);
         return (it == traces_.end()) ? -1.0 : diffMs(it->second.t, from, to);
     }
 
-    // Span of the trace: notify -> spawned when complete, otherwise oldest -> newest
-    // recorded stamp (works for host-only marks too). -1 if the file is unknown.
     double totalMs(const std::string& file) const {
         std::lock_guard<std::mutex> lock(mu_);
         auto it = traces_.find(file);
         return (it == traces_.end()) ? -1.0 : totalMsLocked(it->second);
     }
 
-    // One-line breakdown, e.g.
-    //   geom_r0.usdc 128734KB q=0.2 dl=1840.3 parse=320.1 fill=45.2 spawn=90.0 total=2297.4 ms
-    // Suffix " (in flight)" when SPAWNED has not been reached yet.
     std::string summary(const std::string& file) const {
         std::lock_guard<std::mutex> lock(mu_);
         auto it = traces_.find(file);
@@ -132,8 +109,6 @@ public:
         return std::string(line);
     }
 
-    // Fixed-width table of the last `lastN` files, oldest first (columns in ms,
-    // -1 = stage not reached). Intended for a console dump / log.
     std::string dump(size_t lastN = 20) const {
         std::lock_guard<std::mutex> lock(mu_);
         std::string out;

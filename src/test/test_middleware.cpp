@@ -39,7 +39,6 @@ public:
             return false;
         }
 
-        // ✅ FIXED: Correct type reference for callback
         int callbackId = middleware.registerUpdateCallback(
             [this](const anari_usd_middleware::FileData& fileData) {
                 processReceivedFile(fileData);
@@ -116,7 +115,6 @@ public:
 
         auto start = steady_clock::now();
 
-        // ✅ FIXED: Correct type reference for MeshData vector
         std::vector<anari_usd_middleware::MeshData> meshData;
         bool success = middleware.LoadUSDFromDisk(filePath, meshData);
 
@@ -134,7 +132,6 @@ public:
     }
 
 private:
-    // ✅ FIXED: Correct type reference for FileData parameter
     void processReceivedFile(const anari_usd_middleware::FileData& fileData) {
         totalFilesReceived.fetch_add(1);
         totalBytesProcessed.fetch_add(fileData.data.size());
@@ -144,7 +141,6 @@ private:
         std::cout << "🏷️  Type: " << fileData.fileType << std::endl;
         std::cout << "🔐 Hash: " << fileData.hash.substr(0, 16) << "..." << std::endl;
 
-        // Extract filename and create output directory
         std::string filename = std::filesystem::path(fileData.filename).filename().string();
         std::string outputDir = "./received_files";
         std::filesystem::create_directories(outputDir);
@@ -153,10 +149,8 @@ private:
         if (saveFileToPath(fileData.data, savePath)) {
             std::cout << "💾 Saved to: " << savePath << std::endl;
 
-            // Get current timestamp
             auto timestamp = getCurrentTimestamp();
 
-            // Process based on file type
             if (fileData.fileType == "USD") {
                 processUSDFile(fileData, filename, timestamp);
             } else if (fileData.fileType == "IMAGE") {
@@ -169,7 +163,6 @@ private:
         }
     }
 
-    // ✅ FIXED: Correct type reference for FileData parameter
     void processUSDFile(const anari_usd_middleware::FileData& fileData,
                        const std::string& filename,
                        const std::string& timestamp) {
@@ -177,11 +170,9 @@ private:
 
         auto start = steady_clock::now();
 
-        // ✅ FIXED: Correct type reference for MeshData vector
         std::vector<anari_usd_middleware::MeshData> meshData;
 
         bool success = middleware.LoadUSDBuffer(fileData.data, filename, meshData);
-        // ✅ FIXED: Use duration_cast to convert nanoseconds to milliseconds
         auto duration = duration_cast<milliseconds>(steady_clock::now() - start);
 
         if (success && !meshData.empty()) {
@@ -189,7 +180,6 @@ private:
             std::cout << "✅ Extracted " << meshData.size() << " meshes in "
                       << duration.count() << "ms" << std::endl;
 
-            // Print detailed info and save to file
             printDetailedMeshInfo(meshData, timestamp);
             saveMeshDataToFile(meshData, filename, timestamp, duration, fileData.data.size());
         } else {
@@ -198,14 +188,12 @@ private:
         }
     }
 
-    // ✅ FIXED: Correct type reference for FileData parameter
     void processImageFile(const anari_usd_middleware::FileData& fileData,
                          const std::string& filename,
                          const std::string& timestamp) {
         std::cout << "🖼️ Processing image file..." << std::endl;
 
         try {
-            // Test texture creation
             auto textureData = middleware.CreateTextureFromBuffer(fileData.data);
 
             if (textureData.isValid()) {
@@ -213,7 +201,6 @@ private:
                           << textureData.height << " (" << textureData.channels << " channels)" << std::endl;
             }
 
-            // Test gradient extraction
             std::vector<uint8_t> pngBuffer;
             bool success = middleware.GetGradientLineAsPNGBuffer(fileData.data, pngBuffer);
 
@@ -230,7 +217,6 @@ private:
         }
     }
 
-    // ✅ FIXED: Correct type reference for MeshData vector parameter
     void printDetailedMeshInfo(const std::vector<anari_usd_middleware::MeshData>& meshes,
                               const std::string& context) {
         std::cout << "\n📋 Detailed Mesh Information (" << context << "):" << std::endl;
@@ -261,7 +247,6 @@ private:
                 std::cout << "     🎨 Vertex Colors: " << mesh.vertex_colors.size() / 4 << std::endl;
             }
 
-            // ✅ NEW: Display collision information
             if (mesh.collision.collisionType != anari_usd_middleware::ECollisionComplexity::None) {
                 std::cout << "     🛡️ Collision: " << anari_usd_middleware::CollisionProcessor::getComplexityName(mesh.collision.collisionType) << std::endl;
                 if (!mesh.collision.vertices.empty()) {
@@ -270,9 +255,7 @@ private:
                 }
             }
 
-            // ✅ FIXED: Calculate bounds manually instead of using getBounds()
             if (mesh.isValid() && !mesh.points.empty()) {
-                // Calculate bounding box manually
                 float minX = mesh.points[0], maxX = mesh.points[0];
                 float minY = mesh.points[1], maxY = mesh.points[1];
                 float minZ = mesh.points[2], maxZ = mesh.points[2];
@@ -296,7 +279,6 @@ private:
         std::cout << "📊 Totals: " << totalVertices << " vertices, " << totalTriangles << " triangles" << std::endl;
     }
 
-    // ✅ FIXED: Correct type reference for MeshData vector parameter
     void saveMeshDataToFile(const std::vector<anari_usd_middleware::MeshData>& meshes,
                            const std::string& filename,
                            const std::string& timestamp,
@@ -313,7 +295,6 @@ private:
                 return;
             }
 
-            // Write header information
             meshFile << "USD Mesh Data Report" << std::endl;
             meshFile << "Generated: " << timestamp << std::endl;
             meshFile << "Source File: " << filename << std::endl;
@@ -322,7 +303,6 @@ private:
             meshFile << "Total Meshes: " << meshes.size() << std::endl;
             meshFile << "========================================" << std::endl;
 
-            // Calculate totals
             size_t totalVertices = 0, totalTriangles = 0, totalNormals = 0, totalUVs = 0, totalColors = 0;
 
             for (const auto& mesh : meshes) {
@@ -340,7 +320,6 @@ private:
             meshFile << "Total Vertex Colors: " << totalColors << std::endl;
             meshFile << "========================================" << std::endl;
 
-            // Write detailed mesh information
             for (size_t i = 0; i < meshes.size(); ++i) {
                 const auto& mesh = meshes[i];
 
@@ -360,7 +339,6 @@ private:
                     meshFile << "  Vertex Colors: " << mesh.vertex_colors.size() / 4 << std::endl;
                 }
 
-                // ✅ NEW: Write collision information
                 if (mesh.collision.collisionType != anari_usd_middleware::ECollisionComplexity::None) {
                     meshFile << "  Collision Type: " << anari_usd_middleware::CollisionProcessor::getComplexityName(mesh.collision.collisionType) << std::endl;
                     if (!mesh.collision.vertices.empty()) {
@@ -369,7 +347,6 @@ private:
                     }
                 }
 
-                // ✅ FIXED: Calculate bounds manually instead of using getBounds()
                 if (mesh.isValid() && !mesh.points.empty()) {
                     float minX = mesh.points[0], maxX = mesh.points[0];
                     float minY = mesh.points[1], maxY = mesh.points[1];
@@ -493,7 +470,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // ✅ FIXED: Use std::signal instead of std::signal and add proper include
     std::signal(SIGINT, [](int) {
         std::cout << "\n🛑 Shutdown requested..." << std::endl;
         exit(0);

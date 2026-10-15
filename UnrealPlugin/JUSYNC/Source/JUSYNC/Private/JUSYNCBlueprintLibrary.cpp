@@ -14,12 +14,10 @@
 #include "HAL/PlatformTime.h"
 #include "HAL/PlatformProcess.h"
 
-// Platform-specific headers for CPU/thread measurement
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
 #include <windows.h>
 #include <tlhelp32.h>
-// DXGI headers for GPU memory queries
 #include <dxgi.h>
 #include <dxgi1_4.h>  // Needed for IDXGIAdapter3
 #include "Windows/HideWindowsPlatformTypes.h"
@@ -31,12 +29,10 @@
 #include <unistd.h>
 #endif
 
-// Forward declarations for helper functions
 static int64 GetVRAMUsageBytes();
 static float GetCPUUsagePercentage();
 static int32 GetActiveThreadCount();
 
-// Static member initialization
 TArray<FJUSYNCFileData> UJUSYNCBlueprintLibrary::ReceivedFiles;
 TArray<FString> UJUSYNCBlueprintLibrary::ReceivedMessages;
 FCriticalSection UJUSYNCBlueprintLibrary::DataMutex;
@@ -48,14 +44,12 @@ TArray<FString> UJUSYNCBlueprintLibrary::LastFileListWithSizes_Names;
 TArray<int64> UJUSYNCBlueprintLibrary::LastFileListWithSizes_Sizes;
 FCriticalSection UJUSYNCBlueprintLibrary::LastFileListWithSizesMutex;
 
-// Benchmarking static member initialization
 TArray<FJUSYNCBenchmarkResult> UJUSYNCBlueprintLibrary::BenchmarkResults;
 FString UJUSYNCBlueprintLibrary::CurrentBenchmarkTest = TEXT("");
 FJUSYNCBenchmarkConfig UJUSYNCBlueprintLibrary::CurrentBenchmarkConfig;
 bool UJUSYNCBlueprintLibrary::bIsBenchmarking = false;
 FDateTime UJUSYNCBlueprintLibrary::BenchmarkSessionStartTime;
 
-// ========== CONNECTION MANAGEMENT ==========
 
 bool UJUSYNCBlueprintLibrary::InitializeJUSYNCMiddleware(const FString& Endpoint)
 {
@@ -70,11 +64,9 @@ bool UJUSYNCBlueprintLibrary::InitializeJUSYNCMiddleware(const FString& Endpoint
     if (bResult)
     {
         UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC middleware initialized"));
-        //DisplayDebugMessage(TEXT("JUSYNC Middleware Connected"), 3.0f, FLinearColor::Green);
     }
     else
     {
-        //DisplayDebugMessage(TEXT("JUSYNC Middleware Failed to Connect"), 5.0f, FLinearColor::Red);
     }
 
     return bResult;
@@ -87,7 +79,6 @@ void UJUSYNCBlueprintLibrary::ShutdownJUSYNCMiddleware()
     {
         Subsystem->ShutdownMiddleware();
         ClearReceivedData();
-        //DisplayDebugMessage(TEXT("JUSYNC Middleware Disconnected"), 3.0f, FLinearColor::Yellow);
     }
 }
 
@@ -107,7 +98,6 @@ FString UJUSYNCBlueprintLibrary::GetJUSYNCStatusInfo()
 
     FString Status = Subsystem->GetStatusInfo();
 
-    // Add reception statistics
     FScopeLock Lock(&DataMutex);
     Status += FString::Printf(TEXT("\nReceived Files: %d\nReceived Messages: %d"),
         ReceivedFiles.Num(), ReceivedMessages.Num());
@@ -126,7 +116,6 @@ bool UJUSYNCBlueprintLibrary::StartJUSYNCReceiving()
     bool bResult = Subsystem->StartReceiving();
     if (bResult)
     {
-        //DisplayDebugMessage(TEXT("JUSYNC Started Receiving Data"), 3.0f, FLinearColor::Blue);
     }
 
     return bResult;
@@ -138,12 +127,9 @@ void UJUSYNCBlueprintLibrary::StopJUSYNCReceiving()
     if (Subsystem)
     {
         Subsystem->StopReceiving();
-        // Use FLinearColor constructor for Orange color
-        //DisplayDebugMessage(TEXT("JUSYNC Stopped Receiving Data"), 3.0f, FLinearColor(1.0f, 0.5f, 0.0f, 1.0f));
     }
 }
 
-// ========== DEALER CLIENT FOR HPC BROKER ==========
 
 bool UJUSYNCBlueprintLibrary::ConnectToANARIUSDBroker(const FString& BrokerEndpoint, int32 TimeoutMs)
 {
@@ -158,15 +144,11 @@ bool UJUSYNCBlueprintLibrary::ConnectToANARIUSDBroker(const FString& BrokerEndpo
     if (bResult)
     {
         UE_LOG(LogJUSYNC, Log, TEXT("Connected to ANARI USD broker at %s"), *BrokerEndpoint);
-        // TTF: wall-clock origin for time-to-first-frame (direct connect path;
-        // the pipeline spawner marks its own connect start as well)
         FJUSYNCBenchmarkTiming::Get().MarkConnectStart();
-        //DisplayDebugMessage(FString::Printf(TEXT("Connected to broker at %s"), *BrokerEndpoint), 5.0f, FLinearColor::Green);
     }
     else
     {
         UE_LOG(LogJUSYNC, Error, TEXT("Failed to connect to broker at %s"), *BrokerEndpoint);
-        //DisplayDebugMessage(FString::Printf(TEXT("Failed to connect to broker: %s"), *BrokerEndpoint), 5.0f, FLinearColor::Red);
     }
 
     return bResult;
@@ -179,7 +161,6 @@ void UJUSYNCBlueprintLibrary::DisconnectFromANARIUSDBroker()
     {
         Subsystem->DisconnectFromBroker();
         UE_LOG(LogJUSYNC, Log, TEXT("Disconnected from ANARI USD broker"));
-        //DisplayDebugMessage(TEXT("Disconnected from broker"), 3.0f, FLinearColor::Yellow);
     }
 }
 
@@ -202,9 +183,7 @@ bool UJUSYNCBlueprintLibrary::RequestFileListFromBroker(int32 TargetRank, int32 
     if (bResult)
     {
         UE_LOG(LogJUSYNC, Log, TEXT("Retrieved %d files from broker"), OutFiles.Num());
-        //DisplayDebugMessage(FString::Printf(TEXT("Retrieved %d files from broker"), OutFiles.Num()), 3.0f, FLinearColor::Green);
 
-        // Store the retrieved file list for later retrieval
         if (OutFiles.Num() > 0)
         {
             FScopeLock Lock(&LastFileListMutex);
@@ -215,7 +194,6 @@ bool UJUSYNCBlueprintLibrary::RequestFileListFromBroker(int32 TargetRank, int32 
     else
     {
         UE_LOG(LogJUSYNC, Error, TEXT("Failed to retrieve file list from broker"));
-        //DisplayDebugMessage(TEXT("Failed to retrieve file list from broker"), 5.0f, FLinearColor::Red);
     }
 
     return bResult;
@@ -234,7 +212,6 @@ bool UJUSYNCBlueprintLibrary::RequestFileListWithSizesFromBroker(int32 TargetRan
     if (bResult)
     {
         UE_LOG(LogJUSYNC, Log, TEXT("Retrieved %d files with sizes from broker"), OutFiles.Num());
-        // Optionally store the file list (without sizes) for later retrieval
         if (OutFiles.Num() > 0)
         {
             FScopeLock Lock(&LastFileListMutex);
@@ -317,12 +294,10 @@ bool UJUSYNCBlueprintLibrary::RequestFileFromBroker(const FString& Filename, int
     if (bResult)
     {
         UE_LOG(LogJUSYNC, Log, TEXT("Retrieved file '%s' (%d bytes) from broker"), *Filename, OutData.Num());
-        //DisplayDebugMessage(FString::Printf(TEXT("Retrieved file: %s (%d bytes)"), *Filename, OutData.Num()), 3.0f, FLinearColor::Green);
     }
     else
     {
         UE_LOG(LogJUSYNC, Error, TEXT("Failed to retrieve file '%s' from broker"), *Filename);
-        //DisplayDebugMessage(FString::Printf(TEXT("Failed to retrieve file: %s"), *Filename), 5.0f, FLinearColor::Red);
     }
 
     return bResult;
@@ -341,18 +316,15 @@ bool UJUSYNCBlueprintLibrary::RequestFrameFromBroker(int32 FrameNumber, int32 Ta
     if (bResult)
     {
         UE_LOG(LogJUSYNC, Log, TEXT("Retrieved frame %d with %d files from broker"), FrameNumber, OutFiles.Num());
-        //DisplayDebugMessage(FString::Printf(TEXT("Retrieved frame %d with %d files"), FrameNumber, OutFiles.Num()), 3.0f, FLinearColor::Green);
     }
     else
     {
         UE_LOG(LogJUSYNC, Error, TEXT("Failed to retrieve frame %d from broker"), FrameNumber);
-        //DisplayDebugMessage(FString::Printf(TEXT("Failed to retrieve frame %d"), FrameNumber), 5.0f, FLinearColor::Red);
     }
 
     return bResult;
 }
 
-// ========== WORKER STATUS QUERIES ==========
 
 bool UJUSYNCBlueprintLibrary::RequestWorkerStatusFromBroker(int32 TargetRank, int32 TimeoutMs, TArray<FJUSYNCWorkerStatus>& OutWorkerStatus)
 {
@@ -442,7 +414,6 @@ bool UJUSYNCBlueprintLibrary::RequestWorkerCountExcludingRank0(int32 TimeoutMs, 
     return bResult;
 }
 
-// ========== ASYNC WORKER QUERIES (NON-BLOCKING) ==========
 
 void UJUSYNCBlueprintLibrary::RequestTotalWorkerCountAsync(int32 TimeoutMs, const FOnTotalWorkerCountReceived& OnComplete, const FOnBrokerError& OnError)
 {
@@ -654,13 +625,11 @@ void UJUSYNCBlueprintLibrary::RequestFileListWithSizesAndRanksAsync(int32 Target
 
 void UJUSYNCBlueprintLibrary::RequestFileAsync(const FString& Filename, int32 TargetRank, int32 TimeoutMs, const FOnFileReceived& OnComplete, const FOnBrokerError& OnError)
 {
-    // If timeout is excessively large (like 2,000,000ms), use dynamic timeout instead
     const int32 MAX_REASONABLE_TIMEOUT = 300000; // 5 minutes max
     if (TimeoutMs > MAX_REASONABLE_TIMEOUT)
     {
         UE_LOG(LogJUSYNC, Warning, TEXT("Timeout %dms is too large, using dynamic timeout instead"), TimeoutMs);
 
-        // Extract rank from filename if possible
         int32 ExtractedRank = ExtractRankFromFilename(Filename);
         if (ExtractedRank >= 0 && ExtractedRank != TargetRank)
         {
@@ -668,11 +637,9 @@ void UJUSYNCBlueprintLibrary::RequestFileAsync(const FString& Filename, int32 Ta
             TargetRank = ExtractedRank;
         }
 
-        // Calculate dynamic timeout
         int32 DynamicTimeout = CalculateDynamicTimeout(Filename, TargetRank, false, 0);
         UE_LOG(LogJUSYNC, Log, TEXT("Using dynamic timeout: %dms for file '%s'"), DynamicTimeout, *Filename);
 
-        // Use the new dynamic async function with single retry
         RequestFileAsyncDynamic(Filename, TargetRank, OnComplete, OnError, 1, true);
         return;
     }
@@ -706,36 +673,52 @@ void UJUSYNCBlueprintLibrary::RequestFileAsync(const FString& Filename, int32 Ta
         });
 }
 
-// ========== RANK EXTRACTION HELPER ==========
 
 int32 UJUSYNCBlueprintLibrary::ExtractRankFromFilename(const FString& Filename)
 {
-    // Extract rank from filename using multiple patterns:
-    // Pattern 1: _rX_ (e.g., vtk_actor__triangles_0_Geom__r0_0.000000.usda.usda)
-    // Pattern 2: _X at end before extension (e.g., vtk_actor__triangles_0)
-    // Pattern 3: _X_ somewhere in filename
 
     int32 Rank = -1;
 
-    // Pattern 1: _rX_ 
-    int32 RankStart = Filename.Find(TEXT("_r"));
-    if (RankStart != INDEX_NONE)
+    // Only a whole "_r<digits>" token is a rank marker. A looser match reads a
+    // word ("part_ridge" -> Atoi("idge") == 0) or a timestep ("x_Geom__1.500000")
+    // as a rank, and callers then fetch the file from a worker that does not own
+    // it, which under multi-rank streaming returns foreign data, not an error.
+    const FString Base = FPaths::GetBaseFilename(Filename);
+
+    for (int32 SearchFrom = 0; SearchFrom < Base.Len();)
     {
-        int32 RankEnd = Filename.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, RankStart + 2);
-        if (RankEnd != INDEX_NONE)
+        const int32 RankStart = Base.Find(TEXT("_r"), ESearchCase::CaseSensitive, ESearchDir::FromStart, SearchFrom);
+        if (RankStart == INDEX_NONE)
         {
-            FString RankStr = Filename.Mid(RankStart + 2, RankEnd - (RankStart + 2));
-            Rank = FCString::Atoi(*RankStr);
-            if (Rank >= 0)
-            {
-                UE_LOG(LogJUSYNC, Log, TEXT("Extracted rank %d using pattern _rX_ from: %s"), Rank, *Filename);
-                return Rank;
-            }
+            break;
         }
+
+        const int32 DigitStart = RankStart + 2;
+        int32 DigitEnd = DigitStart;
+        while (DigitEnd < Base.Len() && FChar::IsDigit(Base[DigitEnd]))
+        {
+            ++DigitEnd;
+        }
+
+        const bool bWholeToken = DigitEnd > DigitStart && (DigitEnd == Base.Len() || Base[DigitEnd] == TEXT('_'));
+        if (bWholeToken)
+        {
+            Rank = FCString::Atoi(*Base.Mid(DigitStart, DigitEnd - DigitStart));
+            UE_LOG(LogJUSYNC, Log, TEXT("Extracted rank %d from '_r<digits>' token in: %s"), Rank, *Filename);
+            return Rank;
+        }
+
+        SearchFrom = RankStart + 2;
     }
 
-    // Pattern 2: Look for last underscore before extension
-    // Find last underscore in filename (before .usda or other extension)
+    // A clip or RawGeo key carries a time after "__"; its trailing digits are that
+    // time, never an owner rank.
+    if (Base.Contains(TEXT("__")))
+    {
+        UE_LOG(LogJUSYNC, Verbose, TEXT("No rank token in clip key: %s"), *Filename);
+        return -1;
+    }
+
     FString BaseName = Filename;
     int32 DotIndex = BaseName.Find(TEXT("."));
     if (DotIndex != INDEX_NONE)
@@ -758,7 +741,6 @@ int32 UJUSYNCBlueprintLibrary::ExtractRankFromFilename(const FString& Filename)
         }
     }
 
-    // Pattern 3: Try to find any number after underscore
     TArray<FString> Parts;
     Filename.ParseIntoArray(Parts, TEXT("_"), true);
 
@@ -779,7 +761,6 @@ int32 UJUSYNCBlueprintLibrary::ExtractRankFromFilename(const FString& Filename)
     return -1;
 }
 
-// ========== USD PROCESSING WITH PREVIEW ==========
 
 bool UJUSYNCBlueprintLibrary::LoadUSDFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCMeshData>& OutMeshData, FString& OutPreview)
 {
@@ -788,8 +769,6 @@ bool UJUSYNCBlueprintLibrary::LoadUSDFromBuffer(const TArray<uint8>& Buffer, con
         return false;
     }
 
-    // OPTIMIZATION: Only generate preview in debug builds to prevent memory hogging
-    // In release builds, skip preview extraction to save CPU and memory
 #if JUSYNC_ENABLE_USD_PREVIEW
     OutPreview = GetUSDAPreview(Buffer, 15);
 #else
@@ -808,14 +787,10 @@ bool UJUSYNCBlueprintLibrary::LoadUSDFromBuffer(const TArray<uint8>& Buffer, con
     if (bResult)
     {
         FString Message = FString::Printf(TEXT("Loaded USD: %s (%d meshes)"), *Filename, OutMeshData.Num());
-        //DisplayDebugMessage(Message, 5.0f, FLinearColor::Green);
-        // OPTIMIZATION: Disabled USD preview logging to prevent memory hogging
-        // UE_LOG(LogJUSYNC, Log, TEXT("USD Preview:\n%s"), *OutPreview);
         UE_LOG(LogJUSYNC, Log, TEXT("Loaded %d meshes from USD buffer"), OutMeshData.Num());
     }
     else
     {
-        //DisplayDebugMessage(TEXT("Failed to load USD file"), 5.0f, FLinearColor::Red);
     }
 
     return bResult;
@@ -828,14 +803,12 @@ bool UJUSYNCBlueprintLibrary::LoadUSDFromDisk(const FString& FilePath, TArray<FJ
         return false;
     }
 
-    // Load file to buffer first for preview
     TArray<uint8> Buffer;
     if (!LoadFileToBuffer(FilePath, Buffer))
     {
         return false;
     }
 
-    // Extract filename from path
     FString Filename = FPaths::GetCleanFilename(FilePath);
 
     return LoadUSDFromBuffer(Buffer, Filename, OutMeshData, OutPreview);
@@ -883,11 +856,6 @@ bool UJUSYNCBlueprintLibrary::LoadUSDFullFromBuffer(const TArray<uint8>& Buffer,
     return bResult;
 }
 
-/**
- * Zero-copy variant: bypasses std::vector copy at C API boundary.
- * Accepts raw TArray<uint8> data pointer directly to UsdProcessor::LoadUSDBufferFromRaw.
- * Use this for performance-critical paths with large payloads.
- */
 bool UJUSYNCBlueprintLibrary::LoadUSDFullFromBufferNoCopy(const TArray<uint8>& Buffer, const FString& Filename,
     TArray<FJUSYNCMeshData>& OutMeshData, TArray<FJUSYNCPointCloudData>& OutPointCloudData, FString& OutPreview)
 {
@@ -942,7 +910,6 @@ bool UJUSYNCBlueprintLibrary::ValidateUSDFormat(const TArray<uint8>& Buffer, con
         return false;
     }
 
-    // Check file extension first (fast check)
     FString Extension = FPaths::GetExtension(Filename).ToLower();
     if (Extension != TEXT("usd") && Extension != TEXT("usda") &&
         Extension != TEXT("usdc") && Extension != TEXT("usdz"))
@@ -950,24 +917,19 @@ bool UJUSYNCBlueprintLibrary::ValidateUSDFormat(const TArray<uint8>& Buffer, con
         return false;
     }
 
-    // OPTIMIZATION: Direct buffer scanning instead of full ExtractUSDAPreview
-    // We only need to check for a few markers in the first few KB
     const uint8* BufferData = Buffer.GetData();
     if (!BufferData)
     {
         return false;
     }
 
-    // Scan first 8KB for USD markers (more than enough)
     const int32 SCAN_SIZE = FMath::Min(Buffer.Num(), 8 * 1024);
 
-    // Direct buffer scan for USD markers (no intermediate string allocation)
     const char* Marker1 = "#usda";
     const char* Marker2 = "PXR-USDC";
     const char* Marker3 = "def ";
     const char* Marker4 = "over ";
 
-    // Memchr-based search for each marker
     for (int32 i = 0; i < SCAN_SIZE; ++i)
     {
         if (BufferData[i] == '#' && i + 4 <= SCAN_SIZE)
@@ -991,7 +953,6 @@ bool UJUSYNCBlueprintLibrary::ValidateUSDFormat(const TArray<uint8>& Buffer, con
     return false;
 }
 
-// ========== POINT CLOUD PROCESSING ==========
 
 bool UJUSYNCBlueprintLibrary::LoadUSDPointCloudFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCPointCloudData>& OutPointCloudData)
 {
@@ -1063,8 +1024,6 @@ void UJUSYNCBlueprintLibrary::BatchSpawnPointClouds_Async(
 }
 
 
-// ========== REALTIME MESH PROCESSING AND SPAWNING ==========
-
 FJUSYNCTextureData UJUSYNCBlueprintLibrary::CreateTextureFromBuffer(const TArray<uint8>& Buffer)
 {
     FJUSYNCTextureData EmptyTexture;
@@ -1087,12 +1046,9 @@ FJUSYNCTextureData UJUSYNCBlueprintLibrary::CreateTextureFromBuffer(const TArray
     {
         FString Message = FString::Printf(TEXT("Created Texture: %dx%d (%d channels)"),
             Result.Width, Result.Height, Result.Channels);
-        // Use FLinearColor constructor for Cyan color
-        //DisplayDebugMessage(Message, 3.0f, FLinearColor(0.0f, 1.0f, 1.0f, 1.0f));
     }
     else
     {
-        //DisplayDebugMessage(TEXT("Failed to create texture from buffer"), 3.0f, FLinearColor::Red);
     }
 
     return Result;
@@ -1117,8 +1073,6 @@ UTexture2D* UJUSYNCBlueprintLibrary::CreateUETextureFromJUSYNC(const FJUSYNCText
 
     if (Result)
     {
-        // Use FLinearColor constructor for Cyan color
-        //DisplayDebugMessage(TEXT("UE Texture2D Created Successfully"), 3.0f, FLinearColor(0.0f, 1.0f, 1.0f, 1.0f));
     }
 
     return Result;
@@ -1148,11 +1102,9 @@ bool UJUSYNCBlueprintLibrary::WriteGradientLineAsPNG(const TArray<uint8>& Buffer
     if (bResult)
     {
         FString Message = FString::Printf(TEXT("Gradient PNG saved: %s"), *OutputPath);
-        //DisplayDebugMessage(Message, 3.0f, FLinearColor::Green);
     }
     else
     {
-        //DisplayDebugMessage(TEXT("Failed to save gradient PNG"), 3.0f, FLinearColor::Red);
     }
 
     return bResult;
@@ -1177,11 +1129,9 @@ bool UJUSYNCBlueprintLibrary::GetGradientLineAsPNGBuffer(const TArray<uint8>& Bu
     if (bResult)
     {
         FString Message = FString::Printf(TEXT("Gradient PNG buffer created: %d bytes"), OutPNGBuffer.Num());
-        //DisplayDebugMessage(Message, 3.0f, FLinearColor::Green);
     }
     else
     {
-        //DisplayDebugMessage(TEXT("Failed to create gradient PNG buffer"), 3.0f, FLinearColor::Red);
     }
 
     return bResult;
@@ -1210,11 +1160,9 @@ bool UJUSYNCBlueprintLibrary::GetPNGDimensions(const TArray<uint8>& Buffer, int3
     if (bResult)
     {
         FString Message = FString::Printf(TEXT("PNG dimensions: %dx%d (%d channels)"), OutWidth, OutHeight, OutChannels);
-        //DisplayDebugMessage(Message, 3.0f, FLinearColor::Green);
     }
     else
     {
-        //DisplayDebugMessage(TEXT("Failed to get PNG dimensions"), 3.0f, FLinearColor::Red);
     }
 
     return bResult;
@@ -1241,12 +1189,10 @@ bool UJUSYNCBlueprintLibrary::GetImageRowAsPNGBuffer(const TArray<uint8>& Buffer
     if (bResult)
     {
         FString Message = FString::Printf(TEXT("Extracted row %d as PNG buffer: %d bytes"), RowIndex, OutPNGBuffer.Num());
-        //DisplayDebugMessage(Message, 3.0f, FLinearColor::Green);
     }
     else
     {
         FString Message = FString::Printf(TEXT("Failed to extract row %d as PNG buffer"), RowIndex);
-        //DisplayDebugMessage(Message, 3.0f, FLinearColor::Red);
     }
 
     return bResult;
@@ -1266,7 +1212,6 @@ void UJUSYNCBlueprintLibrary::ClearBroadcastDuplicates()
     }
 }
 
-// ========== REALTIMEMESH PROCESSING ==========
 
 bool UJUSYNCBlueprintLibrary::CreateRealtimeMeshFromJUSYNC(const FJUSYNCMeshData& MeshData, URealtimeMeshComponent* RealtimeMeshComponent)
 {
@@ -1295,8 +1240,6 @@ bool UJUSYNCBlueprintLibrary::CreateRealtimeMeshFromJUSYNC(const FJUSYNCMeshData
     {
         FString Message = FString::Printf(TEXT("RealtimeMesh Created: %s (%d verts, %d tris)"),
             *MeshData.ElementName, MeshData.GetVertexCount(), MeshData.GetTriangleCount());
-        // Use FLinearColor constructor for Cyan color
-        //DisplayDebugMessage(Message, 5.0f, FLinearColor(0.0f, 1.0f, 1.0f, 1.0f));
     }
 
     return bResult;
@@ -1352,9 +1295,7 @@ bool UJUSYNCBlueprintLibrary::BatchCreateRealtimeMeshesFromJUSYNC(const TArray<F
     }
 
     FString Message = FString::Printf(TEXT("Batch RealtimeMesh Creation: %d/%d successful"), SuccessCount, MeshDataArray.Num());
-    // Use FLinearColor constructor for Cyan or Yellow color
     FLinearColor Color = bAllSuccessful ? FLinearColor(0.0f, 1.0f, 1.0f, 1.0f) : FLinearColor::Yellow;
-    //DisplayDebugMessage(Message, 5.0f, Color);
 
     return bAllSuccessful;
 }
@@ -1376,7 +1317,6 @@ void UJUSYNCBlueprintLibrary::BatchCreateRealtimeMeshesFromJUSYNC_Async(const TA
         return;
     }
 
-    // Call the subsystem's batch function (it already has frame budget management built-in)
     Subsystem->BatchCreateRealtimeMeshesFromJUSYNC(MeshDataArray, MeshComponents);
 
     UE_LOG(LogJUSYNC, Log, TEXT("Batch async mesh creation started for %d meshes"), MeshDataArray.Num());
@@ -1394,7 +1334,6 @@ FJUSYNCRealtimeMeshData UJUSYNCBlueprintLibrary::ConvertToRealtimeMeshFormat(con
     return Subsystem->ConvertToRealtimeMeshFormat(StandardMesh);
 }
 
-// ========== DATA RECEPTION ==========
 
 bool UJUSYNCBlueprintLibrary::CheckForReceivedFiles(TArray<FJUSYNCFileData>& OutReceivedFiles)
 {
@@ -1402,18 +1341,13 @@ bool UJUSYNCBlueprintLibrary::CheckForReceivedFiles(TArray<FJUSYNCFileData>& Out
 
     if (ReceivedFiles.Num() > 0)
     {
-        // Move (not deep-copy) the accumulated files into the out param. This avoids a full
-        // memcpy of every file byte AND drains ReceivedFiles so it can't grow without bound
-        // across a long session (it was only reset by ClearReceivedData before).
         OutReceivedFiles = MoveTemp(ReceivedFiles);
 
-        // Log received files for debugging
         for (const FJUSYNCFileData& FileData : OutReceivedFiles)
         {
             FString Message = FString::Printf(TEXT("Received File: %s (%d bytes, %s)"),
                 *FileData.Filename, FileData.Data.Num(), *FileData.FileType);
             UE_LOG(LogJUSYNC, Log, TEXT("%s"), *Message);
-            //DisplayDebugMessage(Message, 5.0f, FLinearColor::Blue);
         }
 
         return true;
@@ -1428,16 +1362,11 @@ bool UJUSYNCBlueprintLibrary::CheckForReceivedMessages(TArray<FString>& OutRecei
 
     if (ReceivedMessages.Num() > 0)
     {
-        // Move (not deep-copy) the accumulated messages into the out param, and drain
-        // ReceivedMessages so it can't grow without bound (was only reset by ClearReceivedData).
         OutReceivedMessages = MoveTemp(ReceivedMessages);
 
-        // Log received messages for debugging
         for (const FString& Message : OutReceivedMessages)
         {
             UE_LOG(LogJUSYNC, Log, TEXT("Received Message: %s"), *Message);
-            // Use FLinearColor constructor for Cyan color
-            //DisplayDebugMessage(FString::Printf(TEXT("Message: %s"), *Message), 3.0f, FLinearColor(0.0f, 1.0f, 1.0f, 1.0f));
         }
 
         return true;
@@ -1454,7 +1383,6 @@ void UJUSYNCBlueprintLibrary::ClearReceivedData()
     UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC received data cleared"));
 }
 
-// ========== VALIDATION & UTILITIES ==========
 
 bool UJUSYNCBlueprintLibrary::ValidateJUSYNCMeshData(const FJUSYNCMeshData& MeshData, FString& ValidationMessage)
 {
@@ -1482,7 +1410,6 @@ bool UJUSYNCBlueprintLibrary::ValidateJUSYNCMeshData(const FJUSYNCMeshData& Mesh
         return false;
     }
 
-    // Check index bounds
     for (int32 Index : MeshData.Triangles)
     {
         if (Index >= MeshData.Vertices.Num())
@@ -1561,7 +1488,6 @@ void UJUSYNCBlueprintLibrary::FilterFileListByExtensionEnum(const TArray<FString
         Extensions.Add(TEXT(".bin"));
         break;
     case EJUSYNCExtension::ALL:
-        // No filtering
         OutFilteredFiles = FileList;
         UE_LOG(LogJUSYNC, Log, TEXT("FilterFileListByExtensionEnum: ALL selected, returning all %d files"), FileList.Num());
         return;
@@ -1597,7 +1523,6 @@ void UJUSYNCBlueprintLibrary::FilterFileListByExtensions(const TArray<FString>& 
     {
         for (const FString& Ext : AllowedExtensions)
         {
-            // Ensure extension starts with dot
             FString NormalizedExt = Ext;
             if (!NormalizedExt.StartsWith(TEXT(".")))
                 NormalizedExt = TEXT(".") + NormalizedExt;
@@ -1611,7 +1536,6 @@ void UJUSYNCBlueprintLibrary::FilterFileListByExtensions(const TArray<FString>& 
     UE_LOG(LogJUSYNC, Log, TEXT("FilterFileListByExtensions: filtered %d files down to %d (allowed extensions: %s)"),
         FileList.Num(), OutFilteredFiles.Num(), *FString::Join(AllowedExtensions, TEXT(", ")));
 }
-
 
 
 void UJUSYNCBlueprintLibrary::FilterFileListByExtensionEnumWithSizes(const TArray<FString>& FileList, const TArray<int64>& FileSizes, EJUSYNCExtension ExtensionFilter, TArray<FString>& OutFilteredFiles, TArray<int64>& OutFilteredSizes)
@@ -1642,7 +1566,6 @@ void UJUSYNCBlueprintLibrary::FilterFileListByExtensionEnumWithSizes(const TArra
         Extensions.Add(TEXT(".bin"));
         break;
     case EJUSYNCExtension::ALL:
-        // No filtering
         OutFilteredFiles = FileList;
         OutFilteredSizes = FileSizes;
         UE_LOG(LogJUSYNC, Log, TEXT("FilterFileListByExtensionEnumWithSizes: ALL selected, returning all %d files"), FileList.Num());
@@ -1688,7 +1611,6 @@ void UJUSYNCBlueprintLibrary::FilterFileListByExtensionsWithSizes(const TArray<F
         const FString& Filename = FileList[i];
         for (const FString& Ext : AllowedExtensions)
         {
-            // Ensure extension starts with dot
             FString NormalizedExt = Ext;
             if (!NormalizedExt.StartsWith(TEXT(".")))
                 NormalizedExt = TEXT(".") + NormalizedExt;
@@ -1704,7 +1626,6 @@ void UJUSYNCBlueprintLibrary::FilterFileListByExtensionsWithSizes(const TArray<F
         FileList.Num(), OutFilteredFiles.Num(), *FString::Join(AllowedExtensions, TEXT(", ")));
 }
 
-// ========== RANK-AWARE FILTER FUNCTIONS ==========
 
 void UJUSYNCBlueprintLibrary::FilterFileListBySizeWithRanks(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<int32>& FileRanks, int32 MinimumSizeBytes,
     TArray<FString>& OutFilteredFiles, TArray<int64>& OutFilteredSizes, TArray<int32>& OutFilteredRanks)
@@ -1767,7 +1688,6 @@ void UJUSYNCBlueprintLibrary::FilterFileListByExtensionEnumWithSizesAndRanks(con
         Extensions.Add(TEXT(".bin"));
         break;
     case EJUSYNCExtension::ALL:
-        // No filtering
         OutFilteredFiles = FileList;
         OutFilteredSizes = FileSizes;
         OutFilteredRanks = FileRanks;
@@ -1853,7 +1773,6 @@ void UJUSYNCBlueprintLibrary::ExtractGeometryClips(const TArray<FString>& FileLi
     for (int32 i = 0; i < FileList.Num(); ++i)
     {
         const FString& Filename = FileList[i];
-        // Only pass through per-rank geometry clip files (they live under "clips/" and are unique per rank)
         if (Filename.StartsWith(TEXT("clips/"), ESearchCase::CaseSensitive))
         {
             OutFilteredFiles.Add(Filename);
@@ -1871,15 +1790,11 @@ int32 UJUSYNCBlueprintLibrary::CalculateTimeoutFromFileSize(int64 FileSizeBytes,
     if (FileSizeBytes <= 0)
         return BaseTimeoutMs;
 
-    // Calculate transfer time in seconds: size / bandwidth
     float TransferTimeSeconds = static_cast<float>(FileSizeBytes) / BandwidthBytesPerSecond;
-    // Convert to milliseconds and add base timeout
     int32 AdditionalMs = FMath::CeilToInt(TransferTimeSeconds * 1000.0f);
-    // Add safety margin (e.g., 20%)
     AdditionalMs = FMath::CeilToInt(AdditionalMs * 1.2f);
     int32 TotalTimeout = BaseTimeoutMs + AdditionalMs;
 
-    // Clamp to reasonable range (e.g., max 60 seconds)
     const int32 MaxTimeout = 60000;
     if (TotalTimeout > MaxTimeout)
         TotalTimeout = MaxTimeout;
@@ -1909,7 +1824,6 @@ FString UJUSYNCBlueprintLibrary::GetJUSYNCTextureStatistics(const FJUSYNCTexture
         TextureData.IsValid() ? TEXT("valid") : TEXT("invalid"));
 }
 
-// ========== FILE OPERATIONS ==========
 
 bool UJUSYNCBlueprintLibrary::LoadFileToBuffer(const FString& FilePath, TArray<uint8>& OutBuffer)
 {
@@ -1923,7 +1837,6 @@ bool UJUSYNCBlueprintLibrary::LoadFileToBuffer(const FString& FilePath, TArray<u
     if (bResult)
     {
         FString Message = FString::Printf(TEXT("File loaded: %s (%d bytes)"), *FilePath, OutBuffer.Num());
-        //DisplayDebugMessage(Message, 3.0f, FLinearColor::Green);
     }
 
     return bResult;
@@ -1946,20 +1859,14 @@ bool UJUSYNCBlueprintLibrary::SaveBufferToFile(const TArray<uint8>& Buffer, cons
     if (bResult)
     {
         FString Message = FString::Printf(TEXT("File saved: %s (%d bytes)"), *FilePath, Buffer.Num());
-        //DisplayDebugMessage(Message, 3.0f, FLinearColor::Green);
     }
 
     return bResult;
 }
 
-// ========== DEBUG & DISPLAY ==========
 
 void UJUSYNCBlueprintLibrary::DisplayDebugMessage(const FString& Message, float Duration, FLinearColor Color)
 {
-    /*if (GEngine)
-    {
-        GEngine->AddOnScreenDebugMessage(-1, Duration, Color.ToFColor(true), FString::Printf(TEXT("JUSYNC: %s"), *Message));
-    }*/
 
     UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC: %s"), *Message);
 }
@@ -1969,20 +1876,16 @@ void UJUSYNCBlueprintLibrary::LogJUSYNCMessage(const FString& Message, bool bIsE
     if (bIsError)
     {
         UE_LOG(LogJUSYNC, Error, TEXT("JUSYNC: %s"), *Message);
-        //DisplayDebugMessage(Message, 5.0f, FLinearColor::Red);
     }
     else
     {
         UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC: %s"), *Message);
-        //DisplayDebugMessage(Message, 3.0f, FLinearColor::White);
     }
 }
 
-// ========== HELPER FUNCTIONS ==========
 
 UJUSYNCSubsystem* UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem()
 {
-    // Method 1: Try GWorld first (most reliable for PIE)
     if (GWorld)
     {
         if (UGameInstance* GameInstance = GWorld->GetGameInstance())
@@ -1994,10 +1897,8 @@ UJUSYNCSubsystem* UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem()
         }
     }
 
-    // Method 2: try from all world contexts (fallback)
     if (GEngine)
     {
-        // First try PIE worlds
         for (const FWorldContext& WorldContext : GEngine->GetWorldContexts())
         {
             if (WorldContext.World() && WorldContext.WorldType == EWorldType::PIE)
@@ -2012,7 +1913,6 @@ UJUSYNCSubsystem* UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem()
             }
         }
 
-        // Then try game worlds
         for (const FWorldContext& WorldContext : GEngine->GetWorldContexts())
         {
             if (WorldContext.World() && WorldContext.WorldType == EWorldType::Game)
@@ -2032,7 +1932,6 @@ UJUSYNCSubsystem* UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem()
     return nullptr;
 }
 
-// ========== PRIVATE HELPERS ==========
 
 bool UJUSYNCBlueprintLibrary::ValidateBufferSize(const TArray<uint8>& Buffer, const FString& Context)
 {
@@ -2042,7 +1941,6 @@ bool UJUSYNCBlueprintLibrary::ValidateBufferSize(const TArray<uint8>& Buffer, co
         return false;
     }
 
-    // Use your middleware's safety constants
     const size_t MaxSize = 1024 * 1024 * 1024; // 1GB limit from your middleware
     if (Buffer.Num() > MaxSize)
     {
@@ -2067,7 +1965,6 @@ bool UJUSYNCBlueprintLibrary::ValidateFilePath(const FString& FilePath, const FS
         return false;
     }
 
-    // Check for dangerous path patterns
     if (FilePath.Contains(TEXT("..")) || FilePath.Contains(TEXT("~/")))
     {
         UE_LOG(LogJUSYNC, Error, TEXT("%s: Unsafe file path detected: %s"), *Context, *FilePath);
@@ -2079,13 +1976,11 @@ bool UJUSYNCBlueprintLibrary::ValidateFilePath(const FString& FilePath, const FS
 
 FString UJUSYNCBlueprintLibrary::ExtractUSDAPreview(const TArray<uint8>& Buffer, int32 MaxLines)
 {
-    // Validate the buffer before any access
     if (Buffer.Num() == 0)
     {
         return TEXT("Empty buffer");
     }
 
-    // Additional safety: check if buffer data pointer is valid (as much as we can)
     const uint8* BufferData = Buffer.GetData();
     if (!BufferData)
     {
@@ -2093,17 +1988,12 @@ FString UJUSYNCBlueprintLibrary::ExtractUSDAPreview(const TArray<uint8>& Buffer,
         return TEXT("Invalid buffer");
     }
 
-    // OPTIMIZATION: For preview purposes, we only need to search a reasonable amount
-    // Max 64KB is enough for preview, even for huge USD files
     const int32 MAX_PREVIEW_SIZE = 64 * 1024; // 64KB
     int32 SearchSize = FMath::Min(Buffer.Num(), MAX_PREVIEW_SIZE);
 
-    // OPTIMIZATION: Use FString::ChrArray for bulk conversion instead of character-by-character
-    // Convert buffer to string efficiently
     FString Content;
     Content.Reserve(SearchSize);
 
-    // Process in chunks for better performance
     const int32 CHUNK_SIZE = 4096;
     for (int32 i = 0; i < SearchSize; i += CHUNK_SIZE)
     {
@@ -2122,13 +2012,11 @@ FString UJUSYNCBlueprintLibrary::ExtractUSDAPreview(const TArray<uint8>& Buffer,
             {
                 Chunk.AppendChar(' ');
             }
-            // Skip non-printable characters
         }
 
         Content += Chunk;
     }
 
-    // Extract first N lines
     TArray<FString> Lines;
     Content.ParseIntoArrayLines(Lines, false); // false = don't cull empty lines
 
@@ -2152,9 +2040,6 @@ FString UJUSYNCBlueprintLibrary::ExtractUSDAPreview(const TArray<uint8>& Buffer,
 
     Preview += TEXT("=== END PREVIEW ===");
 
-    // OPTIMIZATION: Removed excessive logging to reduce resource usage
-    // UE_LOG(LogJUSYNC, Log, TEXT("ExtractUSDAPreview: Converted %d characters, %d lines"), 
-    //        Content.Len(), Lines.Num());
 
     return Preview;
 }
@@ -2182,7 +2067,6 @@ void UJUSYNCBlueprintLibrary::ApplyEnhancedDefaultMaterial(URealtimeMeshComponen
     }
 }
 
-// Update the async internal function
 void UJUSYNCBlueprintLibrary::AsyncBatchSpawnInternal(
     const TArray<FJUSYNCMeshData>& MeshDataArray,
     const TArray<FVector>& SpawnLocations,
@@ -2206,14 +2090,12 @@ void UJUSYNCBlueprintLibrary::AsyncBatchSpawnInternal(
         return;
     }
 
-    // Calculate batch range
     int32 StartIndex = CurrentBatch * BatchSize;
     int32 EndIndex = FMath::Min(StartIndex + BatchSize, MeshDataArray.Num());
 
     UE_LOG(LogJUSYNC, Log, TEXT("Processing async batch %d: indices %d-%d with rotations"),
         CurrentBatch, StartIndex, EndIndex - 1);
 
-    // Process current batch with rotations
     for (int32 i = StartIndex; i < EndIndex; ++i)
     {
         FRotator UERotation = ConvertParaViewToUERotation(SpawnRotations[i]);
@@ -2224,7 +2106,6 @@ void UJUSYNCBlueprintLibrary::AsyncBatchSpawnInternal(
 
         if (SpawnedActor)
         {
-            // Extract rank from filename for logging
             int32 Rank = ExtractRankFromFilename(MeshDataArray[i].ElementName);
 
             UE_LOG(LogJUSYNC, Log, TEXT("Async spawned mesh %d (Rank %d) at %s with rotation %s"),
@@ -2232,7 +2113,6 @@ void UJUSYNCBlueprintLibrary::AsyncBatchSpawnInternal(
         }
     }
 
-    // Check if we're done
     if (EndIndex >= MeshDataArray.Num())
     {
         UE_LOG(LogJUSYNC, Log, TEXT("Async batch spawn complete: %d/%d successful"),
@@ -2240,7 +2120,6 @@ void UJUSYNCBlueprintLibrary::AsyncBatchSpawnInternal(
         return;
     }
 
-    // Schedule next batch
     FTimerHandle TimerHandle;
     World->GetTimerManager().SetTimer(TimerHandle,
         FTimerDelegate::CreateLambda([=]()
@@ -2251,11 +2130,8 @@ void UJUSYNCBlueprintLibrary::AsyncBatchSpawnInternal(
         BatchDelay, false);
 }
 
-// Add this function after your existing helper functions
 FString UJUSYNCBlueprintLibrary::DetectUSDContentType(const TArray<uint8>& Buffer)
 {
-    // OPTIMIZATION: Direct pattern scanning without full preview extraction
-    // Scan only first 16KB of buffer for efficiency with large USD files
     const int32 MAX_SCAN_SIZE = 16 * 1024; // 16KB is enough for content detection
     int32 ScanSize = FMath::Min(Buffer.Num(), MAX_SCAN_SIZE);
 
@@ -2272,7 +2148,6 @@ FString UJUSYNCBlueprintLibrary::DetectUSDContentType(const TArray<uint8>& Buffe
         return TEXT("GEOMETRY_ONLY");
     }
 
-    // Convert first ScanSize bytes to ASCII string for pattern matching
     FString FirstChunk;
     FirstChunk.Reserve(ScanSize);
 
@@ -2287,16 +2162,13 @@ FString UJUSYNCBlueprintLibrary::DetectUSDContentType(const TArray<uint8>& Buffe
         {
             FirstChunk.AppendChar(' ');
         }
-        // Skip non-printable characters
     }
 
-    // OPTIMIZATION: Reduced logging - only log in verbose mode
 #if JUSYNC_VERBOSE_LOGGING
     UE_LOG(LogJUSYNC, Log, TEXT("Buffer size: %d bytes, Scanned: %d bytes"), Buffer.Num(), ScanSize);
     UE_LOG(LogJUSYNC, Log, TEXT("First chunk length: %d characters"), FirstChunk.Len());
 #endif
 
-    // Look for primvars:color.timeSamples
     bool bHasPrimvarsColor = FirstChunk.Contains(TEXT("primvars:color.timeSamples"));
 
 #if JUSYNC_VERBOSE_LOGGING
@@ -2306,7 +2178,6 @@ FString UJUSYNCBlueprintLibrary::DetectUSDContentType(const TArray<uint8>& Buffe
 
     if (bHasPrimvarsColor)
     {
-        // Look for actual color data patterns FIRST
         bool bHasActualColorData = FirstChunk.Contains(TEXT("0: [(0.")) ||
             FirstChunk.Contains(TEXT("0: [(1.")) ||
             FirstChunk.Contains(TEXT("), (0.")) ||
@@ -2316,7 +2187,6 @@ FString UJUSYNCBlueprintLibrary::DetectUSDContentType(const TArray<uint8>& Buffe
         UE_LOG(LogJUSYNC, Log, TEXT("Contains actual color data patterns: %s"),
             bHasActualColorData ? TEXT("YES") : TEXT("NO"));
 
-        // Prioritize actual color data over "None"
         if (bHasActualColorData)
         {
             UE_LOG(LogJUSYNC, Log, TEXT("DETECTED: VERTEX_COLORS (actual color data found)"));
@@ -2329,7 +2199,6 @@ FString UJUSYNCBlueprintLibrary::DetectUSDContentType(const TArray<uint8>& Buffe
         }
     }
 
-    // Check for explicit texture references
     if (FirstChunk.Contains(TEXT("asset inputs:file")) ||
         FirstChunk.Contains(TEXT("UsdUVTexture")) ||
         FirstChunk.Contains(TEXT(".jpg")) ||
@@ -2351,7 +2220,6 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocationsSync
 {
     TArray<AActor*> SpawnedActors;
 
-    // Create default rotations if not provided
     TArray<FRotator> FinalRotations = SpawnRotations;
     if (FinalRotations.Num() == 0)
     {
@@ -2365,10 +2233,8 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocationsSync
 
     for (int32 i = 0; i < MeshDataArray.Num(); ++i)
     {
-        // Convert ParaView rotation to UE rotation if needed
         FRotator UERotation = ConvertParaViewToUERotation(FinalRotations[i]);
 
-        // Extract rank from filename for logging
         int32 Rank = ExtractRankFromFilename(MeshDataArray[i].ElementName);
 
         UE_LOG(LogJUSYNC, Log, TEXT("Spawning mesh %d (Rank %d) '%s' at location %s with rotation %s"),
@@ -2397,10 +2263,8 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocationsSync
 
 FRotator UJUSYNCBlueprintLibrary::ConvertParaViewToUERotation(const FRotator& ParaViewRotation)
 {
-    // ParaView and UE both use Z-up, but ParaView is right-handed, UE is left-handed
     FRotator UERotation;
 
-    // For Z-up to Z-up conversion with handedness flip:
     UERotation.Pitch = ParaViewRotation.Pitch;  // Keep pitch
     UERotation.Yaw = -ParaViewRotation.Yaw;     // Flip yaw for handedness
     UERotation.Roll = ParaViewRotation.Roll;    // Keep roll
@@ -2411,7 +2275,6 @@ FRotator UJUSYNCBlueprintLibrary::ConvertParaViewToUERotation(const FRotator& Pa
     return UERotation;
 }
 
-// Generate default locations in a grid pattern
 TArray<FVector> UJUSYNCBlueprintLibrary::GenerateDefaultLocations(int32 Count, const FVector& BaseLocation, float Spacing)
 {
     TArray<FVector> Locations;
@@ -2422,16 +2285,13 @@ TArray<FVector> UJUSYNCBlueprintLibrary::GenerateDefaultLocations(int32 Count, c
         return Locations;
     }
 
-    // Calculate grid dimensions
     int32 GridSize = FMath::CeilToInt(FMath::Sqrt(static_cast<float>(Count)));
 
     for (int32 i = 0; i < Count; ++i)
     {
-        // Calculate grid position
         int32 Row = i / GridSize;
         int32 Col = i % GridSize;
 
-        // Create location with spacing
         FVector Location = BaseLocation + FVector(Col * Spacing, Row * Spacing, 0.0f);
         Locations.Add(Location);
     }
@@ -2442,7 +2302,6 @@ TArray<FVector> UJUSYNCBlueprintLibrary::GenerateDefaultLocations(int32 Count, c
     return Locations;
 }
 
-// Generate default rotations
 TArray<FRotator> UJUSYNCBlueprintLibrary::GenerateDefaultRotations(int32 Count, const FRotator& BaseRotation)
 {
     TArray<FRotator> Rotations;
@@ -2472,7 +2331,6 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshWithMaterial(
         return nullptr;
     }
 
-    // Get subsystem and world
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (!Subsystem)
     {
@@ -2487,14 +2345,12 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshWithMaterial(
         return nullptr;
     }
 
-    // Process mesh data
     FJUSYNCMeshData ProcessedMeshData = FixMeshDataForSpawning(MeshData);
     FRotator UERotation = ConvertParaViewToUERotation(SpawnRotation);
 
     UE_LOG(LogJUSYNC, Log, TEXT("Spawning mesh '%s' at location %s with rotation %s"),
         *ProcessedMeshData.ElementName, *SpawnLocation.ToString(), *UERotation.ToString());
 
-    // Calculate scale factor if uniform scaling is enabled
     FVector MeshScaleFactor = FVector::OneVector;
     if (bUseUniformScaling && OuterBoundingBoxSize != FVector::ZeroVector)
     {
@@ -2517,7 +2373,6 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshWithMaterial(
             UE_LOG(LogJUSYNC, Warning, TEXT("Mesh has no vertices, using default size"));
         }
 
-        // Calculate scale factor for this mesh
         if (bPreserveAspectRatio)
         {
             float MinScale = FMath::Min3(
@@ -2541,14 +2396,11 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshWithMaterial(
     }
     else
     {
-        // No scaling - scale factor remains (1,1,1)
         UE_LOG(LogJUSYNC, Log, TEXT("No uniform scaling applied"));
     }
 
-    // **FIXED ACTOR SPAWNING - Let engine auto-generate names**
     FActorSpawnParameters SpawnParams;
     SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
-    // Don't set SpawnParams.Name: let the engine auto-generate unique names
 
     AActor* SpawnedActor = World->SpawnActor<AActor>(SpawnParams);
     if (!SpawnedActor)
@@ -2557,23 +2409,18 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshWithMaterial(
         return nullptr;
     }
 
-    // Tag the actor for identification
     SpawnedActor->Tags.Add(FName(*FString::Printf(TEXT("JUSYNC_%s"), *ProcessedMeshData.ElementName)));
     UE_LOG(LogJUSYNC, Log, TEXT("Spawned actor with auto-generated name: %s"), *SpawnedActor->GetName());
 
-    // Create and register the mesh component
     URealtimeMeshComponent* MeshComp = NewObject<URealtimeMeshComponent>(SpawnedActor);
     SpawnedActor->SetRootComponent(MeshComp);
     MeshComp->RegisterComponent();
 
-    // Apply the transform
     FTransform ActorTransform(UERotation, SpawnLocation, MeshScaleFactor);
     SpawnedActor->SetActorTransform(ActorTransform);
 
-    // Apply scaling
     if (bUseUniformScaling && MeshScaleFactor != FVector::OneVector)
     {
-        // Validate components before applying scaling
         if (!MeshComp)
         {
             UE_LOG(LogJUSYNC, Error, TEXT("Cannot apply scaling: MeshComp is null"));
@@ -2584,17 +2431,11 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshWithMaterial(
         }
         else
         {
-            // Always apply scaling when uniform scaling is enabled
-            // Method 1: Component-level scaling
             MeshComp->SetWorldScale3D(MeshScaleFactor);
-            // Method 2: Actor-level scaling (redundant but ensures it works)
             SpawnedActor->SetActorScale3D(MeshScaleFactor);
-            // Method 3: Force transform update
             SpawnedActor->SetActorTransform(FTransform(UERotation, SpawnLocation, MeshScaleFactor));
-            // Method 4: Mark for render state update
             MeshComp->MarkRenderStateDirty();
 
-            // Verify scaling was applied
             FVector ActualActorScale = SpawnedActor->GetActorScale3D();
             FVector ActualComponentScale = MeshComp->GetComponentScale();
 
@@ -2613,24 +2454,19 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshWithMaterial(
         }
     }
 
-    // Apply the material
     if (Material)
     {
-        // Always use the provided material (your texture material from Blueprint)
         MeshComp->SetMaterial(0, Material);
         UE_LOG(LogJUSYNC, Log, TEXT("Applied provided material to mesh"));
     }
     else
     {
-        // Apply default material when no material is provided
         ApplyEnhancedDefaultMaterial(MeshComp);
         UE_LOG(LogJUSYNC, Log, TEXT("Applied default material to mesh"));
     }
 
-    // Create the mesh (async, with automatic splitting)
     bool bSuccess;
 
-    // Check if mesh needs splitting (exceeds RMC vertex/triangle limits)
     const int32 TotalVertices = ProcessedMeshData.Vertices.Num();
     const int32 TotalTriangles = ProcessedMeshData.Triangles.Num() / 3;
     const int32 RMCVertexLimit = 32768; // From CheckMemoryLimitsForMesh
@@ -2642,12 +2478,9 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshWithMaterial(
     {
         if (bNeedsSplitting)
         {
-            // For large meshes with async, we need to handle splitting differently
-            // Since there's no async splitting function, we'll use sync splitting for now
             UE_LOG(LogJUSYNC, Warning, TEXT("Large mesh detected (%d vertices, %d triangles) - using synchronous splitting with async spawn"),
                 TotalVertices, TotalTriangles);
 
-            // Use synchronous splitting for large meshes
             bSuccess = Subsystem->CreateRealtimeMeshFromJUSYNCWithSplitting(
                 ProcessedMeshData,
                 MeshComp,
@@ -2659,21 +2492,19 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshWithMaterial(
         else
         {
             // Use async mesh creation for small meshes (doesn't block game thread)
+
             Subsystem->CreateRealtimeMeshFromJUSYNC_Async(ProcessedMeshData, MeshComp);
             bSuccess = true; // Async assumes success, errors handled internally
             UE_LOG(LogJUSYNC, Log, TEXT("Using ASYNC mesh creation"));
         }
 
-        // For async, we can't verify immediately, but log the spawn
         UE_LOG(LogJUSYNC, Log, TEXT("Mesh creation started for mesh at %s"),
             *SpawnLocation.ToString());
     }
     else
     {
-        // Synchronous mesh creation
         if (bNeedsSplitting)
         {
-            // Use splitting for large meshes
             bSuccess = Subsystem->CreateRealtimeMeshFromJUSYNCWithSplitting(
                 ProcessedMeshData,
                 MeshComp,
@@ -2684,13 +2515,11 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshWithMaterial(
         }
         else
         {
-            // Use standard creation for small meshes
             bSuccess = Subsystem->CreateRealtimeMeshFromJUSYNC(ProcessedMeshData, MeshComp);
         }
 
         if (bSuccess)
         {
-            // **FINAL VERIFICATION**
             FVector ActualLocation = SpawnedActor->GetActorLocation();
             FVector ActualScale = SpawnedActor->GetActorScale3D();
             FRotator ActualRotation = SpawnedActor->GetActorRotation();
@@ -2698,7 +2527,6 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshWithMaterial(
             UE_LOG(LogJUSYNC, Log, TEXT("Spawned mesh at %s (Scale: %s, Rotation: %s)"),
                 *ActualLocation.ToString(), *ActualScale.ToString(), *ActualRotation.ToString());
 
-            // Log splitting info if used
             if (bNeedsSplitting)
             {
                 UE_LOG(LogJUSYNC, Log, TEXT("Mesh split into multiple RMC components for better performance"));
@@ -2726,41 +2554,34 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshWithMaterial_Benchmarked(
     bool bPreserveAspectRatio,
     bool bUseAsyncSpawning)
 {
-    // Start benchmark if enabled
     bool bWasBenchmarking = bIsBenchmarking;
     if (Config.bEnableBenchmarking && !bIsBenchmarking)
     {
         StartBenchmark(TEXT("SpawnRealtimeMeshWithMaterial"), Config);
     }
 
-    // Measure before spawning
     FPlatformMemoryStats StatsBefore = FPlatformMemory::GetStats();
     int64 RAMBefore = StatsBefore.UsedPhysical;
     int64 VRAMBefore = GetVRAMUsageBytes();
     double StartTime = FPlatformTime::Seconds();
 
-    // Spawn the mesh using existing function
     AActor* SpawnedActor = SpawnRealtimeMeshWithMaterial(
         MeshData, SpawnLocation, SpawnRotation, Material,
         bUseUniformScaling, OuterBoundingBoxSize,
         bPreserveAspectRatio, bUseAsyncSpawning);
 
-    // Measure after spawning
     double EndTime = FPlatformTime::Seconds();
     float TimeMs = (EndTime - StartTime) * 1000.0f;
     FPlatformMemoryStats StatsAfter = FPlatformMemory::GetStats();
     int64 RAMAfter = StatsAfter.UsedPhysical;
     int64 VRAMAfter = GetVRAMUsageBytes();
 
-    // Record benchmark result
     if (Config.bEnableBenchmarking)
     {
-        // Get additional metrics
         float CPUUsage = GetCPUUsagePercentage();
         int32 ActiveThreads = GetActiveThreadCount();
         int64 RAMPeak = StatsAfter.PeakUsedPhysical;
-        
-        // Get GPU usage from subsystem
+
         float GPUUsage = 0.0f;
         UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
         if (Subsystem)
@@ -2793,7 +2614,6 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshWithMaterial_Benchmarked(
 
         RecordBenchmarkResult(Result);
 
-        // End benchmark if we started it
         if (!bWasBenchmarking)
         {
             EndBenchmark();
@@ -2807,7 +2627,6 @@ FJUSYNCMeshData UJUSYNCBlueprintLibrary::FixMeshDataForSpawning(const FJUSYNCMes
 {
     FJUSYNCMeshData FixedData = InputMeshData;
 
-    // Basic vertex validation
     for (int32 i = 0; i < FixedData.Vertices.Num(); ++i)
     {
         FVector& Vertex = FixedData.Vertices[i];
@@ -2818,7 +2637,6 @@ FJUSYNCMeshData UJUSYNCBlueprintLibrary::FixMeshDataForSpawning(const FJUSYNCMes
         }
     }
 
-    // Basic triangle validation - keep only valid triangles
     TArray<int32> ValidTriangles;
     ValidTriangles.Reserve(FixedData.Triangles.Num());
 
@@ -2830,7 +2648,6 @@ FJUSYNCMeshData UJUSYNCBlueprintLibrary::FixMeshDataForSpawning(const FJUSYNCMes
             int32 i1 = FixedData.Triangles[i + 1];
             int32 i2 = FixedData.Triangles[i + 2];
 
-            // Basic bounds checking and degenerate triangle check
             if (i0 >= 0 && i0 < FixedData.Vertices.Num() &&
                 i1 >= 0 && i1 < FixedData.Vertices.Num() &&
                 i2 >= 0 && i2 < FixedData.Vertices.Num() &&
@@ -2845,7 +2662,6 @@ FJUSYNCMeshData UJUSYNCBlueprintLibrary::FixMeshDataForSpawning(const FJUSYNCMes
 
     FixedData.Triangles = ValidTriangles;
 
-    // Recalculate normals if missing or invalid
     if (!FixedData.HasNormals() || FixedData.Normals.Num() != FixedData.Vertices.Num())
     {
         FixedData.Normals.SetNum(FixedData.Vertices.Num());
@@ -2854,7 +2670,6 @@ FJUSYNCMeshData UJUSYNCBlueprintLibrary::FixMeshDataForSpawning(const FJUSYNCMes
             FixedData.Normals[i] = FVector::ZeroVector;
         }
 
-        // Calculate face normals and accumulate
         for (int32 i = 0; i < FixedData.Triangles.Num(); i += 3)
         {
             int32 i0 = FixedData.Triangles[i];
@@ -2875,7 +2690,6 @@ FJUSYNCMeshData UJUSYNCBlueprintLibrary::FixMeshDataForSpawning(const FJUSYNCMes
             }
         }
 
-        // Normalize accumulated normals
         for (int32 i = 0; i < FixedData.Normals.Num(); ++i)
         {
             FixedData.Normals[i] = FixedData.Normals[i].GetSafeNormal();
@@ -2888,7 +2702,6 @@ FJUSYNCMeshData UJUSYNCBlueprintLibrary::FixMeshDataForSpawning(const FJUSYNCMes
         UE_LOG(LogJUSYNC, Log, TEXT("Recalculated normals for mesh: %s"), *InputMeshData.ElementName);
     }
 
-    // Validate and fix UV coordinates
     if (FixedData.HasUVs())
     {
         for (int32 i = 0; i < FixedData.UVs.Num(); ++i)
@@ -2909,7 +2722,6 @@ FBox UJUSYNCBlueprintLibrary::CalculateMeshBounds(const FJUSYNCMeshData& MeshDat
 {
     FBox MeshBounds(EForceInit::ForceInit);
 
-    // Add all vertices to the bounding box, transformed by location
     for (const FVector& Vertex : MeshData.Vertices)
     {
         FVector WorldVertex = Vertex + Location;
@@ -2931,13 +2743,10 @@ TArray<FVector> UJUSYNCBlueprintLibrary::CalculateScaledPositions(
         return OriginalLocations;
     }
 
-    // **FIX: Handle single point case with mesh-based scaling**
     if (OriginalLocations.Num() == 1)
     {
         UE_LOG(LogJUSYNC, Log, TEXT("Single spawn point - calculating scale based on mesh bounds"));
 
-        // For single point, calculate scale based on the mesh extent from USD
-        // Your USD shows extent [(-20, -20, -20), (20, 20, 20)] = 40x40x40 size
         FVector MeshSize(40.0f, 40.0f, 40.0f); // Based on your USD extent
 
         if (bPreserveAspectRatio)
@@ -2962,7 +2771,6 @@ TArray<FVector> UJUSYNCBlueprintLibrary::CalculateScaledPositions(
         return OriginalLocations; // Return original location, scaling will be applied to actor
     }
 
-    // Rest of your existing multi-point logic...
     FBox CombinedBounds(EForceInit::ForceInit);
     for (const FVector& Location : OriginalLocations)
     {
@@ -2979,7 +2787,6 @@ TArray<FVector> UJUSYNCBlueprintLibrary::CalculateScaledPositions(
         return OriginalLocations;
     }
 
-    // Calculate scale factor with safety checks
     if (bPreserveAspectRatio)
     {
         float MinScale = FMath::Min3(
@@ -2998,7 +2805,6 @@ TArray<FVector> UJUSYNCBlueprintLibrary::CalculateScaledPositions(
         );
     }
 
-    // Calculate scaled positions
     TArray<FVector> ScaledLocations;
     ScaledLocations.Reserve(OriginalLocations.Num());
 
@@ -3014,7 +2820,6 @@ TArray<FVector> UJUSYNCBlueprintLibrary::CalculateScaledPositions(
     return ScaledLocations;
 }
 
-// ========== PARALLEL DOWNLOAD FUNCTIONS ==========
 
 void UJUSYNCBlueprintLibrary::RequestFilesParallelAsync(
     const TArray<FString>& Filenames,
@@ -3032,7 +2837,6 @@ void UJUSYNCBlueprintLibrary::RequestFilesParallelAsync(
         return;
     }
 
-    // Check if middleware is initialized
     if (!Subsystem->IsBrokerConnected())
     {
         UE_LOG(LogJUSYNC, Error, TEXT("Middleware not connected to broker"));
@@ -3040,7 +2844,6 @@ void UJUSYNCBlueprintLibrary::RequestFilesParallelAsync(
         return;
     }
 
-    // Convert FString arrays to C arrays for the async C API
     std::vector<std::string> FilenameStorage;
     std::vector<const char*> FilenameCStrs;
     std::vector<int32_t> TargetRanksC;
@@ -3061,7 +2864,6 @@ void UJUSYNCBlueprintLibrary::RequestFilesParallelAsync(
         TargetRanksC.push_back(Rank);
     }
 
-    // Create shared state for tracking callbacks (allocated on heap)
     struct FParallelDownloadState : public TSharedFromThis<FParallelDownloadState>
     {
         FOnParallelFileReceived OnFileReceived;
@@ -3119,22 +2921,17 @@ void UJUSYNCBlueprintLibrary::RequestFilesParallelAsync(
     State->Filenames = Filenames;
     State->FilesExpected = Filenames.Num();
 
-    // Define C callbacks that capture the shared state
-    // Note: These are called from C threads, must marshal to game thread
     auto FileReceivedCallback = [State](const char* filename, const unsigned char* data, size_t data_size) {
         FString FilenameUTF8 = UTF8_TO_TCHAR(filename);
         TArray<uint8> DataArray;
         DataArray.Append(data, data_size);
 
-        // Update count
         int Received = State->FilesReceived.fetch_add(1) + 1;
         UE_LOG(LogJUSYNC, Log, TEXT("Pipeline: File %d/%d received: %s (%d bytes)"),
             Received, State->FilesExpected.load(), *FilenameUTF8, DataArray.Num());
 
-        // Execute delegate on game thread
         State->ExecuteFileReceived(FilenameUTF8, DataArray);
 
-        // Check if all files received
         if (Received >= State->FilesExpected)
         {
             State->bAllComplete = true;
@@ -3155,7 +2952,6 @@ void UJUSYNCBlueprintLibrary::RequestFilesParallelAsync(
         UE_LOG(LogJUSYNC, Error, TEXT("Pipeline: Parallel download error for %s: %s"), *FilenameUTF8, *ErrorUTF8);
         State->ExecuteError(FilenameUTF8, ErrorUTF8);
 
-        // Still count as received (but with error)
         int Received = State->FilesReceived.fetch_add(1) + 1;
         if (Received >= State->FilesExpected && !State->bAllComplete)
         {
@@ -3164,22 +2960,11 @@ void UJUSYNCBlueprintLibrary::RequestFilesParallelAsync(
         }
         };
 
-    // Call the async C API (non-blocking, returns immediately)
     UE_LOG(LogJUSYNC, Log, TEXT("Pipeline: Calling RequestFilesParallelAsync_C for %d files (true async)"), Filenames.Num());
 
-    // The C API is declared extern "C" in the header included by JUSYNCSubsystem
-    // We need to access it - subsystem should have it available
-    // For now, use a simpler approach: call through subsystem if it has async method
-    // Actually, let me check if there's a direct way
 
-    // Since we're in Blueprint library, we can't easily include the C header
-    // Instead, let the subsystem handle the async call
-    // But the subsystem's current implementation is synchronous
-
-    // For now, use the existing approach but log that it's not true pipeline
     UE_LOG(LogJUSYNC, Warning, TEXT("Pipeline: Using synchronous subsystem call - files will download before callbacks"));
 
-    // Fall back to existing implementation
     TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
     AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, Filenames, TargetRanks, TimeoutMs, OnFileReceived, OnComplete, OnError]()
         {
@@ -3190,7 +2975,6 @@ void UJUSYNCBlueprintLibrary::RequestFilesParallelAsync(
 
             if (!WeakSubsystem.IsValid()) return;
 
-            // Execute callbacks on game thread
             FFunctionGraphTask::CreateAndDispatchWhenReady(
                 [bSuccess, DownloadedFiles, Filenames, OnFileReceived, OnComplete, OnError]()
                 {
@@ -3263,7 +3047,6 @@ void UJUSYNCBlueprintLibrary::CreateMaterialFromTexture_Async(UTexture2D* Textur
         return;
     }
 
-    // Get the subsystem
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (!Subsystem)
     {
@@ -3271,20 +3054,16 @@ void UJUSYNCBlueprintLibrary::CreateMaterialFromTexture_Async(UTexture2D* Textur
         return;
     }
 
-    // Call the subsystem's async function
     Subsystem->CreateMaterialFromTexture_Async(Texture, TargetComponent);
 }
 
-// Original implementation for backward compatibility
 void UJUSYNCBlueprintLibrary::CreateMaterialFromTexture_Async_Return(
     UTexture2D* Texture,
     const FOnMaterialCreated& OnMaterialCreated)
 {
-    // Call extended version with default parameters
     CreateMaterialFromTexture_Async_Return_Extended(Texture, nullptr, NAME_None, OnMaterialCreated);
 }
 
-// Extended implementation with configurable parameters
 void UJUSYNCBlueprintLibrary::CreateMaterialFromTexture_Async_Return_Extended(
     UTexture2D* Texture,
     UMaterialInterface* BaseMaterial,
@@ -3297,7 +3076,6 @@ void UJUSYNCBlueprintLibrary::CreateMaterialFromTexture_Async_Return_Extended(
         return;
     }
 
-    // Get the subsystem
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (!Subsystem)
     {
@@ -3309,7 +3087,6 @@ void UJUSYNCBlueprintLibrary::CreateMaterialFromTexture_Async_Return_Extended(
         BaseMaterial ? *BaseMaterial->GetName() : TEXT("Default"),
         *TextureParameterName.ToString());
 
-    // Convert dynamic delegate to standard function and call internal implementation
     Subsystem->CreateMaterialFromTexture_Async_Return_Internal(
         Texture,
         BaseMaterial,
@@ -3323,7 +3100,6 @@ void UJUSYNCBlueprintLibrary::CreateMaterialFromTexture_Async_Return_Extended(
         });
 }
 
-// ========== BENCHMARKING FUNCTIONS ==========
 
 void UJUSYNCBlueprintLibrary::StartBenchmark(const FString& TestName, const FJUSYNCBenchmarkConfig& Config)
 {
@@ -3333,10 +3109,8 @@ void UJUSYNCBlueprintLibrary::StartBenchmark(const FString& TestName, const FJUS
         return;
     }
 
-    // Clear any previous benchmark results when starting a new benchmark
     ClearBenchmarkResults();
 
-    // Fresh timing state per benchmark session (interactive window + TTF)
     FJUSYNCBenchmarkTiming::Get().Reset();
 
     CurrentBenchmarkTest = TestName;
@@ -3344,7 +3118,6 @@ void UJUSYNCBlueprintLibrary::StartBenchmark(const FString& TestName, const FJUS
     bIsBenchmarking = true;
     BenchmarkSessionStartTime = FDateTime::UtcNow();
 
-    // Start metrics collection for split mesh tracking and other metrics
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (Subsystem)
     {
@@ -3365,7 +3138,6 @@ void UJUSYNCBlueprintLibrary::EndBenchmark()
 
     UE_LOG(LogJUSYNC, Log, TEXT("Ended benchmark: %s"), *CurrentBenchmarkTest);
 
-    // Stop metrics collection
     UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
     if (Subsystem)
     {
@@ -3373,7 +3145,6 @@ void UJUSYNCBlueprintLibrary::EndBenchmark()
         UE_LOG(LogJUSYNC, Log, TEXT("Stopped metrics collection for benchmark"));
     }
 
-    // Save results if output directory is specified
     if (!CurrentBenchmarkConfig.OutputDirectory.IsEmpty())
     {
         switch (CurrentBenchmarkConfig.OutputFormat)
@@ -3407,12 +3178,10 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToCSV(const FString& Output
         return;
     }
 
-    // Create output directory
     IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
     FString OutputPath = OutputDirectory;
     PlatformFile.CreateDirectoryTree(*OutputPath);
 
-    // Create filename
     FString Filename = TEXT("benchmark_results");
     if (CurrentBenchmarkConfig.bAppendTimestamp)
     {
@@ -3422,12 +3191,8 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToCSV(const FString& Output
 
     FString CSVPath = OutputPath / Filename;
 
-    // Create CSV header
-    // (new benchmarking columns are appended after SplitMeshCount; existing
-    // column order is unchanged for backward compatibility)
     FString CSVData = TEXT("TestName,Timestamp,TotalTimeMs,TriangleCount,VertexCount,RAMBeforeMB,RAMAfterMB,FPS,FrameTimeMs,ActorCount,ErrorCount,SuccessRate,SplitMeshCount,InteractWindowMs,FirstFrameMs,FullSceneMs,FPSMeasured,VRAMBeforeMB,VRAMAfterMB,VRAMPeakMB,ChunkCount,BytesReceivedMB,FilesRequested,FilesCompleted,DownloadTotalMs,ClusterWorkers,ClusterCommits,ClusterRawPayloadMB,ClusterServingMB,ClusterServingChunks,ClusterSerializeMs,ClusterStoreMs\n");
 
-    // Add all results
     for (const FJUSYNCBenchmarkResult& Result : BenchmarkResults)
     {
         CSVData += FString::Printf(TEXT("%s,%s,%.2f,%d,%d,%.2f,%.2f,%.1f,%.2f,%d,%d,%.1f,%d,%.2f,%.2f,%.2f,%d,%.2f,%.2f,%.2f,%lld,%.3f,%lld,%lld,%.2f,%d,%lld,%.3f,%.3f,%lld,%.2f,%.2f\n"),
@@ -3466,7 +3231,6 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToCSV(const FString& Output
         );
     }
 
-    // Save to file
     if (FFileHelper::SaveStringToFile(CSVData, *CSVPath))
     {
         UE_LOG(LogJUSYNC, Log, TEXT("Benchmark results saved to: %s"), *CSVPath);
@@ -3485,12 +3249,10 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToJSON(const FString& Outpu
         return;
     }
 
-    // Create output directory
     IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
     FString OutputPath = OutputDirectory;
     PlatformFile.CreateDirectoryTree(*OutputPath);
 
-    // Create filename
     FString Filename = TEXT("benchmark_results");
     if (CurrentBenchmarkConfig.bAppendTimestamp)
     {
@@ -3500,10 +3262,8 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToJSON(const FString& Outpu
 
     FString JSONPath = OutputPath / Filename;
 
-    // Start building JSON
     FString JSONData = TEXT("{\n");
 
-    // Calculate session-level aggregates
     int64 TotalSessionTimeMs = 0;
     int32 TotalTriangles = 0;
     int32 TotalVertices = 0;
@@ -3521,22 +3281,18 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToJSON(const FString& Outpu
         SessionRAMStart = BenchmarkResults[0].RAMBeforeBytes;
         SessionRAMEnd = BenchmarkResults[BenchmarkResults.Num() - 1].RAMAfterBytes;
 
-        // Calculate actual elapsed session time from start to now
         FDateTime SessionEndTime = FDateTime::UtcNow();
         FDateTime SessionStartTime = BenchmarkSessionStartTime;
-        
-        // If session start time is not valid (e.g., SaveAllBenchmarkResultsToJSON called directly),
-        // use the timestamp of the first benchmark result as session start
+
         if (SessionStartTime.GetTicks() == 0 && BenchmarkResults.Num() > 0)
         {
             SessionStartTime = BenchmarkResults[0].Timestamp;
             UE_LOG(LogJUSYNC, Warning, TEXT("Using first benchmark result timestamp as session start time"));
         }
-        
+
         FTimespan ElapsedTime = SessionEndTime - SessionStartTime;
         TotalSessionTimeMs = static_cast<int64>(ElapsedTime.GetTotalMilliseconds());
 
-        // Also calculate sum of individual test times for reference
         int64 SumOfTestTimesMs = 0;
         for (const FJUSYNCBenchmarkResult& Result : BenchmarkResults)
         {
@@ -3551,7 +3307,7 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToJSON(const FString& Outpu
             AvgFrameTimeMs += Result.FrameTimeMs;
         }
 
-        UE_LOG(LogJUSYNC, Log, TEXT("Benchmark session timing: Elapsed=%lld ms, Sum of tests=%lld ms, Difference=%lld ms"), 
+        UE_LOG(LogJUSYNC, Log, TEXT("Benchmark session timing: Elapsed=%lld ms, Sum of tests=%lld ms, Difference=%lld ms"),
                TotalSessionTimeMs, SumOfTestTimesMs, TotalSessionTimeMs - SumOfTestTimesMs);
 
         AvgFPS /= BenchmarkResults.Num();
@@ -3567,7 +3323,6 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToJSON(const FString& Outpu
     float SessionRAMEndMB = SessionRAMEnd / (1024.0f * 1024.0f);
     float SessionRAMDeltaMB = SessionRAMDelta / (1024.0f * 1024.0f);
 
-    // Add benchmark run metadata
     JSONData += TEXT("  \"benchmark_run\": {\n");
     JSONData += FString::Printf(TEXT("    \"timestamp\": \"%s\",\n"), *FDateTime::Now().ToIso8601());
     JSONData += FString::Printf(TEXT("    \"total_tests\": %d,\n"), BenchmarkResults.Num());
@@ -3579,7 +3334,6 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToJSON(const FString& Outpu
     JSONData += TEXT("}\n");
     JSONData += TEXT("},\n");
 
-    // Calculate additional session aggregates
     float AvgCPUUsage = 0.0f;
     float AvgGPUUsage = 0.0f;
     int64 SessionVRAMStart = 0;
@@ -3652,16 +3406,13 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToJSON(const FString& Outpu
     }
 
     int64 SessionVRAMDelta = SessionVRAMEnd - SessionVRAMStart;
-    // Convert VRAM to GB (divide by 1024^3)
     float SessionVRAMStartGB = SessionVRAMStart / (1024.0f * 1024.0f * 1024.0f);
     float SessionVRAMEndGB = SessionVRAMEnd / (1024.0f * 1024.0f * 1024.0f);
     float SessionVRAMPeakGB = SessionVRAMPeak / (1024.0f * 1024.0f * 1024.0f);
     float SessionVRAMDeltaGB = SessionVRAMDelta / (1024.0f * 1024.0f * 1024.0f);
-    
-    // Convert RAM peak to MB
+
     float SessionRAMPeakMB = SessionRAMPeak / (1024.0f * 1024.0f);
 
-    // Add session summary
     JSONData += TEXT("  \"session_summary\": {\n");
     JSONData += FString::Printf(TEXT("    \"total_session_time_ms\": %lld,\n"), TotalSessionTimeMs);
     JSONData += FString::Printf(TEXT("    \"total_session_time_seconds\": %.2f,\n"), TotalSessionTimeSeconds);
@@ -3699,15 +3450,12 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToJSON(const FString& Outpu
     JSONData += FString::Printf(TEXT("\"files_completed\": %lld\n"), SessionFilesCompleted);
     JSONData += TEXT("},\n");
 
-    // Start results array
     JSONData += TEXT("  \"results\": [\n");
 
-    // Add all results
     for (int32 i = 0; i < BenchmarkResults.Num(); ++i)
     {
         const FJUSYNCBenchmarkResult& Result = BenchmarkResults[i];
 
-        // Calculate derived metrics
         float TotalTimeSeconds = Result.TotalTimeMs / 1000.0f;
         float TrianglesPerSecond = (TotalTimeSeconds > 0) ? Result.TriangleCount / TotalTimeSeconds : 0.0f;
         float VerticesPerSecond = (TotalTimeSeconds > 0) ? Result.VertexCount / TotalTimeSeconds : 0.0f;
@@ -3720,13 +3468,11 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToJSON(const FString& Outpu
         JSONData += FString::Printf(TEXT("      \"test_name\": \"%s\",\n"), *Result.TestName);
         JSONData += FString::Printf(TEXT("      \"timestamp\": \"%s\",\n"), *Result.Timestamp.ToIso8601());
 
-        // Timing metrics
         JSONData += TEXT("      \"timing\": {\n");
         JSONData += FString::Printf(TEXT("        \"total_time_ms\": %.2f,\n"), Result.TotalTimeMs);
         JSONData += FString::Printf(TEXT("        \"total_time_seconds\": %.4f\n"), TotalTimeSeconds);
         JSONData += TEXT("},\n");
 
-        // Complexity metrics
         JSONData += TEXT("      \"complexity\": {\n");
         JSONData += FString::Printf(TEXT("        \"triangle_count\": %d,\n"), Result.TriangleCount);
         JSONData += FString::Printf(TEXT("        \"vertex_count\": %d,\n"), Result.VertexCount);
@@ -3734,7 +3480,6 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToJSON(const FString& Outpu
         JSONData += FString::Printf(TEXT("        \"vertices_per_second\": %.0f\n"), VerticesPerSecond);
         JSONData += TEXT("},\n");
 
-        // Memory metrics (only MB, no bytes)
         JSONData += TEXT("      \"memory\": {\n");
         JSONData += FString::Printf(TEXT("        \"ram_before_mb\": %.2f,\n"), RAMBeforeMB);
         JSONData += FString::Printf(TEXT("        \"ram_after_mb\": %.2f,\n"), RAMAfterMB);
@@ -3743,8 +3488,6 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToJSON(const FString& Outpu
         JSONData += FString::Printf(TEXT("        \"ram_delta_mb\": %.2f\n"), RAMDeltaMB);
         JSONData += TEXT("},\n");
 
-        // Performance metrics (fps/frame_time_ms are measured via the
-        // interactive window; fps_measured=false means 0 = not measured)
         JSONData += TEXT("\"performance\": {\n");
         JSONData += FString::Printf(TEXT("\"fps\": %.1f,\n"), Result.FPS);
         JSONData += FString::Printf(TEXT("\"fps_measured\": %s,\n"), Result.bFPSMeasured ? TEXT("true") : TEXT("false"));
@@ -3753,13 +3496,11 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToJSON(const FString& Outpu
         JSONData += FString::Printf(TEXT("\"interact_window_ms\": %.2f\n"), Result.InteractWindowMs);
         JSONData += TEXT("},\n");
 
-        // CPU metrics
         JSONData += TEXT("      \"cpu\": {\n");
         JSONData += FString::Printf(TEXT("        \"usage_percent\": %.1f,\n"), Result.CPUUsagePercent);
         JSONData += FString::Printf(TEXT("        \"active_threads\": %d\n"), Result.ActiveThreadCount);
         JSONData += TEXT("},\n");
 
-        // GPU usage (percentage) + VRAM usage (MB; bytes are tracked on the result)
         JSONData += FString::Printf(TEXT("\"gpu_usage_percent\": %.1f,\n"), Result.GPUUsagePercent);
         JSONData += TEXT("\"vram\": {\n");
         JSONData += FString::Printf(TEXT("\"before_mb\": %.2f,\n"), Result.VRAMBeforeBytes / (1024.0f * 1024.0f));
@@ -3767,7 +3508,6 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToJSON(const FString& Outpu
         JSONData += FString::Printf(TEXT("\"peak_mb\": %.2f\n"), Result.VRAMPeakBytes / (1024.0f * 1024.0f));
         JSONData += TEXT("},\n");
 
-        // Operational metrics
         JSONData += TEXT("      \"operational\": {\n");
         JSONData += FString::Printf(TEXT("        \"actor_count\": %d,\n"), Result.ActorCount);
         JSONData += FString::Printf(TEXT("        \"error_count\": %d,\n"), Result.ErrorCount);
@@ -3775,14 +3515,12 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToJSON(const FString& Outpu
         JSONData += FString::Printf(TEXT("        \"split_mesh_count\": %d\n"), Result.SplitMeshCount);
         JSONData += TEXT("},\n");
 
-        // Hitch detection metrics
         JSONData += TEXT("      \"hitch_detection\": {\n");
         JSONData += FString::Printf(TEXT("        \"hitch_count\": %d,\n"), Result.HitchCount);
         JSONData += FString::Printf(TEXT("        \"avg_hitch_duration_ms\": %.1f,\n"), Result.AvgHitchDurationMs);
         JSONData += FString::Printf(TEXT("        \"max_hitch_duration_ms\": %.1f\n"), Result.MaxHitchDurationMs);
         JSONData += TEXT("},\n");
 
-        // Transfer totals from the middleware client report (payload in MB)
         JSONData += TEXT("\"download\": {\n");
         JSONData += FString::Printf(TEXT("\"bytes_received_mb\": %.3f,\n"), Result.BytesReceived / (1024.0f * 1024.0f));
         JSONData += FString::Printf(TEXT("\"chunk_messages\": %lld,\n"), Result.ChunkCount);
@@ -3791,17 +3529,13 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToJSON(const FString& Outpu
         JSONData += FString::Printf(TEXT("\"total_receive_ms\": %.2f\n"), Result.DownloadTotalMs);
         JSONData += TEXT("},\n");
 
-        // Cluster-side (ANARI-USD) telemetry for this run: per-worker list +
-        // combined totals, fetched live from the broker at finalize.
         JSONData += TEXT("\"cluster\": ") + (Result.ClusterReport.IsEmpty() ? FString(TEXT("{}")) : Result.ClusterReport) + TEXT(",\n");
 
-        // Time-to-frame (wall clock, ms; 0 = not captured in this run)
         JSONData += TEXT("\"time_to_frame\": {\n");
         JSONData += FString::Printf(TEXT("\"first_frame_ms\": %.2f,\n"), Result.FirstFrameMs);
         JSONData += FString::Printf(TEXT("\"full_scene_ms\": %.2f\n"), Result.FullSceneMs);
         JSONData += TEXT("}\n");
 
-        // Close result object (no trailing comma for last item)
         if (i < BenchmarkResults.Num() - 1)
         {
             JSONData += TEXT("    },\n");
@@ -3812,11 +3546,9 @@ void UJUSYNCBlueprintLibrary::SaveAllBenchmarkResultsToJSON(const FString& Outpu
         }
     }
 
-    // Close JSON
     JSONData += TEXT("  ]\n");
     JSONData += TEXT("}\n");
 
-    // Save to file
     if (FFileHelper::SaveStringToFile(JSONData, *JSONPath))
     {
         UE_LOG(LogJUSYNC, Log, TEXT("Benchmark results saved to JSON: %s"), *JSONPath);
@@ -3877,18 +3609,13 @@ void UJUSYNCBlueprintLibrary::ResetBenchmarkTimings()
 
 bool UJUSYNCBlueprintLibrary::ExportClientBenchmarkReport(const FString& FilePath)
 {
-    // Not available: the linked anari_usd_middleware build does not export
-    // ExportClientBenchmarkReport_C (benchmark feature lives on the
-    // middleware's 'benchmark' branch only).
     UE_LOG(LogJUSYNC, Warning, TEXT("ExportClientBenchmarkReport: not available in this middleware build (requested path: %s)"), *FilePath);
     return false;
 }
 
-// Helper function to get CPU usage percentage
 static float GetCPUUsagePercentage()
 {
 #if PLATFORM_WINDOWS
-    // Windows-specific CPU usage measurement
     FILETIME idleTime, kernelTime, userTime;
     if (GetSystemTimes(&idleTime, &kernelTime, &userTime))
     {
@@ -3928,7 +3655,6 @@ static float GetCPUUsagePercentage()
         }
     }
 #elif PLATFORM_LINUX
-    // Linux CPU usage measurement using /proc/stat
     static uint64 LastTotalTime = 0;
     static uint64 LastIdleTime = 0;
 
@@ -3973,23 +3699,18 @@ static float GetCPUUsagePercentage()
     }
 #endif
 
-    // Fallback for unsupported platforms or measurement failure
     static float LastCPUUsage = 0.0f;
     LastCPUUsage = FMath::Fmod(LastCPUUsage + 5.0f, 100.0f); // Simulated CPU usage for testing
     return LastCPUUsage;
 }
-// Helper function to get VRAM usage (platform-specific)
 static int64 GetVRAMUsageBytes()
 {
     int64 vramBytes = 0;
 
 #if PLATFORM_WINDOWS
-    // Windows: Query per-process VRAM usage using DXGI 1.4 (Windows 10+)
-    // Based on documentation: IDXGIAdapter3::QueryVideoMemoryInfo returns CurrentUsage = process VRAM consumption
     IDXGIFactory4* pFactory = nullptr;
     if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory4), (void**)&pFactory)))
     {
-        // Enumerate adapters, skip software adapters (Microsoft Basic Render Driver)
         IDXGIAdapter1* pAdapter1 = nullptr;
         IDXGIAdapter3* pAdapter3 = nullptr;
 
@@ -3998,10 +3719,8 @@ static int64 GetVRAMUsageBytes()
             DXGI_ADAPTER_DESC1 adapterDesc = {};
             if (SUCCEEDED(pAdapter1->GetDesc1(&adapterDesc)))
             {
-                // Skip software adapters (DXGI_ADAPTER_FLAG_SOFTWARE)
                 if (!(adapterDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE))
                 {
-                    // Found a hardware adapter, try to get IDXGIAdapter3
                     if (SUCCEEDED(pAdapter1->QueryInterface(__uuidof(IDXGIAdapter3), (void**)&pAdapter3)))
                     {
                         break;
@@ -4023,8 +3742,6 @@ static int64 GetVRAMUsageBytes()
             DXGI_QUERY_VIDEO_MEMORY_INFO memoryInfo = {};
             if (SUCCEEDED(pAdapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memoryInfo)))
             {
-                // memoryInfo.CurrentUsage = process's current VRAM consumption (what we want!)
-                // memoryInfo.Budget = OS budget for this process
                 vramBytes = memoryInfo.CurrentUsage;
                 UE_LOG(LogJUSYNC, Log, TEXT("DXGI 1.4 VRAM query: %lld bytes (%.2f MB) current usage, %lld bytes (%.2f MB) budget"),
                     vramBytes, vramBytes / (1024.0f * 1024.0f),
@@ -4032,7 +3749,6 @@ static int64 GetVRAMUsageBytes()
             }
             else
             {
-                // QueryVideoMemoryInfo failed, fall back to total VRAM
                 DXGI_ADAPTER_DESC adapterDesc;
                 if (SUCCEEDED(pAdapter3->GetDesc(&adapterDesc)))
                 {
@@ -4045,7 +3761,6 @@ static int64 GetVRAMUsageBytes()
         }
         else if (pAdapter1)
         {
-            // No IDXGIAdapter3, fall back to total VRAM
             DXGI_ADAPTER_DESC adapterDesc;
             if (SUCCEEDED(pAdapter1->GetDesc(&adapterDesc)))
             {
@@ -4060,7 +3775,6 @@ static int64 GetVRAMUsageBytes()
     }
     else
     {
-        // Fallback to older DXGI if CreateDXGIFactory1 fails
         IDXGIFactory* pFactoryOld = nullptr;
         if (SUCCEEDED(CreateDXGIFactory(__uuidof(IDXGIFactory), (void**)&pFactoryOld)))
         {
@@ -4082,26 +3796,22 @@ static int64 GetVRAMUsageBytes()
 
 
 #elif PLATFORM_LINUX
-    // Linux: Query NVIDIA GPU memory using nvidia-smi (most reliable for NVIDIA)
     FILE* pipe = popen("nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null", "r");
     if (pipe)
     {
         unsigned long usedMiB = 0, totalMiB = 0;
         if (fscanf(pipe, "%lu, %lu", &usedMiB, &totalMiB) == 2)
         {
-            // Return used memory in bytes
             vramBytes = usedMiB * 1024 * 1024;
             UE_LOG(LogJUSYNC, Log, TEXT("NVIDIA-SMI VRAM query: %lu MB used, %lu MB total (%lld bytes)"),
                 usedMiB, totalMiB, vramBytes);
         }
         else
         {
-            // Try alternative query format
             rewind(pipe);
             char buffer[128];
             if (fgets(buffer, sizeof(buffer), pipe))
             {
-                // Parse "usedMiB, totalMiB"
                 if (sscanf(buffer, "%lu, %lu", &usedMiB, &totalMiB) == 2)
                 {
                     vramBytes = usedMiB * 1024 * 1024;
@@ -4113,7 +3823,6 @@ static int64 GetVRAMUsageBytes()
 
     if (vramBytes <= 0)
     {
-        // Try AMD GPU path via sysfs
         FILE* fp = fopen("/sys/class/drm/card0/device/mem_info_vram_used", "r");
         if (fp)
         {
@@ -4129,8 +3838,6 @@ static int64 GetVRAMUsageBytes()
 
 #endif
 
-    // No simulated data - if platform-specific query failed, return 0
-    // This indicates measurement failure rather than providing fake data
     if (vramBytes <= 0)
     {
         UE_LOG(LogJUSYNC, Warning, TEXT("GetVRAMUsageBytes() failed to query GPU memory - returning 0"));
@@ -4140,13 +3847,11 @@ static int64 GetVRAMUsageBytes()
     return vramBytes;
 }
 
-// Helper function to get active thread count
 static int32 GetActiveThreadCount()
 {
     int32 threadCount = 0;
 
 #if PLATFORM_WINDOWS
-    // Windows thread counting using Toolhelp32
     DWORD processId = GetCurrentProcessId();
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
 
@@ -4170,7 +3875,6 @@ static int32 GetActiveThreadCount()
     }
 
 #elif PLATFORM_LINUX
-    // Linux thread counting using /proc/self/status or /proc/self/task
     FILE* file = fopen("/proc/self/status", "r");
     if (file)
     {
@@ -4186,7 +3890,6 @@ static int32 GetActiveThreadCount()
         fclose(file);
     }
 
-    // Alternative method: count entries in /proc/self/task directory
     if (threadCount == 0)
     {
         DIR* dir = opendir("/proc/self/task");
@@ -4234,7 +3937,6 @@ FJUSYNCBenchmarkResult UJUSYNCBlueprintLibrary::CreateBenchmarkResult(
     int32 ErrorCount,
     int32 SplitMeshCount)
 {
-    // Call the extended version with default values for new metrics
     return CreateBenchmarkResultExtended(
         TestName,
         TotalTimeMs,
@@ -4305,10 +4007,6 @@ FJUSYNCBenchmarkResult UJUSYNCBlueprintLibrary::CreateBenchmarkResultExtended(
     Result.AvgHitchDurationMs = AvgHitchDurationMs;
     Result.MaxHitchDurationMs = MaxHitchDurationMs;
 
-    // FPS / frame time: measured from the real interactive window only.
-    // If the window was not run or produced no frames, the values stay 0
-    // and bFPSMeasured stays false. We never synthesize FPS or hitches:
-    // unmeasured metrics must be reported as 0, not invented.
     const FJUSYNCInteractiveStats Interactive = FJUSYNCBenchmarkTiming::Get().GetInteractiveStats();
     if (Interactive.bValid)
     {
@@ -4325,7 +4023,6 @@ FJUSYNCBenchmarkResult UJUSYNCBlueprintLibrary::CreateBenchmarkResultExtended(
         Result.bFPSMeasured = false;
     }
 
-    // Time-to-frame: wall-clock timestamps captured by the pipeline
     const FJUSYNCBenchmarkTTF TTF = FJUSYNCBenchmarkTiming::Get().GetTTF();
     if (TTF.bValid)
     {
@@ -4348,7 +4045,6 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
     int32 BatchSize,
     float BatchDelay)
 {
-    // Simple implementation: call spawn function for each mesh
     TArray<AActor*> SpawnedActors;
     SpawnedActors.Reserve(MeshDataArray.Num());
 
@@ -4370,7 +4066,6 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial(
 
         SpawnedActors.Add(SpawnedActor);
 
-        // Optional batching delay
         if (BatchDelay > 0 && (i + 1) % BatchSize == 0 && i < MeshDataArray.Num() - 1)
         {
             FPlatformProcess::Sleep(BatchDelay);
@@ -4393,24 +4088,19 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial_Be
     int32 BatchSize,
     float BatchDelay)
 {
-    // Start benchmark if enabled
     bool bWasBenchmarking = bIsBenchmarking;
     if (Config.bEnableBenchmarking && !bIsBenchmarking)
     {
         StartBenchmark(TEXT("BatchSpawnRealtimeMeshesWithMaterial"), Config);
     }
 
-    // Measure RAM before
     FPlatformMemoryStats StatsBefore = FPlatformMemory::GetStats();
     int64 RAMBefore = StatsBefore.UsedPhysical;
 
-    // Measure VRAM before spawning (actual GPU memory before any meshes are created)
     int64 VRAMBefore = GetVRAMUsageBytes();
 
-    // Measure time
     double StartTime = FPlatformTime::Seconds();
 
-    // Call spawn function for each mesh (batch simulation)
     TArray<AActor*> SpawnedActors;
     SpawnedActors.Reserve(MeshDataArray.Num());
 
@@ -4436,11 +4126,9 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial_Be
     double EndTime = FPlatformTime::Seconds();
     float TotalTimeMs = (EndTime - StartTime) * 1000.0f;
 
-    // Measure RAM after
     FPlatformMemoryStats StatsAfter = FPlatformMemory::GetStats();
     int64 RAMAfter = StatsAfter.UsedPhysical;
 
-    // Calculate total triangle/vertex count
     int32 TotalTriangleCount = 0;
     int32 TotalVertexCount = 0;
     for (const FJUSYNCMeshData& MeshData : MeshDataArray)
@@ -4449,31 +4137,23 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial_Be
         TotalVertexCount += MeshData.GetVertexCount();
     }
 
-    // Calculate error count
     int32 ErrorCount = (SpawnedActors.Num() == MeshDataArray.Num()) ? 0 : 1;
 
-    // Record benchmark result
     if (Config.bEnableBenchmarking)
     {
-        // Get additional metrics
         float CPUUsage = GetCPUUsagePercentage();
-        // VRAMBefore was already measured before spawning
-        // Now measure VRAM after spawning completes
         int64 VRAMAfter = GetVRAMUsageBytes();
         int32 ActiveThreads = GetActiveThreadCount();
 
-        // Get peak RAM (approximate - would need continuous monitoring)
         FPlatformMemoryStats PeakStats = FPlatformMemory::GetStats();
         int64 RAMPeak = PeakStats.PeakUsedPhysical;
 
-        // Get GPU usage and split mesh count from subsystem
         float GPUUsage = 0.0f;
         int32 SplitMeshCount = 0;
         UJUSYNCSubsystem* Subsystem = GetJUSYNCSubsystem();
         if (Subsystem)
         {
             GPUUsage = Subsystem->GetGPUUsage_Percent();
-            // Get split mesh count directly from accumulator (not reset)
             SplitMeshCount = Subsystem->GetSplitMeshCount();
         }
 
@@ -4502,7 +4182,6 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial_Be
 
         RecordBenchmarkResult(Result);
 
-        // End benchmark if we started it
         if (!bWasBenchmarking)
         {
             EndBenchmark();
@@ -4512,12 +4191,9 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesWithMaterial_Be
     return SpawnedActors;
 }
 
-// ========== DYNAMIC TIMEOUT & RETRY LOGIC IMPLEMENTATION ==========
 
-// Static member initialization
 UJUSYNCBlueprintLibrary::FRankPerformanceTracker UJUSYNCBlueprintLibrary::RankPerformanceTracker;
 
-// FRankPerformanceTracker methods
 float UJUSYNCBlueprintLibrary::FRankPerformanceTracker::GetRankPerformanceFactor(int32 Rank)
 {
     FScopeLock Lock(&StatsMutex);
@@ -4528,8 +4204,6 @@ float UJUSYNCBlueprintLibrary::FRankPerformanceTracker::GetRankPerformanceFactor
 
     const FRankStats& Stats = RankStats[Rank];
 
-    // Calculate performance factor:
-    // 1.0 = normal, >1.0 = slower, <1.0 = faster
     float TimeFactor = FMath::Max(0.5f, FMath::Min(2.0f, Stats.AverageResponseTime / 10000.0f));
     float SuccessFactor = 1.0f + (1.0f - Stats.SuccessRate); // 1.0 for 100% success, 2.0 for 0% success
 
@@ -4548,7 +4222,6 @@ bool UJUSYNCBlueprintLibrary::FRankPerformanceTracker::CanTryRank(int32 Rank)
     const int32 MAX_FAILURES = 3;
     const FTimespan COOLDOWN_PERIOD = FTimespan::FromMinutes(1);
 
-    // Check if rank has too many failures recently
     if (Stats.RequestCount - Stats.SuccessCount >= MAX_FAILURES) {
         FDateTime Now = FDateTime::UtcNow();
         if (Now - Stats.LastRequestTime < COOLDOWN_PERIOD) {
@@ -4572,7 +4245,6 @@ void UJUSYNCBlueprintLibrary::FRankPerformanceTracker::RecordRequestResult(int32
     FScopeLock Lock(&StatsMutex);
     FRankStats& Stats = RankStats.FindOrAdd(Rank);
 
-    // Update moving average of response time
     if (Stats.AverageResponseTime == 0.0f) {
         Stats.AverageResponseTime = ResponseTimeMs;
     }
@@ -4584,7 +4256,6 @@ void UJUSYNCBlueprintLibrary::FRankPerformanceTracker::RecordRequestResult(int32
         Stats.SuccessCount++;
     }
 
-    // Update success rate
     if (Stats.RequestCount > 0) {
         Stats.SuccessRate = static_cast<float>(Stats.SuccessCount) / Stats.RequestCount;
     }
@@ -4610,12 +4281,8 @@ FString UJUSYNCBlueprintLibrary::FRankPerformanceTracker::GetStatsAsString() con
     return Result;
 }
 
-// Helper functions
 int64 UJUSYNCBlueprintLibrary::EstimateFileSizeFromFilename(const FString& Filename)
 {
-    // Pattern-based estimation from your log files:
-    // clips/vtk_actor__triangles_0_Geom__r5_0.000000.usda = ~76MB
-    // clips/vtk_actor__triangles_0_Geom__r15_0.000000.usda = ~71MB
 
     if (Filename.Contains(TEXT("vtk_actor__triangles_0_Geom__r5_"))) {
         return 76 * 1024 * 1024;  // 76MB
@@ -4629,7 +4296,6 @@ int64 UJUSYNCBlueprintLibrary::EstimateFileSizeFromFilename(const FString& Filen
     else if (Filename.Contains(TEXT(".usda")) ||
              Filename.Contains(TEXT(".usdc")) ||
              Filename.Contains(TEXT(".usd"))) {
-        // Generic USD file estimation (ascii .usda or binary crate .usd/.usdc)
         if (Filename.Contains(TEXT("_Geom__"))) {
             return 50 * 1024 * 1024;  // 50MB for geometry files
         }
@@ -4641,33 +4307,25 @@ int64 UJUSYNCBlueprintLibrary::EstimateFileSizeFromFilename(const FString& Filen
 
 int32 UJUSYNCBlueprintLibrary::CalculateDynamicTimeout(const FString& Filename, int32 TargetRank, bool bIsRetry, int32 RetryCount)
 {
-    // Base factors
     const int32 BASE_TIMEOUT = 5000;           // 5 seconds minimum
     const int32 PER_MB_TIMEOUT = 200;          // 200ms per MB
     const int32 NETWORK_LATENCY_FACTOR = 1000; // 1 second for network overhead
     const int32 RETRY_PENALTY = 2000;          // +2 seconds per retry
 
-    // 1. Estimate file size from filename patterns
     int64 EstimatedSize = EstimateFileSizeFromFilename(Filename);
 
-    // 2. Calculate size-based timeout
     int64 SizeMB = FMath::Max(1LL, EstimatedSize / (1024 * 1024));
     int32 SizeTimeout = SizeMB * PER_MB_TIMEOUT;
 
-    // 3. Network conditions
     int32 NetworkTimeout = NETWORK_LATENCY_FACTOR;
 
-    // 4. Retry penalty
     int32 RetryTimeout = bIsRetry ? (RetryCount * RETRY_PENALTY) : 0;
 
-    // 5. Rank-specific adjustments
     float RankFactor = RankPerformanceTracker.GetRankPerformanceFactor(TargetRank);
     int32 RankAdjustment = static_cast<int32>(RankFactor * 1000.0f);
 
-    // 6. Calculate final timeout with reasonable bounds
     int32 TotalTimeout = BASE_TIMEOUT + SizeTimeout + NetworkTimeout + RetryTimeout + RankAdjustment;
 
-    // Enforce reasonable bounds: 5s min, 120s max for normal, 300s max for retries
     int32 MaxTimeout = bIsRetry ? 300000 : 120000; // 5 minutes max for retries, 2 minutes normal
     return FMath::Clamp(TotalTimeout, 5000, MaxTimeout);
 }
@@ -4676,8 +4334,6 @@ TArray<int32> UJUSYNCBlueprintLibrary::GetFallbackRanks(int32 TargetRank)
 {
     TArray<int32> Ranks;
 
-    // Try nearest ranks in increments based on the target rank
-    // This works for any number of workers, not just 16
     const int32 FallbackOffsets[] = {1, 2, 3, 4, 5, -1, -2, -3, -4, -5, 0};
 
     for (int32 Offset : FallbackOffsets)
@@ -4718,7 +4374,6 @@ void UJUSYNCBlueprintLibrary::RequestFileAsyncDynamic(
         return;
     }
 
-    // 1. First, try to extract correct rank from filename (if enabled)
     int32 ExtractedRank = -1;
     if (bUseExtractedRank)
     {
@@ -4734,18 +4389,14 @@ void UJUSYNCBlueprintLibrary::RequestFileAsyncDynamic(
         UE_LOG(LogJUSYNC, Log, TEXT("Rank extraction from filename disabled. Using provided TargetRank: %d"), TargetRank);
     }
 
-    // 2. Create list of ranks to try (primary + fallbacks)
     TArray<int32> RanksToTry;
     RanksToTry.Add(TargetRank);
     RanksToTry.Append(GetFallbackRanks(TargetRank));
 
-    // 3. Get subsystem as weak pointer for thread safety
     TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
 
-    // 4. Launch async retry logic with proper memory safety
     AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSubsystem, RanksToTry, Filename, MaxRetries, OnComplete, OnError]()
         {
-            // Check if subsystem still exists
             UJUSYNCSubsystem* SubsystemPtr = WeakSubsystem.Get();
             if (!SubsystemPtr)
             {
@@ -4763,16 +4414,13 @@ void UJUSYNCBlueprintLibrary::RequestFileAsyncDynamic(
             int32 TotalAttempts = 0;
             FString FinalError;
 
-            // Safety: Calculate maximum total time to prevent infinite loops
             const int32 MAX_TOTAL_TIME_MS = 300000; // 5 minutes maximum
             FDateTime OperationStartTime = FDateTime::UtcNow();
 
-            // Try each rank with retries
             for (int32 RankIndex = 0; RankIndex < RanksToTry.Num() && !bSuccess; RankIndex++)
             {
                 int32 CurrentRank = RanksToTry[RankIndex];
 
-                // Check if we should try this rank (circuit breaker)
                 if (!RankPerformanceTracker.CanTryRank(CurrentRank)) {
                     UE_LOG(LogJUSYNC, Log, TEXT("Skipping rank %d due to circuit breaker"), CurrentRank);
                     continue;
@@ -4780,7 +4428,6 @@ void UJUSYNCBlueprintLibrary::RequestFileAsyncDynamic(
 
                 for (int32 Retry = 0; Retry < MaxRetries && !bSuccess; Retry++)
                 {
-                    // Check if we've exceeded maximum total time
                     FTimespan ElapsedTime = FDateTime::UtcNow() - OperationStartTime;
                     if (ElapsedTime.GetTotalMilliseconds() > MAX_TOTAL_TIME_MS)
                     {
@@ -4791,29 +4438,23 @@ void UJUSYNCBlueprintLibrary::RequestFileAsyncDynamic(
 
                     TotalAttempts++;
 
-                    // Dynamic timeout based on retry count and rank performance
                     bool bIsRetry = (Retry > 0);
                     int32 DynamicTimeout = CalculateDynamicTimeout(Filename, CurrentRank, bIsRetry, Retry);
 
-                    // Apply exponential backoff for retries
                     if (bIsRetry) {
                         int32 BackoffMs = FMath::Min(1000 * (1 << (Retry - 1)), 30000);
                         FPlatformProcess::Sleep(BackoffMs / 1000.0f);
                     }
 
-                    // Track request start
                     RankPerformanceTracker.RecordRequestStart(CurrentRank);
                     FDateTime StartTime = FDateTime::UtcNow();
 
-                    // Make the request
                     bSuccess = SubsystemPtr->RequestFile(Filename, CurrentRank, DynamicTimeout, FileData);
 
-                    // Calculate response time
                     FDateTime EndTime = FDateTime::UtcNow();
                     FTimespan ResponseTime = EndTime - StartTime;
                     int32 ResponseTimeMs = ResponseTime.GetTotalMilliseconds();
 
-                    // Update performance tracker
                     RankPerformanceTracker.RecordRequestResult(CurrentRank, bSuccess, ResponseTimeMs);
 
                     if (bSuccess) {
@@ -4830,7 +4471,6 @@ void UJUSYNCBlueprintLibrary::RequestFileAsyncDynamic(
                 }
             }
 
-            // Execute callback on game thread
             AsyncTask(ENamedThreads::GameThread, [bSuccess, Filename, FileData, ActualRankUsed, TotalAttempts, FinalError, OnComplete, OnError]()
                 {
                     if (bSuccess) {

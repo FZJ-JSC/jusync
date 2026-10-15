@@ -7,3 +7,5 @@
 JUSYNC_API bool JUSYNCBuildRealtimeMeshStreams(const FJUSYNCMeshData& MeshData, RealtimeMesh::FRealtimeMeshStreamSet& OutStreams);
 
 JUSYNC_API bool JUSYNCBuildRealtimeMeshStreams(const FJUSYNCCompactMeshData& MeshData, RealtimeMesh::FRealtimeMeshStreamSet& OutStreams);
+
+JUSYNC_API bool JUSYNCBuildRealtimeMeshStreams(const FJUSYNCCompactMeshData& MeshData, RealtimeMesh::FRealtimeMeshStreamSet& OutStreams, const TArray<FVector3f>* PrevPositions);

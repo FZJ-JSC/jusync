@@ -14,7 +14,6 @@ namespace anari_usd_middleware {
 
 #ifdef ENABLE_CUDA_ACCELERATION
 
-// Static member for singleton
 GpuContext& GpuContext::getInstance() {
     static GpuContext instance;
     return instance;
@@ -41,7 +40,7 @@ bool GpuContext::checkCudaError(int error, const char* operation,
     std::string errorMsg = getErrorString(error);
     MIDDLEWARE_LOG_ERROR("CUDA error in %s at %s:%d: %s (error code: %d)",
                         operation, file, line, errorMsg.c_str(), error);
-    
+
     return false;
 }
 
@@ -50,9 +49,8 @@ int GpuContext::calculateGridSize(size_t elementCount, int blockSize) {
 }
 
 bool GpuContext::meetsMinimumRequirements() const {
-    // Minimum compute capability 3.5 (Kepler)
     return (deviceInfo.computeCapabilityMajor > 3 ||
-            (deviceInfo.computeCapabilityMajor == 3 && 
+            (deviceInfo.computeCapabilityMajor == 3 &&
              deviceInfo.computeCapabilityMinor >= 5));
 }
 
@@ -72,7 +70,6 @@ bool GpuContext::initialize() {
 
     MIDDLEWARE_LOG_INFO("Initializing GPU context...");
 
-    // Check CUDA runtime version
     int runtimeVersion = 0;
     cudaError_t err = cudaRuntimeGetVersion(&runtimeVersion);
     if (err != cudaSuccess) {
@@ -82,10 +79,9 @@ bool GpuContext::initialize() {
         return false;
     }
 
-    MIDDLEWARE_LOG_INFO("CUDA runtime version: %d.%d", 
+    MIDDLEWARE_LOG_INFO("CUDA runtime version: %d.%d",
                        runtimeVersion / 1000, (runtimeVersion % 100) / 10);
 
-    // Detect available devices
     if (!detectDevices()) {
         MIDDLEWARE_LOG_WARNING("No CUDA devices detected - GPU acceleration disabled");
         available.store(false);
@@ -100,7 +96,6 @@ bool GpuContext::initialize() {
         return false;
     }
 
-    // Select best device (default to first available)
     if (!selectDevice(-1)) {
         MIDDLEWARE_LOG_ERROR("Failed to select CUDA device");
         available.store(false);
@@ -108,7 +103,6 @@ bool GpuContext::initialize() {
         return false;
     }
 
-    // Initialize device properties
     if (!initializeDeviceProperties()) {
         MIDDLEWARE_LOG_ERROR("Failed to initialize device properties");
         available.store(false);
@@ -116,7 +110,6 @@ bool GpuContext::initialize() {
         return false;
     }
 
-    // Check minimum requirements
     if (!meetsMinimumRequirements()) {
         MIDDLEWARE_LOG_WARNING("GPU does not meet minimum requirements (compute capability >= 3.5)");
         available.store(false);
@@ -129,10 +122,10 @@ bool GpuContext::initialize() {
 
     MIDDLEWARE_LOG_INFO("GPU context initialized successfully");
     MIDDLEWARE_LOG_INFO("  Device: %s", deviceInfo.deviceName.c_str());
-    MIDDLEWARE_LOG_INFO("  Compute Capability: %d.%d", 
-                       deviceInfo.computeCapabilityMajor, 
+    MIDDLEWARE_LOG_INFO("  Compute Capability: %d.%d",
+                       deviceInfo.computeCapabilityMajor,
                        deviceInfo.computeCapabilityMinor);
-    MIDDLEWARE_LOG_INFO("  Total Memory: %.2f GB", 
+    MIDDLEWARE_LOG_INFO("  Total Memory: %.2f GB",
                        static_cast<double>(deviceInfo.totalMemory) / (1024.0 * 1024.0 * 1024.0));
     MIDDLEWARE_LOG_INFO("  Multiprocessors: %d", deviceInfo.multiprocessorCount);
 
@@ -146,7 +139,6 @@ void GpuContext::shutdown() {
 
     MIDDLEWARE_LOG_INFO("Shutting down GPU context");
 
-    // Reset device
     cudaError_t err = cudaDeviceReset();
     if (err != cudaSuccess) {
         MIDDLEWARE_LOG_WARNING("CUDA device reset failed: %s", getErrorString(err).c_str());
@@ -163,7 +155,7 @@ void GpuContext::shutdown() {
 bool GpuContext::detectDevices() {
     int deviceCount = 0;
     cudaError_t err = cudaGetDeviceCount(&deviceCount);
-    
+
     if (err != cudaSuccess) {
         MIDDLEWARE_LOG_ERROR("Failed to get CUDA device count: %s", getErrorString(err).c_str());
         return false;
@@ -181,7 +173,7 @@ bool GpuContext::detectDevices() {
         cudaDeviceProp prop;
         err = cudaGetDeviceProperties(&prop, i);
         if (err != cudaSuccess) {
-            MIDDLEWARE_LOG_WARNING("Failed to get properties for device %d: %s", 
+            MIDDLEWARE_LOG_WARNING("Failed to get properties for device %d: %s",
                                  i, getErrorString(err).c_str());
             continue;
         }
@@ -195,7 +187,6 @@ bool GpuContext::detectDevices() {
         info.multiprocessorCount = prop.multiProcessorCount;
         info.isAvailable = true;
 
-        // Get free memory
         err = cudaMemGetInfo(&info.freeMemory, &info.totalMemory);
         if (err != cudaSuccess) {
             info.freeMemory = 0;
@@ -217,11 +208,9 @@ bool GpuContext::selectDevice(int deviceId) {
         return false;
     }
 
-    // If specific device requested, use it
     if (deviceId >= 0 && deviceId < static_cast<int>(availableDevices.size())) {
         deviceInfo = availableDevices[deviceId];
     } else {
-        // Select device with most memory (simple heuristic)
         size_t maxMemory = 0;
         for (const auto& device : availableDevices) {
             if (device.totalMemory > maxMemory) {
@@ -231,10 +220,9 @@ bool GpuContext::selectDevice(int deviceId) {
         }
     }
 
-    MIDDLEWARE_LOG_INFO("Selected GPU device %d: %s", 
+    MIDDLEWARE_LOG_INFO("Selected GPU device %d: %s",
                        deviceInfo.deviceId, deviceInfo.deviceName.c_str());
 
-    // Set device
     cudaError_t err = cudaSetDevice(deviceInfo.deviceId);
     if (err != cudaSuccess) {
         MIDDLEWARE_LOG_ERROR("Failed to set CUDA device %d: %s",
@@ -246,7 +234,6 @@ bool GpuContext::selectDevice(int deviceId) {
 }
 
 bool GpuContext::initializeDeviceProperties() {
-    // Device is already set, just verify it's working
     int device = 0;
     cudaError_t err = cudaGetDevice(&device);
     if (err != cudaSuccess) {
@@ -254,7 +241,6 @@ bool GpuContext::initializeDeviceProperties() {
         return false;
     }
 
-    // Verify device matches selected
     if (device != deviceInfo.deviceId) {
         MIDDLEWARE_LOG_WARNING("Device mismatch: expected %d, got %d",
                              deviceInfo.deviceId, device);

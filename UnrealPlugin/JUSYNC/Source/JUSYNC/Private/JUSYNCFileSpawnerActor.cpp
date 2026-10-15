@@ -10,17 +10,13 @@
 #include "HAL/PlatformMemory.h"
 #include "HAL/PlatformFileManager.h"
 #include "HAL/PlatformTime.h"
+#include "HAL/IConsoleManager.h"
 #include "Misc/Paths.h"
 #include "Misc/FileHelper.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonSerializer.h"
 #include "TimerManager.h"
 
-// Middleware C API used to fetch the cluster-side (ANARI-USD) benchmark files
-// live over the broker at benchmark finalize. With the middleware enabled the
-// declarations come from AnariUsdMiddleware_C.h (with the correct dllimport
-// linkage); re-declaring them there too causes C4273 inconsistent dll linkage.
-// The fallback block only provides them for no-middleware builds.
 #if !WITH_ANARI_USD_MIDDLEWARE
 extern "C"
 {
@@ -69,22 +65,23 @@ static bool JUSYNCRequestFileToString(const FString& Filename, int32 Rank, FStri
 #include "Materials/MaterialExpressionVertexColor.h"
 #include "Async/Async.h"
 #include "Tasks/Task.h"
+#include "JUSYNCElementNames.h"
+
+static TAutoConsoleVariable<int32> CVarJusyncCollapseVariants(
+    TEXT("jusync.Spawner.CollapseVariants"), 1,
+    TEXT("Collapse VTK/ParaView display-rebuild duplicates (\"<name>_u<k>\") onto one\n")
+    TEXT("logical element, keeping the newest variant. Off = spawn every streamed key\n")
+    TEXT("(the pre-fix behaviour: one time step renders as several out-of-phase copies)."),
+    ECVF_Default);
 
 static bool JUSYNCIsLiveUpdateGeometryFile(const FString& Filename)
 {
-    // JUSYNC RawGeo channel (JUSYNC_RAWGEO=1 on the sender): raw float3
-    // payloads stored under "clips/<name>__<time>.geo". The parser sniffs the
-    // JSG1 magic in the bytes, never the filename — extension acceptance here
-    // only routes the download.
     if (Filename.EndsWith(TEXT(".geo")))
     {
         return Filename.StartsWith(TEXT("clips/")) &&
                !Filename.Contains(TEXT("manifest"));
     }
 
-    // Per-prim geometry clips arrive as ASCII (.usda) OR binary crate (.usd/.usdc/.usdz)
-    // depending on the sender's usd::serialize.outputBinary. Accept any USD extension;
-    // the parser sniffs content (zstd magic, then PXR-USDC header), never the filename.
     const bool bAnyUsdExt =
         Filename.EndsWith(TEXT(".usda")) ||
         Filename.EndsWith(TEXT(".usd")) ||
@@ -94,7 +91,6 @@ static bool JUSYNCIsLiveUpdateGeometryFile(const FString& Filename)
     {
         return false;
     }
-    // Structural exclusions (session meta / shared stages), extension-agnostic.
     if (Filename.StartsWith(TEXT("Session_")) ||
         Filename.Contains(TEXT("manifest")) ||
         Filename.Contains(TEXT("images/")) ||
@@ -107,7 +103,6 @@ static bool JUSYNCIsLiveUpdateGeometryFile(const FString& Filename)
     {
         return false;
     }
-    // Scene-root stage (mirrors prior exact '.usda' behaviour for all extensions).
     for (const TCHAR* Ext : { TEXT(".usda"), TEXT(".usd"), TEXT(".usdc"), TEXT(".usdz") })
     {
         if (Filename == FString(TEXT("scene")) + Ext)
@@ -221,10 +216,6 @@ AJUSYNCFileSpawnerActor::AJUSYNCFileSpawnerActor()
     bMeshTextureReady = false;
     SpawnScale = FVector::OneVector;
     bUseUniformScaling = true;
-    // Default OFF: the ANARI DataSource (UAnariDataset) is the pipeline that owns the
-    // point-cloud display/scale/shape settings. When this actor also auto-starts you get two
-    // overlapping copies of the same data (the spawner's square cloud + the dataset's circle
-    // cloud). Set this back to true only if you are NOT using the ANARI DataSource.
     bAutoStart = false;
     bEnableLiveUpdates = true;
     LiveUpdatePollInterval = 20.0f;
@@ -233,6 +224,15 @@ AJUSYNCFileSpawnerActor::AJUSYNCFileSpawnerActor()
     CommitCompleteCooldownSeconds = 0.5f;
     bSceneDiffInFlight = false;
     bInitialSpawnDone = false;
+
+    bMorphEnabled = true;
+    MeshBlendMs = 0;      // auto = sample gap capped by MeshMaxBlendMs
+    MeshMaxBlendMs = 2000;
+    CloudSteps = 4;       // 0 = legacy instant swap
+    CloudBlendMs = 0;     // auto = sample gap capped by CloudMaxBlendMs
+    CloudMaxBlendMs = 2000;
+    bCloudFixedSize = true;
+    CloudScreenSizePct = 0.25f;
 
     bEnableBenchmarking = true;
     BenchmarkTestName = TEXT("JUSYNC_SpawnerSession");
@@ -283,6 +283,7 @@ AJUSYNCFileSpawnerActor::AJUSYNCFileSpawnerActor()
     DownloadWatchdogAcc = 0.0f;
     bIsCancelled = false;
     MaxSpawnsPerFrame = 3;
+    bCollapseElementVariants = true;
 
     bEnableMeshCache = true;
     MeshCacheMaxEntries = 64;
@@ -356,7 +357,6 @@ void AJUSYNCFileSpawnerActor::FinalizeBenchmarkSession()
     bBenchmarkWindowScheduled = false;
     GetWorldTimerManager().ClearTimer(BenchmarkFinalizeTimerHandle);
 
-    // Close the interactive window so whatever frames ran count as measured.
     UJUSYNCBlueprintLibrary::StopInteractiveWindow();
 
     const double Now = FPlatformTime::Seconds();
@@ -378,8 +378,6 @@ void AJUSYNCFileSpawnerActor::FinalizeBenchmarkSession()
         ? FPaths::Combine(FPaths::ProjectDir(), TEXT("Benchmark"))
         : BenchmarkOutputDirectory;
 
-    // Export the middleware client report first so we can fold its receive
-    // counters (payload bytes, chunks, files) into the recorded result below.
     if (bExportClientBenchmarkReport)
     {
         IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
@@ -408,13 +406,11 @@ void AJUSYNCFileSpawnerActor::FinalizeBenchmarkSession()
         GPUPercent,
         0, 0.0f, 0.0f); // hitches (never synthesised)
 
-    // Fold the cluster-side (ANARI-USD) benchmark telemetry into the result.
     if (bIncludeClusterBenchmark)
     {
         FetchClusterBenchmarkReport(Result);
     }
 
-    // Fold the middleware client-report counters into the result.
     ApplyClientReportCounters(OutDir, Result);
 
     UJUSYNCBlueprintLibrary::RecordBenchmarkResult(Result);
@@ -460,7 +456,6 @@ void AJUSYNCFileSpawnerActor::ApplyClientReportCounters(const FString& OutDir, F
     if (Total->TryGetNumberField(TEXT("files_requested"), Value)) { Result.FilesRequested = static_cast<int64>(Value); }
     if (Total->TryGetNumberField(TEXT("files_completed"), Value)) { Result.FilesCompleted = static_cast<int64>(Value); }
 
-    // Total receive time = connect start -> last byte of the transfer.
     const TSharedPtr<FJsonObject>* TimingPtr = nullptr;
     if (Root->TryGetObjectField(TEXT("timing_ms"), TimingPtr) && *TimingPtr)
     {
@@ -575,7 +570,6 @@ void AJUSYNCFileSpawnerActor::FetchClusterBenchmarkReport(FJUSYNCBenchmarkResult
     }
     WorkersArray += TEXT("]");
 
-    // Broker relay summary (rank 0), best-effort.
     FString BrokerJson = TEXT("null");
     {
         FString Body;
@@ -616,9 +610,40 @@ void AJUSYNCFileSpawnerActor::FetchClusterBenchmarkReport(FJUSYNCBenchmarkResult
         *BrokerJson);
 }
 
+void AJUSYNCFileSpawnerActor::ApplyMorphSettings()
+{
+    auto SetCVar = [](const TCHAR* Name, int32 Value)
+    {
+        if (IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(Name))
+        {
+            CVar->Set(Value);
+        }
+    };
+
+    SetCVar(TEXT("jusync.Morph.Enabled"), bMorphEnabled ? 1 : 0);
+    SetCVar(TEXT("jusync.Morph.MeshBlendMs"), MeshBlendMs);
+    SetCVar(TEXT("jusync.Morph.MeshMaxBlendMs"), MeshMaxBlendMs);
+    SetCVar(TEXT("jusync.Morph.CloudSteps"), CloudSteps);
+    SetCVar(TEXT("jusync.Morph.CloudBlendMs"), CloudBlendMs);
+    SetCVar(TEXT("jusync.Morph.CloudMaxBlendMs"), CloudMaxBlendMs);
+    SetCVar(TEXT("jusync.Morph.CloudFixedSize"), bCloudFixedSize ? 1 : 0);
+    SetCVar(TEXT("jusync.Spawner.CollapseVariants"), bCollapseElementVariants ? 1 : 0);
+    if (IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("jusync.Morph.CloudScreenSize")))
+    {
+        CVar->Set(CloudScreenSizePct);
+    }
+
+    if (IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("jusync.Spawner.IgnoreElements")))
+    {
+        CVar->Set(*FString::Join(IgnoredElementPatterns, TEXT(",")));
+    }
+}
+
 void AJUSYNCFileSpawnerActor::BeginPlay()
 {
     Super::BeginPlay();
+
+    ApplyMorphSettings();
 
     if (MeshCache)
     {
@@ -690,8 +715,6 @@ void AJUSYNCFileSpawnerActor::Tick(float DeltaSeconds)
         FlushHiddenMeshUpdates();
     }
 
-    // Initial-download watchdog: re-evaluate completion periodically so a missed
-    // async completion cannot strand the spawner in Downloading forever.
     if (CurrentState == EJUSYNCSpawnerState::Downloading && FilesTotal > 0)
     {
         DownloadWatchdogAcc += DeltaSeconds;
@@ -737,10 +760,8 @@ void AJUSYNCFileSpawnerActor::StartSpawning()
     bSceneDiffInFlight = false;
     PipelineActive = 0;
 
-    // Auto benchmark session (connect start is stamped right after, below)
     MaybeStartBenchmarkSession();
 
-    // TTF benchmark: wall-clock origin for this session (connect start)
     FJUSYNCBenchmarkTiming::Get().MarkConnectStart();
     if (ChangeTracker) ChangeTracker->Clear();
     AbortAllInFlightDownloads();
@@ -816,6 +837,8 @@ void AJUSYNCFileSpawnerActor::ClearSpawnedActors()
     GradientDeferredReplacementActors.Empty();
     GetWorldTimerManager().ClearTimer(GradientDeferredTimerHandle);
     if (AnimationController) AnimationController->Clear();
+    ElementVariantWinners.Empty();
+    IgnoredVariantFiles.Empty();
 }
 
 FVector AJUSYNCFileSpawnerActor::GetNextSpawnLocation() const
@@ -961,7 +984,6 @@ void AJUSYNCFileSpawnerActor::FilterFileList(const TArray<FString>& InFiles, con
         if (bFilterUSDOnly)
         {
             FString Ext = FPaths::GetExtension(Fname).ToLower();
-            // ".geo" = JUSYNC RawGeo binary point payload (JUSYNC_RAWGEO sender mode)
             if (Ext != TEXT("usd") && Ext != TEXT("usda") && Ext != TEXT("usdc") &&
                 Ext != TEXT("usdz") && Ext != TEXT("geo"))
                 continue;
@@ -985,19 +1007,10 @@ void AJUSYNCFileSpawnerActor::OnFileListReceived_Internal(const TArray<FString>&
 {
     if (bIsCancelled) return;
 
-    // Allow a later broker notification to re-trigger the initial fetch if this
-    // one did not lead to a spawn (e.g. request/response timed out before the
-    // sender's first commit finished).
     if (!bInitialSpawnDone) bInitialKickInFlight = false;
 
     if (!bSuccess || FileList.Num() == 0)
     {
-        // The broker may be online but not yet have committed any scene files
-        // (ParaView's ANARI-usd device binds :5556 when the device is created, but
-        // the first file + commit only land on the first ANARI render). Retry a few
-        // times before declaring a hard error so UE-vs-sender boot order does not
-        // matter. Nothing has spawned yet, so re-requesting is just the normal
-        // initial path again.
         constexpr int32 MaxInitialFileListRetries = 15;
         if (InitialFileListRetryCount < MaxInitialFileListRetries)
         {
@@ -1039,6 +1052,8 @@ void AJUSYNCFileSpawnerActor::OnFileListReceived_Internal(const TArray<FString>&
     TArray<uint64> LocalHashHi;
     FilterFileList(FileList, FileSizes, FileRanks, HashLo, HashHi,
         LocalFiles, LocalSizes, LocalRanks, LocalHashLo, LocalHashHi, PngFiles, PngSizes, PngRanks);
+
+    CollapseElementVariants(LocalFiles, LocalSizes, LocalRanks, LocalHashLo, LocalHashHi);
 
     for (int32 i = 0; i < PngFiles.Num(); ++i)
     {
@@ -1283,10 +1298,6 @@ void AJUSYNCFileSpawnerActor::LoadFileThroughPipeline(const FString& Filename, i
     const int32 DynamicTimeout = CalculateDynamicTimeout(Size);
     const uint64 ExpectedSize = static_cast<uint64>(FMath::Max<int64>(0, Size));
 
-    // P2 latest-wins: give live-update downloads a middleware abort token so a
-    // superseding notification can cancel the transfer mid-stream instead of
-    // completing a GB-scale stale download + wasted parse. Registered here on
-    // the game thread; released in the game-thread completion below.
     uint64 AbortHandle = 0;
 #if WITH_ANARI_USD_MIDDLEWARE
     if (!bIsInitial && ChangeTracker && ExpectedSize > 0)
@@ -1321,7 +1332,6 @@ void AJUSYNCFileSpawnerActor::LoadFileThroughPipeline(const FString& Filename, i
                 AJUSYNCFileSpawnerActor* Self = WeakThis.Get();
                 Self->PipelineActive = FMath::Max(0, Self->PipelineActive - 1);
 
-                // The transfer is over: retire the abort token.
                 if (AbortHandle != 0)
                 {
                     uint64* Current = Self->ActiveDownloadAborts.Find(Filename);
@@ -1356,11 +1366,6 @@ void AJUSYNCFileSpawnerActor::LoadFileThroughPipeline(const FString& Filename, i
                     return;
                 }
 
-                // P2 latest-wins: if a newer notification superseded this
-                // file while bytes were in flight (e.g. the transfer
-                // completed before the abort could fire), do not pay for a
-                // stale parse - MarkFailed re-queues the fresh content and
-                // ChainRefreshNext starts it immediately.
                 if (!bIsInitial && Self->ChangeTracker)
                 {
                     const FJUSYNCFileChangeRequest* Req = Self->ChangeTracker->Find(Filename);
@@ -1457,9 +1462,6 @@ void AJUSYNCFileSpawnerActor::ApplyParsedFileData(FJUSYNCParsedFileResult&& Resu
     const FString Filename = Result.Filename;
     const bool bIsInitial = !bInitialSpawnDone;
 
-    // Benchmark scene-size accounting: count the geometry/point-cloud content
-    // this file contributes during the initial (cold-start) spawn only, so the
-    // recorded result carries the real scene size instead of 0.
     if (bIsInitial && bEnableBenchmarking)
     {
         if (Result.bHasCompactPointClouds)
@@ -1574,7 +1576,7 @@ void AJUSYNCFileSpawnerActor::ApplyParsedFileData(FJUSYNCParsedFileResult&& Resu
                 {
                     Stream = Result.PrebuiltStreams[i].Get();
                 }
-                AActor* Actor = SpawnOrUpdateMesh(Result.CompactMeshes[i], Filename, bIsRefresh, ReplacementActors, Stream, &OldMeshActors);
+                AActor* Actor = SpawnOrUpdateMesh(Result.CompactMeshes[i], Filename, bIsRefresh, ReplacementActors, Stream, &OldMeshActors, false, Result.Rank);
                 if (Actor)
                 {
                     SpawnCount++;
@@ -1587,6 +1589,7 @@ void AJUSYNCFileSpawnerActor::ApplyParsedFileData(FJUSYNCParsedFileResult&& Resu
                 Entry.Meshes = MoveTemp(RemainingMeshes);
                 Entry.PrebuiltStreams = MoveTemp(RemainingStreams);
                 Entry.Filename = Filename;
+                Entry.Rank = Result.Rank;
                 Entry.OldActors = MoveTemp(OldMeshActors);
                 Entry.ReplacementActors = MoveTemp(ReplacementActors);
                 Entry.ExpectedNewMeshes = ValidMeshCount;
@@ -1632,7 +1635,13 @@ void AJUSYNCFileSpawnerActor::ApplyParsedFileData(FJUSYNCParsedFileResult&& Resu
                         {
                             continue;
                         }
-                        const FString PCKey = FString::Printf(TEXT("%s_r%d"), *PC->ElementName, Result.Rank);
+                        if (Spawner->IsElementFiltered(PC->ElementName))
+                        {
+                            UE_LOG(LogTemp, Log, TEXT("[Spawner] SKIPPED filtered PC '%s' (%d points) from '%s'"),
+                                *PC->ElementName, PC->PointCount, *Filename);
+                            continue;
+                        }
+                        const FString PCKey = JUSYNCElementNames::MakeRankedElementKey(PC->ElementName, Result.Rank);
                         NewPCKeys.Add(PCKey);
                         PCElementToFilename.Add(PCKey, Filename);
                         PendingAsyncPCS++;
@@ -1791,17 +1800,12 @@ void AJUSYNCFileSpawnerActor::FlushHiddenMeshUpdates()
         if (Actor && Actor->IsValidLowLevel())
         {
             TArray<AActor*> ReplacementActors;
-            SpawnOrUpdateMesh(Pending.Mesh, Pending.Filename, true, ReplacementActors);
+            SpawnOrUpdateMesh(Pending.Mesh, Pending.Filename, true, ReplacementActors, nullptr, nullptr, false, Pending.Rank);
             Processed++;
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Phase 0 streaming diagnostics: mark host-side stages into the middleware's
-// per-file stage journal (StreamDiagnostics.h / `jusync.diag` console command).
-// Middleware stages (notify, dl, parse, fill) are recorded automatically.
-// ---------------------------------------------------------------------------
 static FORCEINLINE void JUSYNC_DIAG_MARK(const FString& File, int32 Stage, uint64 Bytes = 0)
 {
 #if WITH_ANARI_USD_MIDDLEWARE
@@ -1814,7 +1818,7 @@ static FORCEINLINE void JUSYNC_DIAG_MARK(const FString& File, int32 Stage, uint6
 #endif
 }
 
-AActor* AJUSYNCFileSpawnerActor::SpawnOrUpdateMesh(FJUSYNCCompactMeshRef& Mesh, const FString& Filename, bool bIsRefresh, TArray<AActor*>& ReplacementActors, RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams, const TArray<AActor*>* OldMeshActors, bool bForceGradientSpawn)
+AActor* AJUSYNCFileSpawnerActor::SpawnOrUpdateMesh(FJUSYNCCompactMeshRef& Mesh, const FString& Filename, bool bIsRefresh, TArray<AActor*>& ReplacementActors, RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams, const TArray<AActor*>* OldMeshActors, bool bForceGradientSpawn, int32 Rank)
 {
     if (!Mesh || !Mesh->IsValid())
     {
@@ -1837,6 +1841,7 @@ AActor* AJUSYNCFileSpawnerActor::SpawnOrUpdateMesh(FJUSYNCCompactMeshRef& Mesh, 
         FRecolorMeshEntry Pending;
         Pending.Mesh = MoveTemp(Mesh);
         Pending.Filename = Filename;
+        Pending.Rank = Rank;
         Pending.Loc = Existing->GetActorLocation();
         Pending.Rot = Existing->GetActorRotation();
         Pending.Scale = Existing->GetActorScale3D();
@@ -1875,6 +1880,7 @@ AActor* AJUSYNCFileSpawnerActor::SpawnOrUpdateMesh(FJUSYNCCompactMeshRef& Mesh, 
         FJUSYNCGradientDeferredMeshEntry Deferred;
         Deferred.Mesh = Mesh;
         Deferred.Filename = Filename;
+        Deferred.Rank = Rank;
         Deferred.bIsRefresh = bIsRefresh;
         Deferred.OldActors = OldMeshActors ? *OldMeshActors : TArray<AActor*>();
         Deferred.ExpectedNewMeshes = 1;
@@ -1939,7 +1945,6 @@ AActor* AJUSYNCFileSpawnerActor::SpawnOrUpdateMesh(FJUSYNCCompactMeshRef& Mesh, 
         ActorsSpawned++;
         FileToActorMap.Add(Key, Actor);
 
-        // TTF benchmark: first spawned actor (timestamp stamped on the next rendered frame)
         FJUSYNCBenchmarkTiming::Get().MarkFirstActorSpawned();
         FilenameToActors.FindOrAdd(Filename).Add(Actor);
         Actor->SetActorEnableCollision(false);
@@ -1961,7 +1966,12 @@ AActor* AJUSYNCFileSpawnerActor::SpawnOrUpdateMesh(FJUSYNCCompactMeshRef& Mesh, 
 
         if (bEnableTimeStepAnimation && AnimationController)
         {
-            AnimationController->AddActor(Filename, Actor);
+            // The prim name is identical on every rank for a partitioned element,
+            // so an election keyed on it alone lets one rank's piece depose every
+            // other rank's for the same step. Key on (element, rank) instead: the
+            // pieces of one instant must all stay visible together.
+            const FString AnimKey = JUSYNCElementNames::MakeRankedElementKey(Mesh->ElementName, Rank);
+            AnimationController->AddActor(Filename, Actor, AnimKey);
         }
     }
 
@@ -2166,13 +2176,6 @@ void AJUSYNCFileSpawnerActor::DownloadGradientPng(UJUSYNCSubsystem* Subsystem)
                 {
                     const int64 W = Img->GetWidth();
                     const int64 H = Img->GetHeight();
-                    // Build the LUT from the TOP SCANLINE. Gradient strips are
-                    // 1xN/2xN; the ANARI tutorial samplers ship NxN textures
-                    // whose rows are near-identical horizontal ramps, so row 0
-                    // is a valid LUT there too. (Previously any H>2 texture was
-                    // skipped entirely, so gradient-colored point clouds stalled
-                    // forever in the no-color queue and the initial spawn never
-                    // completed.)
                     if (W > 0 && H > 0 && RawData.Num() >= W * 4)
                     {
                         LUT.Reserve(FMath::Min(W, 256));
@@ -2830,11 +2833,6 @@ void AJUSYNCFileSpawnerActor::CheckAllDownloadsComplete()
     UE_LOG(LogTemp, Display, TEXT("[COMPLETION] ENTRY: FilesDownloaded=%d, FilesTotal=%d, PipelineActive=%d, PendingParseTasks=%d, PendingAsyncPCS=%d, Deferred=%d, bInitialSpawnDone=%d"),
         FilesDownloaded, FilesTotal, PipelineActive, PendingParseTasks, PendingAsyncPCS, DeferredSpawns.Num(), bInitialSpawnDone ? 1 : 0);
 
-    // Done when every file has been DISPATCHED and the pipeline has DRAINED -
-    // not merely when FilesDownloaded == FilesTotal. Several early-return paths
-    // decrement PipelineActive without incrementing FilesDownloaded, so that
-    // counter can stall below FilesTotal forever and strand the spawner in
-    // Downloading (which blocks every live update).
     const bool bAllDispatched = (PipelineNextIndex >= FilteredFiles.Num());
     const bool bPipelineIdle =
         PipelineActive <= 0 && PendingParseTasks <= 0 && PendingAsyncSpawns <= 0 &&
@@ -2918,10 +2916,8 @@ void AJUSYNCFileSpawnerActor::CheckAllDownloadsComplete()
 
         bInitialSpawnDone = true;
 
-        // TTF benchmark: initial spawn fully complete
         FJUSYNCBenchmarkTiming::Get().MarkFullScene();
 
-        // Auto benchmark: open the interactive window once the scene is up
         if (bSuccess)
         {
             ScheduleBenchmarkInteractiveWindow();
@@ -3011,7 +3007,7 @@ void AJUSYNCFileSpawnerActor::OnPointCloudSpawnedHandler(const FString& EleName,
         }
         if (bEnableTimeStepAnimation && AnimationController && !FileName.IsEmpty())
         {
-            AnimationController->AddActor(FileName, Spawned);
+            AnimationController->AddActor(FileName, Spawned, EleName);
         }
         JUSYNC_DIAG_MARK(FileName, JUSYNC_DIAG_SPAWNED);
         PendingAsyncPCS = FMath::Max(0, PendingAsyncPCS - 1);
@@ -3040,8 +3036,6 @@ void AJUSYNCFileSpawnerActor::OnPointCloudSpawnedHandler(const FString& EleName,
         ActorsSpawned++;
         Spawned->SetActorEnableCollision(false);
 
-        // TTF benchmark: first spawned point-cloud actor (timestamp stamped
-        // on the next rendered frame in FJUSYNCBenchmarkTiming::TickFrame)
         FJUSYNCBenchmarkTiming::Get().MarkFirstActorSpawned();
 #if WITH_EDITORONLY_DATA
         if (!EleName.IsEmpty())
@@ -3075,7 +3069,7 @@ void AJUSYNCFileSpawnerActor::OnPointCloudSpawnedHandler(const FString& EleName,
 
         if (bEnableTimeStepAnimation && AnimationController && !FileName.IsEmpty())
         {
-            AnimationController->AddActor(FileName, Spawned);
+            AnimationController->AddActor(FileName, Spawned, EleName);
         }
 
         OnFileComplete.Broadcast(EleName, Spawned);
@@ -3140,7 +3134,7 @@ void AJUSYNCFileSpawnerActor::ProcessDeferredSpawns()
             {
                 Stream = Entry.PrebuiltStreams[i].Get();
             }
-            AActor* Actor = SpawnOrUpdateMesh(Entry.Meshes[i], Entry.Filename, true, Entry.ReplacementActors, Stream, &Entry.OldActors);
+            AActor* Actor = SpawnOrUpdateMesh(Entry.Meshes[i], Entry.Filename, true, Entry.ReplacementActors, Stream, &Entry.OldActors, false, Entry.Rank);
             if (Actor)
             {
                 SpawnCount++;
@@ -3233,7 +3227,7 @@ void AJUSYNCFileSpawnerActor::ProcessGradientDeferredMeshes(bool bForce)
 
         TArray<AActor*> ReplacementActors;
         RealtimeMesh::FRealtimeMeshStreamSet* Stream = Entry.PrebuiltStream ? Entry.PrebuiltStream.Get() : nullptr;
-        AActor* Actor = SpawnOrUpdateMesh(Entry.Mesh, Entry.Filename, true, ReplacementActors, Stream, &Entry.OldActors, bShouldForceSpawn);
+        AActor* Actor = SpawnOrUpdateMesh(Entry.Mesh, Entry.Filename, true, ReplacementActors, Stream, &Entry.OldActors, bShouldForceSpawn, Entry.Rank);
 
         if (Actor)
         {
@@ -3299,13 +3293,6 @@ void AJUSYNCFileSpawnerActor::OnBrokerNotification(const FJUSYNCNotification& No
     UE_LOG(LogTemp, Display, TEXT("[V2HANDLER] Received %s for '%s' | state=%d enabled=%d initialDone=%d"),
            ANSI_TO_TCHAR(TypeStr), *Notification.Filename, (int32)CurrentState, bEnableLiveUpdates ? 1 : 0, bInitialSpawnDone ? 1 : 0);
 
-    // Initial-spawn wake-up: while we are still waiting for the very first scene
-    // (Connecting / FetchingList / Error from an empty-list latch), a pushed
-    // notification from the broker IS the "data is ready" signal. The usd broker
-    // only serves request/response traffic once its first commit lands, but it
-    // pushes notifications from that same moment — so fetch now, event-driven,
-    // instead of burning a poll cycle. Independent of the live-updates toggle:
-    // this is bootstrapping, not a live update.
     if (!bInitialSpawnDone &&
         (CurrentState == EJUSYNCSpawnerState::Error ||
          CurrentState == EJUSYNCSpawnerState::FetchingList ||
@@ -3339,10 +3326,6 @@ void AJUSYNCFileSpawnerActor::OnBrokerNotification(const FJUSYNCNotification& No
     {
         UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] File update notification: '%s' (rank %d, size=%lld)"),
                *Notification.Filename, Notification.SourceRank, (long long)Notification.FileSize);
-        // Honor the same MinimumFileSizeBytes threshold as the initial load path
-        // (FilterFileList). The old hard-coded 2048-byte cutoff silently dropped
-        // legitimately small clip files (e.g. 1.3-1.4 KB tutorial clips), killing
-        // live updates entirely for them.
         if (MinimumFileSizeBytes <= 0 || Notification.FileSize >= MinimumFileSizeBytes)
         {
             HandleFileUpdateNotification(Notification.Filename, Notification.SourceRank, Notification.FileSize, 0, 0);
@@ -3356,7 +3339,6 @@ void AJUSYNCFileSpawnerActor::OnBrokerNotification(const FJUSYNCNotification& No
                *Notification.Filename, Notification.SourceRank, bHashChanged ? 1 : 0);
         if (bHashChanged)
         {
-            // Same threshold as the initial load path (see above).
             if (MinimumFileSizeBytes > 0 && Notification.FileSize < MinimumFileSizeBytes)
             {
                 UE_LOG(LogTemp, Verbose, TEXT("[LiveUpdate] Skipping tiny file in V2 notification: '%s' (%lld bytes)"),
@@ -3404,6 +3386,12 @@ void AJUSYNCFileSpawnerActor::HandleFileUpdateNotification(const FString& Filena
         return;
     }
 
+    if (IsSuppressedElementVariant(Filename))
+    {
+        UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Skipping variant duplicate of a live element: '%s'"), *Filename);
+        return;
+    }
+
     if ((HashLo != 0 || HashHi != 0) &&
         OldHashLo == HashLo &&
         OldHashHi == HashHi)
@@ -3412,6 +3400,12 @@ void AJUSYNCFileSpawnerActor::HandleFileUpdateNotification(const FString& Filena
         return;
     }
 
+    // Resolve the owner before anything is queued: a coalesced or superseded
+    // update is later fetched with whatever rank it was queued under, so an
+    // unresolved -1 here would reach the wrong worker.
+    const int32 TargetRank = ResolveFileRank(Filename, SourceRank);
+    SeenV2Files.Add(Filename, TargetRank);
+
     JUSYNC_DIAG_MARK(Filename, JUSYNC_DIAG_QUEUE, static_cast<uint64>(FileSize));
 
     if (ChangeTracker && ChangeTracker->Contains(Filename))
@@ -3419,7 +3413,7 @@ void AJUSYNCFileSpawnerActor::HandleFileUpdateNotification(const FString& Filena
         const FJUSYNCFileChangeRequest* ReqBefore = ChangeTracker->Find(Filename);
         const bool bWasQueued = ReqBefore && ReqBefore->State == EJUSYNCFileChangeState::Queued;
 
-        ChangeTracker->QueueChange(Filename, SourceRank, FileSize, HashLo, HashHi);
+        ChangeTracker->QueueChange(Filename, TargetRank, FileSize, HashLo, HashHi);
 
         if (bWasQueued)
         {
@@ -3429,9 +3423,6 @@ void AJUSYNCFileSpawnerActor::HandleFileUpdateNotification(const FString& Filena
         {
             UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Superseded in-flight update for '%s'"), *Filename);
 #if WITH_ANARI_USD_MIDDLEWARE
-            // P2 latest-wins: cancel the stale transfer mid-stream so the
-            // fresh download starts right away instead of queueing behind a
-            // full GB-scale tail that would be discarded after parsing.
             if (const uint64* AbortHandle = ActiveDownloadAborts.Find(Filename))
             {
                 if (JusyncAbortTrigger_C(*AbortHandle))
@@ -3441,48 +3432,11 @@ void AJUSYNCFileSpawnerActor::HandleFileUpdateNotification(const FString& Filena
             }
 #endif
         }
-        // A coalesced/superseded change still needs the download chain kicked:
-        // if the previous chain already finished, nothing else would ever pop
-        // this entry, so the update would sit queued forever.
         ChainRefreshNext();
         return;
     }
 
-    UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Refreshing file: '%s' from rank %d"), *Filename, SourceRank);
-
-    SeenV2Files.Add(Filename, SourceRank);
-
-    int32 TargetRank = SourceRank;
-    if (TargetRank < 0)
-    {
-        for (int32 i = 0; i < FilteredFiles.Num(); ++i)
-        {
-            if (FilteredFiles[i] == Filename)
-            {
-                TargetRank = FilteredRanks.IsValidIndex(i) ? FilteredRanks[i] : 0;
-                break;
-            }
-        }
-        if (TargetRank < 0)
-        {
-            for (int32 i = 0; i < RawFileRanks.Num(); ++i)
-            {
-                if (RawFileList.IsValidIndex(i) && RawFileList[i] == Filename)
-                {
-                    TargetRank = RawFileRanks[i];
-                    break;
-                }
-            }
-        }
-        if (TargetRank < 0)
-        {
-            int32* pRank = SeenV2Files.Find(Filename);
-            if (pRank)
-            {
-                TargetRank = *pRank;
-            }
-        }
-    }
+    UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Refreshing file: '%s' from rank %d"), *Filename, TargetRank);
 
     if (QueueRefreshFile(Filename, TargetRank, FileSize, HashLo, HashHi))
     {
@@ -3607,6 +3561,9 @@ void AJUSYNCFileSpawnerActor::DiffAndRefreshFileList(const TArray<FString>& NewF
         NewFilteredFiles, NewFilteredSizes, NewFilteredRanks, NewFilteredHashLo, NewFilteredHashHi,
         NewPngFiles, NewPngSizes, NewPngRanks);
 
+    CollapseElementVariants(NewFilteredFiles, NewFilteredSizes, NewFilteredRanks,
+        NewFilteredHashLo, NewFilteredHashHi);
+
     int32 ChangedCount = 0;
     int32 NewCount = 0;
 
@@ -3618,9 +3575,6 @@ void AJUSYNCFileSpawnerActor::DiffAndRefreshFileList(const TArray<FString>& NewF
         const uint64 NewHLo = NewFilteredHashLo[i];
         const uint64 NewHHi = NewFilteredHashHi[i];
 
-        // Same threshold as the initial load path (FilterFileList) — these files
-        // already passed it once; keep the guard consistent instead of the old
-        // hard-coded 2048 bytes that could veto the configured value.
         if (MinimumFileSizeBytes > 0 && NewSize < MinimumFileSizeBytes)
         {
             UE_LOG(LogTemp, Verbose, TEXT("[LiveUpdate] Skipping tiny file '%s' (%lld bytes)"), *Fname, (long long)NewSize);
@@ -3678,6 +3632,15 @@ void AJUSYNCFileSpawnerActor::DiffAndRefreshFileList(const TArray<FString>& NewF
             DeletedCount += Destroyed;
             UE_LOG(LogTemp, Warning, TEXT("[LiveUpdate] Destroyed %d orphan actor(s) for deleted file '%s'"), Destroyed, *OldName);
         }
+
+        // Forget the file completely. Keeping its hash makes a later republish of
+        // the same key (a rank re-partition, a clip cycling back) hit the dedup
+        // check and skip the refresh, so the actors that were just destroyed are
+        // never replaced; keeping its owner rank likewise serves stale routing.
+        FileHashLo.Remove(OldName);
+        FileHashHi.Remove(OldName);
+        FileLastSize.Remove(OldName);
+        SeenV2Files.Remove(OldName);
     }
     if (DeletedCount > 0)
     {
@@ -3869,6 +3832,39 @@ bool AJUSYNCFileSpawnerActor::QueueRefreshFile(const FString& Filename, int32 Ra
     return true;
 }
 
+int32 AJUSYNCFileSpawnerActor::ResolveFileRank(const FString& Filename, int32 KnownRank) const
+{
+    if (KnownRank >= 0)
+    {
+        return KnownRank;
+    }
+
+    for (int32 i = 0; i < FilteredFiles.Num(); ++i)
+    {
+        if (FilteredFiles[i] == Filename && FilteredRanks.IsValidIndex(i) && FilteredRanks[i] >= 0)
+        {
+            return FilteredRanks[i];
+        }
+    }
+    for (int32 i = 0; i < RawFileList.Num(); ++i)
+    {
+        if (RawFileList[i] == Filename && RawFileRanks.IsValidIndex(i) && RawFileRanks[i] >= 0)
+        {
+            return RawFileRanks[i];
+        }
+    }
+    if (const int32* pRank = SeenV2Files.Find(Filename))
+    {
+        if (*pRank >= 0)
+        {
+            return *pRank;
+        }
+    }
+
+    UE_LOG(LogTemp, Warning, TEXT("[LiveUpdate] No owner rank known for '%s'; fetching from rank 0 (a multi-rank piece will fail over until the next file-list poll)"), *Filename);
+    return 0;
+}
+
 void AJUSYNCFileSpawnerActor::UpdateTrackedFileMetadata(const FString& Filename, int32 Rank, int64 Size, uint64 HashLo, uint64 HashHi)
 {
     if (Filename.IsEmpty())
@@ -3921,6 +3917,169 @@ void AJUSYNCFileSpawnerActor::UpdateTrackedFileMetadata(const FString& Filename,
         }
         break;
     }
+}
+
+int32 AJUSYNCFileSpawnerActor::CollapseElementVariants(
+    TArray<FString>& Files, TArray<int64>& Sizes, TArray<int32>& Ranks,
+    TArray<uint64>& HashLo, TArray<uint64>& HashHi)
+{
+    if (CVarJusyncCollapseVariants.GetValueOnGameThread() == 0)
+    {
+        ElementVariantWinners.Reset();
+        IgnoredVariantFiles.Reset();
+        return 0;
+    }
+
+    struct FElection
+    {
+        int32 Uniq = -1;
+        int32 Index = INDEX_NONE;
+    };
+
+    TMap<FString, FElection> Best;
+    TMap<FString, TArray<int32>> Members;
+    Best.Reserve(Files.Num());
+    Members.Reserve(Files.Num());
+
+    for (int32 i = 0; i < Files.Num(); ++i)
+    {
+        const JUSYNCElementNames::FVariant Variant = JUSYNCElementNames::Parse(Files[i]);
+        if (Variant.Element.IsEmpty())
+        {
+            continue;
+        }
+        const FString Group = Variant.GroupKey();
+        Members.FindOrAdd(Group).Add(i);
+
+        const FElection* Cur = Best.Find(Group);
+        if (!Cur || Variant.Uniq > Cur->Uniq)
+        {
+            Best.Add(Group, { Variant.Uniq, i });
+        }
+    }
+
+    TMap<FString, TPair<int32, FString>> NewWinners;
+    TSet<FString> Losers;
+    for (const TPair<FString, FElection>& Pair : Best)
+    {
+        if (Pair.Value.Uniq < 0)
+        {
+            continue;
+        }
+
+        const FString& WinnerFile = Files[Pair.Value.Index];
+        NewWinners.Add(Pair.Key, TPair<int32, FString>(Pair.Value.Uniq, WinnerFile));
+
+        for (const int32 Idx : Members[Pair.Key])
+        {
+            if (Idx != Pair.Value.Index)
+            {
+                Losers.Add(Files[Idx]);
+            }
+        }
+    }
+
+    // Only a group the election actually evaluated can depose a winner. A group
+    // it skipped (no uniquifier, so "variant collapse: off" for that element)
+    // must keep its actors: destroying them here is what made the live cloud
+    // get torn down on every file-list refresh.
+    for (const TPair<FString, TPair<int32, FString>>& Prev : ElementVariantWinners)
+    {
+        const TPair<int32, FString>* Now = NewWinners.Find(Prev.Key);
+        if (!Now || Now->Value == Prev.Value.Value)
+        {
+            continue;
+        }
+        const int32 Destroyed = DestroyFileActors(Prev.Value.Value);
+        if (Destroyed > 0)
+        {
+            UE_LOG(LogTemp, Display,
+                TEXT("[LiveUpdate] Variant collapse: destroyed %d actor(s) of superseded file '%s'"),
+                Destroyed, *Prev.Value.Value);
+        }
+    }
+
+    ElementVariantWinners = MoveTemp(NewWinners);
+    IgnoredVariantFiles = Losers;
+
+    if (Losers.Num() == 0)
+    {
+        return 0;
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("[LiveUpdate] Variant collapse: suppressing %d duplicate file(s): %s"),
+        Losers.Num(), *FString::Join(Losers.Array(), TEXT(", ")));
+
+    int32 Pruned = 0;
+    for (int32 i = Files.Num() - 1; i >= 0; --i)
+    {
+        if (!Losers.Contains(Files[i]))
+        {
+            continue;
+        }
+        Files.RemoveAtSwap(i);
+        Sizes.RemoveAtSwap(i);
+        Ranks.RemoveAtSwap(i);
+        HashLo.RemoveAtSwap(i);
+        HashHi.RemoveAtSwap(i);
+        Pruned++;
+    }
+    return Pruned;
+}
+
+bool AJUSYNCFileSpawnerActor::IsSuppressedElementVariant(const FString& Filename)
+{
+    if (CVarJusyncCollapseVariants.GetValueOnGameThread() == 0 || Filename.IsEmpty())
+    {
+        return false;
+    }
+
+    const JUSYNCElementNames::FVariant Variant = JUSYNCElementNames::Parse(Filename);
+    if (Variant.Element.IsEmpty())
+    {
+        return false;
+    }
+
+    if (IgnoredVariantFiles.Contains(Filename))
+    {
+        return true;
+    }
+
+    const FString Group = Variant.GroupKey();
+    TPair<int32, FString>* Current = ElementVariantWinners.Find(Group);
+    if (!Current)
+    {
+        ElementVariantWinners.Add(Group, TPair<int32, FString>(Variant.Uniq, Filename));
+        return false;
+    }
+    if (Current->Value == Filename)
+    {
+        return false;
+    }
+    if (Variant.Uniq < 0 && Current->Key < 0)
+    {
+        return false;
+    }
+
+    if (Variant.Uniq > Current->Key)
+    {
+        const FString Evicted = Current->Value;
+        Current->Key = Variant.Uniq;
+        Current->Value = Filename;
+        IgnoredVariantFiles.Add(Evicted);
+
+        const int32 Destroyed = DestroyFileActors(Evicted);
+        UE_LOG(LogTemp, Display, TEXT("[LiveUpdate] Variant collapse: '%s' supersedes '%s' (%d actor(s) removed)"),
+            *Filename, *Evicted, Destroyed);
+        return false;
+    }
+
+    if (IgnoredVariantFiles.Num() > 4096)
+    {
+        IgnoredVariantFiles.Reset();
+    }
+    IgnoredVariantFiles.Add(Filename);
+    return true;
 }
 
 int32 AJUSYNCFileSpawnerActor::DestroyFileActors(const FString& Filename)
@@ -4040,10 +4199,6 @@ void AJUSYNCFileSpawnerActor::ChainRefreshNext()
     if (!ChangeTracker) return;
     if (ChangeTracker->QueuedCount() == 0) return;
 
-    // Self-heal a stale pipeline counter: if the tracker reports no in-flight
-    // change but PipelineActive is non-zero, a completion was missed (e.g. the
-    // mesh-cache hit path returns without decrementing) and this gate would
-    // block every future live update forever.
     if (PipelineActive > 0 && ChangeTracker->ActiveCount() == 0)
     {
         UE_LOG(LogTemp, Warning, TEXT("[LiveUpdate] PipelineActive=%d stale (no active change) - resetting"), PipelineActive);
