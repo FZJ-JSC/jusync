@@ -119,7 +119,9 @@ bool JUSYNCBuildRealtimeMeshStreams(const FJUSYNCCompactMeshData& MeshData, Real
         return false;
     }
 
-    auto Builder = RealtimeMesh::TRealtimeMeshBuilderLocal<uint32>(OutStreams);
+    // Same UV layout as the morph (PrevPositions) variant: 3 float UV sets, UV1/UV2 zeroed
+    // so the morph material's WPO delta reads exactly 0 when not blending.
+    auto Builder = RealtimeMesh::TRealtimeMeshBuilderLocal<uint32, FPackedNormal, FVector2f, 3>(OutStreams);
     Builder.EnableTangents();
     Builder.EnableTexCoords();
     Builder.EnableColors();
@@ -187,12 +189,14 @@ bool JUSYNCBuildRealtimeMeshStreams(const FJUSYNCCompactMeshData& MeshData, Real
 
         if (bHasUVs && MeshData.UVs.IsValidIndex(i))
         {
-            Builder.SetTexCoord(i, 0, FVector2DHalf(MeshData.UVs[i]));
+            Builder.SetTexCoord(i, 0, FVector2f(MeshData.UVs[i]));
         }
         else
         {
-            Builder.SetTexCoord(i, 0, FVector2DHalf(FVector2f::ZeroVector));
+            Builder.SetTexCoord(i, 0, FVector2f::ZeroVector);
         }
+        Builder.SetTexCoord(i, 1, FVector2f::ZeroVector);
+        Builder.SetTexCoord(i, 2, FVector2f::ZeroVector);
 
         if (bHasVertexColors && MeshData.VertexColors.IsValidIndex(i))
         {
@@ -306,9 +310,14 @@ bool JUSYNCBuildRealtimeMeshStreams(const FJUSYNCCompactMeshData& MeshData, Real
             ? FVector2f(MeshData.UVs[i])
             : FVector2f::ZeroVector);
 
+        // Delta (prev - current) in component space, split across UV1/UV2: the morph
+        // material's WPO branch reads UV1 as (dX,dY) and UV2 as (dZ,~) and offsets the
+        // vertex by (dX,dY,dZ) * (1 - JusyncMorphT) * JusyncMorphActive. Deltas are small
+        // (inter-sample drift), which also keeps float32 UV precision comfortable.
         const FVector3f PrevPos = Prev.IsValidIndex(i) ? Prev[i] : MeshData.Points[i];
-        Builder.SetTexCoord(i, 1, FVector2f(PrevPos.X, PrevPos.Y));
-        Builder.SetTexCoord(i, 2, FVector2f(PrevPos.Z, 0.f));
+        const FVector3f Delta = PrevPos - MeshData.Points[i];
+        Builder.SetTexCoord(i, 1, FVector2f(Delta.X, Delta.Y));
+        Builder.SetTexCoord(i, 2, FVector2f(Delta.Z, 0.f));
 
         if (bHasVertexColors && MeshData.VertexColors.IsValidIndex(i))
         {

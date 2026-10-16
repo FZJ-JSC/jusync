@@ -78,3 +78,5 @@ build_docker/
 
 # Superpowers inline-execution workspace (ledger, briefs, test logs)
 .superpowers/
+
+graphify-out/

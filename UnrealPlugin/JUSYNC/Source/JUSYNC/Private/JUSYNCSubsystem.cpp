@@ -1644,6 +1644,22 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, FJUSYNCPointClo
 }
 #endif // WITH_ANARI_USD_MIDDLEWARE
 
+// Streamed USD scenes (ParaView/VTK export) are right-handed Y-up. Map compact mesh
+// vertices/normals with the same (x,z,-y) rotation the point-cloud path applies.
+static TAutoConsoleVariable<int32> CVarJusyncMeshConvertYUp(
+    TEXT("jusync.Mesh.ConvertUSDYUp"),
+    1,
+    TEXT("Compact streamed meshes: map USD (x,y,z) to UE (x,z,-y) like the point clouds. 0 = raw coordinates (legacy behavior)."),
+    ECVF_Default);
+
+// (x,z,-y) is a pure rotation, so triangle winding is preserved. If faces still render
+// inside-out (culled/wrong-lit), flip this to swap the 2nd/3rd index of every triangle.
+static TAutoConsoleVariable<int32> CVarJusyncMeshFlipWinding(
+    TEXT("jusync.Mesh.FlipWinding"),
+    0,
+    TEXT("Swap the last two triangle indices on compact streamed meshes (backface fix knob, no rebuild needed)."),
+    ECVF_Default);
+
 bool UJUSYNCSubsystem::LoadUSDFullCompactFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCCompactMeshRef>& OutMeshes, TArray<FJUSYNCPointCloudRef>& OutPointCloudData)
 {
 #ifdef WITH_ANARI_USD_MIDDLEWARE
@@ -1751,6 +1767,37 @@ bool UJUSYNCSubsystem::LoadUSDFullCompactFromBuffer(const TArray<uint8>& Buffer,
         for (int32 i = 0; i < OutMeshes.Num(); ++i)
         {
             FJUSYNCCompactMeshData& Mesh = *OutMeshes[i];
+
+            // USD/ParaView scenes are right-handed Y-up; the point-cloud path maps
+            // (x, y, z) -> (x, z, -y) for UE (see cpc.positions transform above).
+            // Compact meshes used to flow through raw and rendered 90 deg off the clouds.
+            if (CVarJusyncMeshConvertYUp.GetValueOnAnyThread() != 0)
+            {
+                const bool bFlipWinding = CVarJusyncMeshFlipWinding.GetValueOnAnyThread() != 0;
+                for (FVector3f& P : Mesh.Points)
+                {
+                    P = FVector3f(P.X, P.Z, -P.Y);
+                }
+                for (FVector3f& N : Mesh.Normals)
+                {
+                    N = FVector3f(N.X, N.Z, -N.Y);
+                }
+                if (bFlipWinding)
+                {
+                    for (int32 t = 0; t + 2 < Mesh.Triangles.Num(); t += 3)
+                    {
+                        Mesh.Triangles.Swap(t + 1, t + 2);
+                    }
+                }
+                static TSet<FString> LoggedMeshes;
+                if (!LoggedMeshes.Contains(Mesh.ElementName))
+                {
+                    LoggedMeshes.Add(Mesh.ElementName);
+                    UE_LOG(LogJUSYNC, Log, TEXT("Compact mesh '%s': mapped USD Y-up -> UE (x,z,-y), winding=%s"),
+                        *Mesh.ElementName, bFlipWinding ? TEXT("flipped") : TEXT("kept"));
+                }
+            }
+
             for (int32 j = 0; j < Mesh.Normals.Num(); ++j)
             {
                 Mesh.Normals[j] = Mesh.Normals[j].GetSafeNormal();
@@ -2207,6 +2254,73 @@ bool UJUSYNCSubsystem::UpdateRealtimeMeshFromJUSYNC(
     return true;
 }
 
+static TAutoConsoleVariable<FString> CVarJUSyncMorphMeshMaterial(
+    TEXT("jusync.Morph.MeshMaterial"),
+    TEXT("/Game/Materials/M_JusyncMorph.M_JusyncMorph"),
+    TEXT("Morph-capable material substituted for streamed mesh updates when the material about to be")
+    TEXT(" applied lacks the JusyncMorphT WPO branch. Empty = never override (mesh morphs stay off")
+    TEXT(" unless the spawn material itself is morph-capable)."),
+    ECVF_Default);
+
+// One morph-MID per streamed component so concurrent meshes ramp independently;
+// weak on both ends so the cache never keeps a mesh or material alive.
+static TMap<TWeakObjectPtr<URealtimeMeshComponent>, TWeakObjectPtr<UMaterialInstanceDynamic>>
+    GJUSyncMorphOverrideMIDs;
+
+static UMaterialInstanceDynamic* GetOrCreateMorphOverrideMID(UJUSYNCSubsystem* Subsystem,
+                                                             URealtimeMeshComponent* Comp)
+{
+    const FString Path = CVarJUSyncMorphMeshMaterial.GetValueOnGameThread();
+    if (Path.IsEmpty())
+    {
+        return nullptr;
+    }
+
+    if (GJUSyncMorphOverrideMIDs.Num() > 256)
+    {
+        for (auto It = GJUSyncMorphOverrideMIDs.CreateIterator(); It; ++It)
+        {
+            if (!It.Key().IsValid())
+            {
+                It.RemoveCurrent();
+            }
+        }
+    }
+
+    if (const TWeakObjectPtr<UMaterialInstanceDynamic>* Cached = GJUSyncMorphOverrideMIDs.Find(Comp))
+    {
+        if (UMaterialInstanceDynamic* MID = Cached->Get())
+        {
+            return MID;
+        }
+    }
+
+    UMaterialInterface* MorphBase = Subsystem->GetCachedMaterial(Path);
+    if (!MorphBase || !FJUSYNCMeshMorpher::IsMaterialMorphCapable(MorphBase))
+    {
+        GJUSyncMorphOverrideMIDs.Remove(Comp);
+        static FString WarnedPath;
+        if (WarnedPath != Path)
+        {
+            WarnedPath = Path;
+            UE_LOG(LogJUSYNC, Warning,
+                   TEXT("jusync.Morph.MeshMaterial '%s' not found or missing the JusyncMorphT parameter;")
+                   TEXT(" create it with Tools/CreateJusyncMorphMaterial.py — mesh morphing stays off"),
+                   *Path);
+        }
+        return nullptr;
+    }
+
+    UMaterialInstanceDynamic* MID = UMaterialInstanceDynamic::Create(MorphBase, Comp);
+    if (MID)
+    {
+        MID->SetScalarParameterValue(FJUSYNCMeshMorpher::MorphActiveParameter, 0.f);
+        MID->SetScalarParameterValue(FJUSYNCMeshMorpher::MorphTParameter, 1.f);
+        GJUSyncMorphOverrideMIDs.Add(Comp, MID);
+    }
+    return MID;
+}
+
 bool UJUSYNCSubsystem::UpdateRealtimeMeshFromJUSYNC_WithCompact(
     const FJUSYNCCompactMeshData& MeshData,
     URealtimeMeshComponent* RealtimeMeshComponent,
@@ -2226,11 +2340,20 @@ bool UJUSYNCSubsystem::UpdateRealtimeMeshFromJUSYNC_WithCompact(
 
     bool bMorphBlend = false;
     TArray<FVector3f> MorphPrev;
+    UMaterialInterface* EffectiveMaterial = MaterialToApply;
     if (MeshMorpher.IsValid())
     {
         UMaterialInterface* IntentMaterial = MaterialToApply
             ? MaterialToApply
             : static_cast<UMaterialInterface*>(RealtimeMeshComponent->GetMaterial(0));
+        if (!FJUSYNCMeshMorpher::IsMaterialMorphCapable(IntentMaterial))
+        {
+            if (UMaterialInstanceDynamic* MorphMID = GetOrCreateMorphOverrideMID(this, RealtimeMeshComponent))
+            {
+                IntentMaterial = MorphMID;
+                EffectiveMaterial = MorphMID;
+            }
+        }
         bMorphBlend = (MeshMorpher->BeginUpdate(RealtimeMeshComponent, IntentMaterial,
                                                 MeshData, UpdateStart, MorphPrev)
                        == FJUSYNCMeshMorpher::EApplyMode::Blend);
@@ -2270,7 +2393,7 @@ bool UJUSYNCSubsystem::UpdateRealtimeMeshFromJUSYNC_WithCompact(
 
     RealtimeMesh->SetupMaterialSlot(0, TEXT("PrimaryMaterial"));
 
-    UMaterialInterface* ActiveMaterial = MaterialToApply ? MaterialToApply : RealtimeMeshComponent->GetMaterial(0);
+    UMaterialInterface* ActiveMaterial = EffectiveMaterial ? EffectiveMaterial : RealtimeMeshComponent->GetMaterial(0);
     if (!ActiveMaterial)
     {
         ActiveMaterial = GetCachedMaterial(TEXT("/Game/Materials/M_VertexColor"));

@@ -3,6 +3,7 @@
 #include "EngineUtils.h"
 #include "HAL/IConsoleManager.h"
 #include "Hash/CityHash.h"
+#include "JUSYNCModule.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -26,6 +27,23 @@ static TAutoConsoleVariable<int32> CVarJUSyncMorphBlendMs(
 static TAutoConsoleVariable<int32> CVarJUSyncMorphMaxBlendMs(
     TEXT("jusync.Morph.MeshMaxBlendMs"), 2000,
     TEXT("Cap in ms for the auto mesh blend window."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarJUSyncMorphTopologyMatch(
+    TEXT("jusync.Morph.MeshTopologyMatch"), 1,
+    TEXT("1 = morph across samples whose triangle topology changed (sender re-meshes every timestep)")
+    TEXT(" by matching vertices to the nearest previous-sample vertex; 0 = identical-topology only."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarJUSyncMorphMatchMaxVerts(
+    TEXT("jusync.Morph.MeshMatchMaxVerts"), 3000000,
+    TEXT("Vertex budget per side for cross-topology matching (game thread); bigger meshes instant-apply."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarJUSyncMorphMatchMinPct(
+    TEXT("jusync.Morph.MeshMatchMinPct"), 40,
+    TEXT("Minimum percentage of new vertices that must find a previous-sample match for a")
+    TEXT(" cross-topology morph; below this the update instant-applies."),
     ECVF_Default);
 
 namespace JUSyncMorph
@@ -54,6 +72,131 @@ namespace JUSyncMorph
             Out[i] = OwnPositions[i];
         }
     }
+
+    // Cross-topology correspondence: matches every vertex of the new sample to the nearest
+    // vertex of the previous sample via a uniform grid (one build per sample, 27-cell probes).
+    // The sender (ANARI-USD) writes points AND face indices as time-varying attributes, so
+    // vertex count/connectivity legitimately changes every timestep; index-aligned blending
+    // is then impossible and this matching is what makes a morph still look continuous.
+    class FVertMatcher
+    {
+    public:
+        FVertMatcher(const TArray<FVector3f>& Old, float MinAcceptRadius)
+        {
+            Points = &Old;
+            FVector3f Min = Old[0], Max = Old[0];
+            for (const FVector3f& P : Old)
+            {
+                Min = FVector3f::Min(Min, P);
+                Max = FVector3f::Max(Max, P);
+            }
+            const FVector3f Extent = Max - Min;
+            // Cell ~= local point spacing so a 3x3x3 probe reaches the nearest old vertex
+            // for mesh drift well under one spacing.
+            const float Volume = FMath::Max(Extent.X, 1e-3f)
+                               * FMath::Max(Extent.Y, 1e-3f)
+                               * FMath::Max(Extent.Z, 1e-3f);
+            CellSize = FMath::Max(FMath::Pow(Volume / FMath::Max(Old.Num(), 1), 1.f / 3.f) * 1.25f,
+                                  FMath::Max(MinAcceptRadius, 1e-3f));
+            AcceptRadiusSq = FMath::Square(CellSize * 2.0f);
+
+            Cells.Reserve(Old.Num() / 2 + 16);
+            for (int32 Idx = 0; Idx < Old.Num(); ++Idx)
+            {
+                const uint64 Key = CellKey(Old[Idx]);
+                TArray<int32>& Bucket = Cells.FindOrAdd(Key);
+                if (Bucket.Num() < MaxBucket) // pathological clustering: drop the excess
+                {
+                    Bucket.Add(Idx);
+                }
+            }
+        }
+
+        // Returns old-vertex index or INDEX_NONE.
+        int32 FindNearest(const FVector3f& P) const
+        {
+            const FIntVector C(
+                FMath::FloorToInt(P.X / CellSize),
+                FMath::FloorToInt(P.Y / CellSize),
+                FMath::FloorToInt(P.Z / CellSize));
+
+            int32 Best = INDEX_NONE;
+            float BestDistSq = AcceptRadiusSq;
+            for (int32 dz = -1; dz <= 1; ++dz)
+            {
+                for (int32 dy = -1; dy <= 1; ++dy)
+                {
+                    for (int32 dx = -1; dx <= 1; ++dx)
+                    {
+                        const FIntVector N(C.X + dx, C.Y + dy, C.Z + dz);
+                        const uint64 Key = Mix(N.X, N.Y, N.Z);
+                        if (const TArray<int32>* Bucket = Cells.Find(Key))
+                        {
+                            for (const int32 Idx : *Bucket)
+                            {
+                                const float DistSq = FVector3f::DistSquared((*Points)[Idx], P);
+                                if (DistSq <= BestDistSq)
+                                {
+                                    BestDistSq = DistSq;
+                                    Best = Idx;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return Best;
+        }
+
+    private:
+        static uint64 Mix(int32 ix, int32 iy, int32 iz)
+        {
+            uint64 h = static_cast<uint32>(ix);
+            h = h * 0x9E3779B97F4A7C15ull + static_cast<uint32>(iy);
+            h = h * 0xC2B2AE3D27D4EB4Full + static_cast<uint32>(iz);
+            return h;
+        }
+
+        uint64 CellKey(const FVector3f& P) const
+        {
+            return Mix(
+                FMath::FloorToInt(P.X / CellSize),
+                FMath::FloorToInt(P.Y / CellSize),
+                FMath::FloorToInt(P.Z / CellSize));
+        }
+
+        static constexpr int32 MaxBucket = 32;
+        const TArray<FVector3f>* Points = nullptr;
+        float CellSize = 1.f;
+        float AcceptRadiusSq = 1.f;
+        TMap<uint64, TArray<int32>> Cells;
+    };
+
+    // Out[i] = matched previous position for new vertex i (own position when unmatched,
+    // so the vertex simply does not travel). Returns matched fraction of new vertices.
+    static float BuildMatchedPrev(const TArray<FVector3f>& Old, const TArray<FVector3f>& New,
+                                  TArray<FVector3f>& Out, int32& OutMatched)
+    {
+        FVertMatcher Matcher(Old, 0.f);
+
+        Out.SetNumUninitialized(New.Num());
+        int32 Matched = 0;
+        for (int32 i = 0; i < New.Num(); ++i)
+        {
+            const int32 Src = Matcher.FindNearest(New[i]);
+            if (Src != INDEX_NONE)
+            {
+                Out[i] = Old[Src];
+                ++Matched;
+            }
+            else
+            {
+                Out[i] = New[i];
+            }
+        }
+        OutMatched = Matched;
+        return New.Num() > 0 ? static_cast<float>(Matched) / New.Num() : 0.f;
+    }
 }
 
 FJUSYNCMeshMorpher::FJUSYNCMeshMorpher(TWeakObjectPtr<UObject> InOwner)
@@ -81,7 +224,7 @@ uint64 FJUSYNCMeshMorpher::ComputeTriHash(const TArray<int32>& Triangles)
                       static_cast<size_t>(Triangles.Num()) * sizeof(int32));
 }
 
-bool FJUSYNCMeshMorpher::IsMorphCapable(const UMaterialInterface* Material)
+bool FJUSYNCMeshMorpher::IsMaterialMorphCapable(const UMaterialInterface* Material)
 {
     if (!Material)
     {
@@ -102,7 +245,7 @@ UMaterialInstanceDynamic* FJUSYNCMeshMorpher::ResolveMorphMID(URealtimeMeshCompo
 
     if (UMaterialInstanceDynamic* CurrentMID = Cast<UMaterialInstanceDynamic>(Current))
     {
-        if (IsMorphCapable(CurrentMID))
+        if (IsMaterialMorphCapable(CurrentMID))
         {
             Entry.MorphMID = CurrentMID;
             return CurrentMID;
@@ -113,7 +256,7 @@ UMaterialInstanceDynamic* FJUSYNCMeshMorpher::ResolveMorphMID(URealtimeMeshCompo
 
     // Static material that has the parameters -> create our own MID.
 
-    if (IsMorphCapable(Current))
+    if (IsMaterialMorphCapable(Current))
     {
         UMaterialInstanceDynamic* NewMID = UMaterialInstanceDynamic::Create(Current, Comp);
         if (NewMID)
@@ -149,23 +292,64 @@ FJUSYNCMeshMorpher::EApplyMode FJUSYNCMeshMorpher::BeginUpdate(
         return EApplyMode::Normal;
     }
 
-    const uint64 NewHash = ComputeTriHash(MeshData.Triangles);
-    if (NewHash != Entry->TriHash)
-    {
-        return EApplyMode::Normal;
-    }
-
     const double Gap = NowSeconds - Entry->LastArrival;
     if (Gap < JUSyncMorph::MinBlendGapSeconds)
     {
         return EApplyMode::Normal;
     }
 
-    if (!IsMorphCapable(IntentMaterial))
+    if (!IsMaterialMorphCapable(IntentMaterial))
     {
         return EApplyMode::Normal;
     }
 
+    const uint64 NewHash = ComputeTriHash(MeshData.Triangles);
+    const bool bIndexAligned = (NewHash == Entry->TriHash);
+
+    if (!bIndexAligned)
+    {
+        // The ANARI-USD sender writes points AND face indices as time-varying attributes,
+        // so a re-meshed timestep changes topology. Fall back to nearest-vertex matching.
+        if (!CVarJUSyncMorphTopologyMatch.GetValueOnGameThread())
+        {
+            return EApplyMode::Normal;
+        }
+        const int32 Budget = FMath::Max(CVarJUSyncMorphMatchMaxVerts.GetValueOnGameThread(), 1024);
+        if (Entry->CurrPoints.Num() > Budget || MeshData.Points.Num() > Budget)
+        {
+            UE_LOG(LogJUSYNC, Verbose, TEXT("MeshMorph '%s': %d/%d verts over match budget %d, instant apply"),
+                   *MeshData.ElementName, MeshData.Points.Num(), Entry->CurrPoints.Num(), Budget);
+            return EApplyMode::Normal;
+        }
+
+        int32 Matched = 0;
+        const float MatchedFrac = JUSyncMorph::BuildMatchedPrev(
+            Entry->CurrPoints, MeshData.Points, OutPrevPoints, Matched);
+        const int32 MinPct = CVarJUSyncMorphMatchMinPct.GetValueOnGameThread();
+        if (MatchedFrac * 100.f < static_cast<float>(MinPct))
+        {
+            OutPrevPoints.Reset();
+            UE_LOG(LogJUSYNC, Verbose, TEXT("MeshMorph '%s': topology changed, match %.1f%% < %d%%, instant apply"),
+                   *MeshData.ElementName, MatchedFrac * 100.f, MinPct);
+            return EApplyMode::Normal;
+        }
+
+        // NOTE: a mid-blend arrival restarts the morph from the previous SAMPLE's matched
+        // positions instead of the in-flight displayed ones; at streaming rates the visible
+        // error is sub-frame.
+        Entry->bBlendByMatch = true;
+
+        static double LastMatchLogTime = 0.0;
+        if (NowSeconds - LastMatchLogTime > 2.0)
+        {
+            LastMatchLogTime = NowSeconds;
+            UE_LOG(LogJUSYNC, Log, TEXT("MeshMorph '%s': cross-topology morph, matched %d/%d verts (%.1f%%)"),
+                   *MeshData.ElementName, Matched, MeshData.Points.Num(), MatchedFrac * 100.f);
+        }
+        return EApplyMode::Blend;
+    }
+
+    Entry->bBlendByMatch = false;
     if (Entry->bBlending && Entry->Duration > SMALL_NUMBER)
     {
         const float S = JUSyncMorph::EaseSaturated((NowSeconds - Entry->BlendStart) / Entry->Duration);

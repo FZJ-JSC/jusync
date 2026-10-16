@@ -17,6 +17,10 @@ public:
 
     enum class EApplyMode : uint8 { Normal, Blend };
 
+    // True when the material declares JusyncMorphT (and the WPO branch behind it),
+    // i.e. meshes drawn with it can be GPU-morphed.
+    static bool IsMaterialMorphCapable(const UMaterialInterface* Material);
+
     EApplyMode BeginUpdate(URealtimeMeshComponent* Comp, UMaterialInterface* IntentMaterial,
                            const FJUSYNCCompactMeshData& MeshData,
                            double NowSeconds, TArray<FVector3f>& OutPrevPoints);
@@ -49,12 +53,12 @@ private:
         double Duration = 0.0;
         bool bBlending = false;
         bool bHasTriHash = false;
+        bool bBlendByMatch = false; // last blend used cross-topology correspondence, not index alignment
 
         TWeakObjectPtr<UMaterialInstanceDynamic> MorphMID;
     };
 
     static uint64 ComputeTriHash(const TArray<int32>& Triangles);
-    static bool IsMorphCapable(const UMaterialInterface* Material);
 
     UMaterialInstanceDynamic* ResolveMorphMID(URealtimeMeshComponent* Comp, FEntry& Entry);
 
