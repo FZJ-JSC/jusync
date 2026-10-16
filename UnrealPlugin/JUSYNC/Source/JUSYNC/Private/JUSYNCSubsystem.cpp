@@ -2415,6 +2415,21 @@ bool UJUSYNCSubsystem::UpdateRealtimeMeshFromJUSYNC_WithCompact(
     const FRealtimeMeshSectionGroupKey GroupKey = FRealtimeMeshSectionGroupKey::Create(0, TEXT("USDGroup"));
     const FRealtimeMeshSectionKey SectionKey = FRealtimeMeshSectionKey::CreateForPolyGroup(GroupKey, 0);
 
+    // Order matters: MID parameter writes enqueue immediately, so game-thread call order is
+    // render-queue order. Geometry must not swap before the morph state is committed, or one
+    // frame draws the new positions with the previous blend's finished T~1 (visible end-of-
+    // blend "chop").
+    if (ActiveMaterial)
+    {
+        RealtimeMeshComponent->SetMaterial(0, ActiveMaterial);
+    }
+
+    if (MeshMorpher.IsValid())
+    {
+        MeshMorpher->Commit(RealtimeMeshComponent, MeshData, FPlatformTime::Seconds(),
+                            bMorphBlend, MoveTemp(MorphPrev));
+    }
+
     if (RealtimeMesh->GetSectionGroup(GroupKey))
     {
         RealtimeMesh->UpdateSectionGroup(GroupKey, MoveTemp(Streams));
@@ -2429,17 +2444,6 @@ bool UJUSYNCSubsystem::UpdateRealtimeMeshFromJUSYNC_WithCompact(
     SectionConfig.bCastsShadow = true;
     RealtimeMesh->UpdateSectionConfig(SectionKey, SectionConfig, bEnableSpawnedMeshCollision);
     EnableSpawnedMeshCollision(RealtimeMeshComponent, RealtimeMesh);
-
-    if (ActiveMaterial)
-    {
-        RealtimeMeshComponent->SetMaterial(0, ActiveMaterial);
-    }
-
-    if (MeshMorpher.IsValid())
-    {
-        MeshMorpher->Commit(RealtimeMeshComponent, MeshData, FPlatformTime::Seconds(),
-                            bMorphBlend, MoveTemp(MorphPrev));
-    }
 
     UE_LOG(LogJUSYNC, Verbose, TEXT("JUSYNC PERF UpdateRealtimeMeshCompact '%s' %.3f ms"),
         *MeshData.ElementName, (FPlatformTime::Seconds() - UpdateStart) * 1000.0);

@@ -11,6 +11,8 @@
 #include "LidarPointCloudComponent.h"
 #include "LidarPointCloudActor.h"
 #include "LidarPointCloudSettings.h"
+#include "Materials/MaterialInterface.h"
+#include "Materials/MaterialInstanceDynamic.h"
 
 // SetData. 0: legacy in-place SetData on the game thread.
 
@@ -42,6 +44,19 @@ static TAutoConsoleVariable<int32> CVarJusyncCloudRenderSmoothing(
 static TAutoConsoleVariable<int32> CVarJusyncCloudFixedSize(
     TEXT("jusync.Morph.CloudFixedSize"), 1,
     TEXT("1 (default) = render streamed clouds with FixedScreenSize scaling (octree-independent point size)."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<FString> CVarJusyncCloudMaterial(
+    TEXT("jusync.Spawner.CloudMaterial"),
+    TEXT("/Game/Materials/M_JusyncCloud"),
+    TEXT("Material applied to streamed LidarPointCloud components (slot 0). Default M_JusyncCloud is\n")
+    TEXT("non-emissive (built by Tools/CreateJusyncCloudMaterial.py); empty = plugin default material."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarJusyncCloudEmissiveFloor(
+    TEXT("jusync.Spawner.CloudEmissiveFloor"), 0.5f,
+    TEXT("M_JusyncCloud 'EmissiveFloor' param: point color * this goes to emissive. Keep <=1 to stay\n")
+    TEXT("below the bloom threshold."),
     ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarJusyncCloudScreenSize(
@@ -525,10 +540,10 @@ void FJUSYNCPointCloudSpawner::StartAsyncCloudBuild(const FString& Key, FPointCl
     F->bChainAborted = false;
 
     F->RampPos.SetNum(F->Points->Num());
-    for (int64 i = 0; i < F->Points->Num(); ++i)
+    ParallelFor(static_cast<int32>(F->Points->Num()), [&](int32 i)
     {
         F->RampPos[i] = (*F->Points)[i].Location;
-    }
+    });
 
     const uint64 Generation = F->Generation;
     const int32 NumPts = static_cast<int32>(F->Points->Num());
@@ -928,49 +943,117 @@ bool FJUSYNCPointCloudSpawner::StartCloudSmoothMorph(const FString& Key, FPointC
 
     const FVector3f NegOffset = (FVector3f)(-Cloud->LocationOffset);
 
-    TMap<int32, int32> QuantToInput;
-    if (!bReuseMap)
-    {
-        QuantToInput.Reserve(ExpectedPts);
-        for (int32 i = 0; i < ExpectedPts; ++i)
-        {
-            QuantToInput.Add(JUSyncCloudSmooth::QKey((*Displayed)[i] + NegOffset), i);
-        }
-    }
-
     const TArray64<FLidarPointCloudPoint>& NewPts = Entry.Points;
-    TArray<int32> WalkToInput;
-    WalkToInput.Reserve(ExpectedPts);
-    int32 Held = 0;
 
+    // Walk-order position/color snapshot via the engine's octree walk, then parallel
+    // correspondence resolution.
+    TArray<FVector3f> WalkPos;
+    TArray<FColor> WalkColor;
+    WalkPos.Reserve(ExpectedPts);
+    WalkColor.Reserve(ExpectedPts);
     const auto Capture = [&](FLidarPointCloudPoint* P)
     {
-        int32 Src = INDEX_NONE;
-        if (bReuseMap)
-        {
-            Src = (*KnownMap)[Morph.Start.Num()];
-        }
-        else if (const int32* Found = QuantToInput.Find(JUSyncCloudSmooth::QKey(P->Location)))
-        {
-            Src = *Found;
-        }
-        WalkToInput.Add(Src);
-
-        Morph.Start.Add(P->Location);
-        Morph.End.Add((Src != INDEX_NONE && Src < NewCount) ? NewPts[Src].Location + NegOffset : P->Location);
-        Morph.NewColors.Add((Src != INDEX_NONE && Src < NewCount) ? NewPts[Src].Color : P->Color);
-        if (Src == INDEX_NONE || Src >= NewCount)
-        {
-            ++Held;
-        }
+        WalkPos.Add(P->Location);
+        WalkColor.Add(P->Color);
     };
     Cloud->ExecuteActionOnAllPoints(Capture, /*bVisibleOnly*/false);
 
-    const int32 Walked = Morph.Start.Num();
+    const int32 Walked = WalkPos.Num();
     if (Walked == 0)
     {
         return false;
     }
+
+    TArray<int32> WalkToInput;
+    WalkToInput.SetNumUninitialized(Walked);
+    int32 Held = 0;
+
+    if (bReuseMap)
+    {
+        ParallelFor(Walked, [&](int32 i)
+        {
+            WalkToInput[i] = (i < KnownMap->Num()) ? (*KnownMap)[i] : INDEX_NONE;
+        });
+    }
+    else
+    {
+        // Lock-free open-addressing table over the quantized keys, built and probed in
+        // parallel. On quantization-cell collisions the CAS winner is used (duplicates are
+        // sub-cell apart, so the chosen source differs by <1cm at worst).
+        const int32 Pow2Exp = FMath::CeilLogTwo(FMath::Max(ExpectedPts * 2, 64));
+        const int32 TableSize = 1 << Pow2Exp;
+        const uint32 TableMask = static_cast<uint32>(TableSize - 1);
+        const auto SlotOf = [&](int32 K) { return static_cast<uint32>((uint64)static_cast<uint32>(K) * 0x9E3779B97F4A7C15ull) >> (64 - Pow2Exp); };
+
+        TArray<int32> Slots; // 0 = empty, else (input index + 1); mutated via interlocked CAS
+        Slots.SetNumZeroed(TableSize);
+        TArray<int32> KeyOf; // quantized key per input index
+        KeyOf.SetNumUninitialized(ExpectedPts);
+
+        ParallelFor(ExpectedPts, [&](int32 i)
+        {
+            const int32 K = JUSyncCloudSmooth::QKey((*Displayed)[i] + NegOffset);
+            KeyOf[i] = K;
+            uint32 h = SlotOf(K);
+            for (;;)
+            {
+                const int32 Prev = FPlatformAtomics::InterlockedCompareExchange(&Slots[h], i + 1, 0);
+                if (Prev == 0)
+                {
+                    break; // claimed the slot
+                }
+                if (KeyOf[Prev - 1] == K)
+                {
+                    break; // same quantized cell already claimed: duplicate, any of them will do
+                }
+                h = (h + 1) & TableMask;
+            }
+        });
+
+        ParallelFor(Walked, [&](int32 i)
+        {
+            const int32 K = JUSyncCloudSmooth::QKey(WalkPos[i]);
+            uint32 h = SlotOf(K);
+            int32 Src = INDEX_NONE;
+            for (;;)
+            {
+                const int32 V = Slots[h]; // read-only after the build barrier
+                if (V == 0)
+                {
+                    break; // empty slot: the probe chain for K cannot continue past it
+                }
+                if (KeyOf[V - 1] == K)
+                {
+                    Src = V - 1;
+                    break;
+                }
+                h = (h + 1) & TableMask;
+            }
+            WalkToInput[i] = Src;
+        });
+    }
+
+    Morph.Start = MoveTemp(WalkPos);
+    Morph.End.SetNumUninitialized(Walked);
+    Morph.NewColors.SetNumUninitialized(Walked);
+    FThreadSafeCounter Unmatched(0);
+    ParallelFor(Walked, [&](int32 i)
+    {
+        const int32 Src = WalkToInput[i];
+        if (Src != INDEX_NONE && Src < NewCount)
+        {
+            Morph.End[i] = NewPts[Src].Location + NegOffset;
+            Morph.NewColors[i] = NewPts[Src].Color;
+        }
+        else
+        {
+            Morph.End[i] = Morph.Start[i];
+            Morph.NewColors[i] = WalkColor[i];
+            Unmatched.Increment();
+        }
+    });
+    Held = Unmatched.GetValue();
+    WalkColor.Reset();
 
     if (Held > FMath::Max(64, Walked / 4))
     {
@@ -1068,6 +1151,43 @@ void FJUSYNCPointCloudSpawner::ApplyVisualSettings(ULidarPointCloudComponent* Co
     if (Comp->GetPointShape() != PointShape)
     {
         Comp->SetPointShape(PointShape);
+    }
+
+    // Material slot 0: swap the plugin's emissive default for the matte lit material.
+    // Loaded once per path change.
+    static FString CachedCloudMatPath;
+    static UMaterialInterface* CachedCloudMat = nullptr;
+    const FString CloudMatPath = CVarJusyncCloudMaterial.GetValueOnGameThread();
+    if (CloudMatPath != CachedCloudMatPath)
+    {
+        CachedCloudMatPath = CloudMatPath;
+        CachedCloudMat = CloudMatPath.IsEmpty()
+                             ? nullptr
+                             : LoadObject<UMaterialInterface>(nullptr, *CloudMatPath);
+        if (!CachedCloudMat && !CloudMatPath.IsEmpty())
+        {
+            UE_LOG(LogTemp, Warning,
+                   TEXT("JUSYNC Spawner: cloud material '%s' not found - run Tools/CreateJusyncCloudMaterial.py;"
+                        " keeping the plugin default (emissive) material"),
+                   *CloudMatPath);
+        }
+    }
+    if (CachedCloudMat && Comp->GetMaterial(0) != CachedCloudMat)
+    {
+        Comp->SetMaterial(0, CachedCloudMat);
+    }
+
+    // M_JusyncCloud self-lit floor: the component wraps the assigned material in its own
+    // MID; push the CVar when the MID's current value differs.
+    if (UMaterialInstanceDynamic* CloudDyn = Cast<UMaterialInstanceDynamic>(Comp->GetMaterial(0)))
+    {
+        float Current = -1.f;
+        const float EmissiveFloor = CVarJusyncCloudEmissiveFloor.GetValueOnGameThread();
+        if (!CloudDyn->GetScalarParameterValue(FName("EmissiveFloor"), Current) ||
+            !FMath::IsNearlyEqual(Current, EmissiveFloor))
+        {
+            CloudDyn->SetScalarParameterValue(FName("EmissiveFloor"), EmissiveFloor);
+        }
     }
 }
 

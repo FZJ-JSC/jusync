@@ -1,5 +1,6 @@
 #include "JUSYNCMeshMorpher.h"
 
+#include "Async/ParallelFor.h"
 #include "EngineUtils.h"
 #include "HAL/IConsoleManager.h"
 #include "Hash/CityHash.h"
@@ -74,10 +75,9 @@ namespace JUSyncMorph
     }
 
     // Cross-topology correspondence: matches every vertex of the new sample to the nearest
-    // vertex of the previous sample via a uniform grid (one build per sample, 27-cell probes).
-    // The sender (ANARI-USD) writes points AND face indices as time-varying attributes, so
-    // vertex count/connectivity legitimately changes every timestep; index-aligned blending
-    // is then impossible and this matching is what makes a morph still look continuous.
+    // vertex of the previous sample. Uniform grid stored as a sorted (cellKey, vertexIndex)
+    // array; key computation and queries are parallel, queries binary-search the
+    // 27-cell neighborhood.
     class FVertMatcher
     {
     public:
@@ -100,16 +100,15 @@ namespace JUSyncMorph
                                   FMath::Max(MinAcceptRadius, 1e-3f));
             AcceptRadiusSq = FMath::Square(CellSize * 2.0f);
 
-            Cells.Reserve(Old.Num() / 2 + 16);
-            for (int32 Idx = 0; Idx < Old.Num(); ++Idx)
+            Keyed.SetNumUninitialized(Old.Num());
+            ParallelFor(Old.Num(), [&](int32 Idx)
             {
-                const uint64 Key = CellKey(Old[Idx]);
-                TArray<int32>& Bucket = Cells.FindOrAdd(Key);
-                if (Bucket.Num() < MaxBucket) // pathological clustering: drop the excess
-                {
-                    Bucket.Add(Idx);
-                }
-            }
+                Keyed[Idx] = MakeTuple(CellKey(Old[Idx]), Idx);
+            });
+            Keyed.Sort([](const TPair<uint64, int32>& A, const TPair<uint64, int32>& B)
+            {
+                return A.Key != B.Key ? A.Key < B.Key : A.Value < B.Value;
+            });
         }
 
         // Returns old-vertex index or INDEX_NONE.
@@ -128,18 +127,48 @@ namespace JUSyncMorph
                 {
                     for (int32 dx = -1; dx <= 1; ++dx)
                     {
-                        const FIntVector N(C.X + dx, C.Y + dy, C.Z + dz);
-                        const uint64 Key = Mix(N.X, N.Y, N.Z);
-                        if (const TArray<int32>* Bucket = Cells.Find(Key))
+                        const uint64 Key = Mix(C.X + dx, C.Y + dy, C.Z + dz);
+
+                        int32 Lo = 0;
+                        int32 Hi = Keyed.Num(); // lower bound: first entry with Key >= Key
+                        while (Lo < Hi)
                         {
-                            for (const int32 Idx : *Bucket)
+                            const int32 Mid = (Lo + Hi) / 2;
+                            if (Keyed[Mid].Key < Key)
                             {
-                                const float DistSq = FVector3f::DistSquared((*Points)[Idx], P);
-                                if (DistSq <= BestDistSq)
-                                {
-                                    BestDistSq = DistSq;
-                                    Best = Idx;
-                                }
+                                Lo = Mid + 1;
+                            }
+                            else
+                            {
+                                Hi = Mid;
+                            }
+                        }
+                        const int32 Begin = Lo;
+
+                        Hi = Keyed.Num(); // upper bound: first entry with Key > Key
+                        while (Lo < Hi)
+                        {
+                            const int32 Mid = (Lo + Hi) / 2;
+                            if (Keyed[Mid].Key <= Key)
+                            {
+                                Lo = Mid + 1;
+                            }
+                            else
+                            {
+                                Hi = Mid;
+                            }
+                        }
+                        // Cap the scan at MaxBucket entries per cell.
+                        const int32 End = FMath::Min(Lo, Begin + MaxBucket);
+
+                        for (int32 k = Begin; k < End; ++k)
+                        {
+                            const int32 Idx = Keyed[k].Value;
+                            const float DistSq = FVector3f::DistSquared((*Points)[Idx], P);
+                            if (DistSq <= BestDistSq)
+                            {
+                                BestDistSq = DistSq;
+                                Best = Idx;
                             }
                         }
                     }
@@ -169,7 +198,7 @@ namespace JUSyncMorph
         const TArray<FVector3f>* Points = nullptr;
         float CellSize = 1.f;
         float AcceptRadiusSq = 1.f;
-        TMap<uint64, TArray<int32>> Cells;
+        TArray<TPair<uint64, int32>> Keyed;
     };
 
     // Out[i] = matched previous position for new vertex i (own position when unmatched,
@@ -180,22 +209,22 @@ namespace JUSyncMorph
         FVertMatcher Matcher(Old, 0.f);
 
         Out.SetNumUninitialized(New.Num());
-        int32 Matched = 0;
-        for (int32 i = 0; i < New.Num(); ++i)
+        FThreadSafeCounter Matched(0);
+        ParallelFor(New.Num(), [&](int32 i)
         {
             const int32 Src = Matcher.FindNearest(New[i]);
             if (Src != INDEX_NONE)
             {
                 Out[i] = Old[Src];
-                ++Matched;
+                Matched.Increment();
             }
             else
             {
                 Out[i] = New[i];
             }
-        }
-        OutMatched = Matched;
-        return New.Num() > 0 ? static_cast<float>(Matched) / New.Num() : 0.f;
+        });
+        OutMatched = Matched.GetValue();
+        return New.Num() > 0 ? static_cast<float>(OutMatched) / New.Num() : 0.f;
     }
 }
 
