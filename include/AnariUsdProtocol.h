@@ -4,6 +4,7 @@
 
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -371,7 +372,7 @@ struct ZmqFileNotification
 // File layout (all little-endian, packed):
 
 inline constexpr uint32_t JUSYNC_RAWGEO_MAGIC   = 0x3147534A; // "JSG1"
-inline constexpr uint32_t JUSYNC_RAWGEO_VERSION = 1;
+inline constexpr uint32_t JUSYNC_RAWGEO_VERSION = 2;
 
 struct JusyncRawGeoAttrDesc
 {
@@ -380,10 +381,13 @@ struct JusyncRawGeoAttrDesc
     uint32_t pad;                 // keep 40-byte struct
 };
 
-struct JusyncRawGeoHeader
+// v1 header. Frozen: payloads that carry the whole frame (no refinement
+// subsets) are still serialized in exactly this layout with version == 1, so
+// clients predating progressive refinement keep working untouched.
+struct JusyncRawGeoHeaderV1
 {
     uint32_t magic;               // JUSYNC_RAWGEO_MAGIC
-    uint32_t version;             // JUSYNC_RAWGEO_VERSION
+    uint32_t version;             // == 1
     char     prim_name[64];       // element name, NUL-padded ("bigCloud")
     uint64_t num_points;
     double   time;                // timestep this payload samples
@@ -392,25 +396,59 @@ struct JusyncRawGeoHeader
     uint32_t num_attributes;      // descs following the header
     uint32_t attr_uniform_count;  // per-attribute element count (== num_points)
     uint64_t payload_bytes;       // total bytes of the three data sections
+};
+
+// v2 header (milestone-2 #3, progressive refinement): the v1 layout plus a
+// complementary-subset lattice. A frame cut into S subsets carries, in each
+// payload, the source points whose index i satisfies (i % S) == subset_index;
+// subset 0 is the coarse base streamed first. Merged in lattice order the
+// subsets rebuild the frame point-for-point identical to a stride-1 stream.
+struct JusyncRawGeoHeader
+{
+    uint32_t magic;               // JUSYNC_RAWGEO_MAGIC
+    uint32_t version;             // 1 (JusyncRawGeoHeaderV1 layout) or 2
+    char     prim_name[64];       // element name, NUL-padded ("bigCloud")
+    uint64_t num_points;          // points in THIS payload (subset or whole)
+    double   time;                // timestep this payload samples
+    uint32_t position_components; // always 3 (float3) in v1
+    uint32_t color_components;    // 0 = absent, 3 = rgb, 4 = rgba (float)
+    uint32_t num_attributes;      // descs following the header
+    uint32_t attr_uniform_count;  // per-attribute element count (== num_points)
+    uint64_t payload_bytes;       // total bytes of the three data sections
+    // --- v2 fields (present when version == 2) ---
+    uint64_t subset_index;        // k in [0, subset_count)
+    uint64_t subset_count;        // S; 1 = whole frame in one payload
+    uint64_t full_num_points;     // source count the lattice was cut from
+
+    // On-disk size of the header for a given version (the attribute
+    // descriptor table and data sections follow it).
+    static size_t header_bytes(uint32_t ver)
+    {
+        return ver == 1 ? sizeof(JusyncRawGeoHeaderV1) : sizeof(JusyncRawGeoHeader);
+    }
 
     bool valid(size_t totalBytes) const
     {
-        if (magic != JUSYNC_RAWGEO_MAGIC || version != JUSYNC_RAWGEO_VERSION)
+        if (magic != JUSYNC_RAWGEO_MAGIC ||
+            (version != 1 && version != JUSYNC_RAWGEO_VERSION))
             return false;
         if (position_components != 3 ||
             (color_components != 0 && color_components != 3 && color_components != 4))
             return false;
-        const size_t table = total_header_and_table_bytes();
+        if (version == 2 &&
+            (subset_count == 0 || subset_index >= subset_count ||
+             full_num_points < num_points))
+            return false;
+        const size_t table = header_bytes(version) +
+            static_cast<size_t>(num_attributes) * sizeof(JusyncRawGeoAttrDesc);
         return totalBytes >= table && totalBytes - table >= payload_bytes;
     }
-
-private:
-    size_t total_header_and_table_bytes() const
-    {
-        return sizeof(JusyncRawGeoHeader) +
-               static_cast<size_t>(num_attributes) * sizeof(JusyncRawGeoAttrDesc);
-    }
 };
+
+// The v2 header must be the v1 layout with the lattice fields appended, so a
+// version-1 buffer is a valid prefix of a version-2 struct.
+static_assert(offsetof(JusyncRawGeoHeader, subset_index) == sizeof(JusyncRawGeoHeaderV1),
+    "v2 header must be the v1 layout plus appended fields");
 
 struct ZmqWorkerReady
 {

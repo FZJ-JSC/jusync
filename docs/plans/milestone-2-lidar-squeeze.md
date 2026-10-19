@@ -310,3 +310,39 @@ mode.
   client merges 2.5M batches into a growing 10M octree incrementally
   (remote-desktop style quality ramp). Real client+middleware work; the
   stride mechanism built in Task 5 is its foundation.
+
+## Task 8 — Progressive refinement (#3) — IMPLEMENTED 2026-10-19
+
+- Wire: `JusyncRawGeoHeader` v2 appends the subset lattice
+  (`subset_index`, `subset_count`, `full_num_points`). Whole-frame payloads
+  still serialize the byte-identical v1 layout with `version == 1`, so
+  refinement-OFF traffic (and every older client) is untouched; v2 appears
+  only when `JUSYNC_RAWGEO_REFINE=1` AND stride > 1 (all 3 header copies
+  synced). Old clients reject v2 cleanly (magic+version gate), never garble.
+- Sender (`UsdBridgeUsdWriter::TryStoreRawGeo`): base coarse stride-S frame
+  per commit as before; complementary subsets (`<key>_s<k>.geo`, k = 1..S-1,
+  points at source indices i % S == k) drain from a per-(key, timeStep) queue
+  — `JUSYNC_RAWGEO_REFINE_PER_COMMIT` (default 1) per commit. Looping
+  animations resume each timestep where the last pass left off (window 64
+  times). Idle-quiet flush delivers all still-pending subsets at once — it
+  replaces the old single full-res burst spike with paced chunks. Purge of a
+  clip also drops its `_s` keys + queues.
+  - 2026-10-19 fix: `RemoveStoreEntriesForFile` only swept the `.usd/.usda`
+    twins when a clip/manifest `.usda` was removed; `<key>.geo` and
+    `<key>_s<k>.geo` stayed in the memory store. Every later client startup
+    spawned them as extra point clouds that no live part ever updated (the
+    "old point cloud is never deleted" symptom). The purge now treats the
+    whole clip family (`.usd`, `.usda`, `.geo`, `_s<k>.geo`) as one unit, no
+    matter which member triggered the delete.
+- Client (UE plugin, `JUSYNCParseRawGeoBuffer`): lattice merge
+  (scatter payload point j to slot k + j·S) makes the completed cloud
+  point-for-point identical to a stride-1 stream. Coarse (subset 0) emits
+  immediately; intermediates are suppressed; completion emits as a normal
+  live update (animation winner logic swaps coarse → full). Budget
+  `jusync.RawGeo.RefineBudgetKPoints` (default 16384k pts) with LRU eviction;
+  over-budget streams degrade to coarse-only, never garbage. Policy CVar
+  `jusync.RawGeo.Progressive` (2 = coarse+full, 1 = every subset, 0 = off).
+  Merges flush on middleware (re)connect/deinit; `DetectTimeStepOrder` maps
+  `_s<k>` files onto their base timestep.
+- Sender env: `JUSYNC_RAWGEO_REFINE` / `JUSYNC_RAWGEO_REFINE_PER_COMMIT`
+  (launcher script defaults: 1 / 1, overridable; old-client hosts set 0).
