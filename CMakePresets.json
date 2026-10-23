@@ -14,8 +14,7 @@
         "ENABLE_AVX512": "ON",
         "ENABLE_AVX2": "ON",
         "ENABLE_SSE4": "ON",
-        "BUILD_TESTS": "OFF",
-        "BUILD_JUSYNC_Receiver_GUI": "OFF"
+        "BUILD_TESTS": "OFF"
       }
     }
   ],

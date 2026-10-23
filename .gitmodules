@@ -11,12 +11,6 @@
 	path = external/stb
 	url = https://github.com/nothings/stb.git
 
-[submodule "external/imgui"]
-	path = external/imgui
-	url = https://github.com/ocornut/imgui.git
-	branch = docking
-	update = merge
-
 [submodule "external/nlohmann"]
 	path = external/nlohmann
 	url = https://github.com/nlohmann/json.git

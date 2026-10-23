@@ -449,13 +449,6 @@ endif()
 # ------------------------------
 # Optional Components
 # ------------------------------
-# JUSYNC GUI option
-option(BUILD_JUSYNC_Receiver_GUI "Build the Dear ImGui GUI for the middleware" OFF)
-if(BUILD_JUSYNC_Receiver_GUI)
-    add_subdirectory(tools/ReceiverUI)
-endif()
-
-# ------------------------------
 # USD Validation Test Tool (Enhanced)
 # ------------------------------
 option(BUILD_TESTS "Build test and validation applications" ON)
@@ -732,7 +725,6 @@ message(STATUS "  OpenSSL Libraries: ${OPENSSL_LIBRARIES}")
 message(STATUS "")
 message(STATUS "Options:")
 message(STATUS "  BUILD_TESTS: ${BUILD_TESTS}")
-message(STATUS "  BUILD_JUSYNC_Receiver_GUI: ${BUILD_JUSYNC_Receiver_GUI}")
 message(STATUS "  C-wrapper: ENABLED")
 message(STATUS "  ENABLE_CUDA: ${ENABLE_CUDA}")
 if(ENABLE_CUDA AND CUDA_FOUND)

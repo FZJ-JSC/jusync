@@ -152,7 +152,7 @@ int main(int argc, char** argv)
           suzVerts, binVerts);
 
     // --- ASCII baseline: embedded known-good .usda (same fixture the
-    // ReceiverUI smoke test uses; tinyusdz's own ascii models use primvar
+    // tinyusdz's own ascii models use primvar
     // syntax this lightusd fork rejects, so they are not valid baselines).
     static const std::string asciiCube = R"(#usda 1.0
 def Mesh "TestCube"

@@ -16,7 +16,7 @@ A ZeroMQ DEALER client for sending USD files, images, and structured messages to
 
 - Python 3.6+
 - ZeroMQ Python bindings: `pyzmq`
-- Access to a running ANARI USD Middleware server (ReceiverUI)
+- Access to a running ANARI USD Middleware server
 
 ## Usage
 

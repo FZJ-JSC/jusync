@@ -136,7 +136,6 @@ We gratefully acknowledge the Bundesministerium für Forschung, Technologie und 
 - [x] **Worker discovery**: Query worker count, status, hostname, GPU info via ZMQ
 - [x] **Memory safety**: RAII patterns, pointer validation, bounds checking, atomic stats
 - [x] **Duplicate prevention**: Filename+rank duplicate detection and processing prevention
-- [x] **GUI testing tool**: Dear ImGui-based application at `tools/ReceiverUI`
 - [x] **CTest + GitHub Actions CI**: Separate CMake/CTest checks for build, USD, collision, error, performance, integration, and per-file tests
 
 ### Partial / Host-Side Features
@@ -166,7 +165,6 @@ jusync/
 │   │   └── usd_samples/
 │   └── scripts/
 ├── tools/
-│   └── ReceiverUI/           Optional Dear ImGui testing app
 ├── external/                 Git submodules and bundled dependencies
 ├── UnrealPlugin/
 │   └── JUSYNC/               Plugin metadata / sync helper location
@@ -201,7 +199,6 @@ The middleware repository produces the shared library and headers consumed by th
 | **zstd** | Decompress broker-compressed USD payloads | Optional at runtime, enabled by `ENABLE_ZSTD=ON` |
 | **TBB** | Optional parallel processing acceleration | Used if found by CMake; sequential fallback if absent |
 | **CUDA** | Optional GPU acceleration | Vertex/normal/UV transforms for large meshes |
-| **Dear ImGui** | Optional GUI testing tool | `BUILD_JUSYNC_Receiver_GUI=ON` |
 
 > Note: OpenSSL is still required by the build. XXH3 replaced SHA-256 for fast change detection, but it did not remove the OpenSSL dependency.
 
@@ -292,7 +289,6 @@ cmake --build build --config Release
 | `CUDA_ARCHITECTURES` | `60;61;70;75;80;86` | CUDA architectures. Override for CUDA 13 / newer GPUs |
 | `ENABLE_ZSTD` | `ON` | Enable zstd decompression of broker USD payloads |
 | `BUILD_TESTS` | `ON` | Build `usd_validation_tool` and register CTest tests |
-| `BUILD_JUSYNC_Receiver_GUI` | `OFF` | Build optional Dear ImGui receiver GUI |
 | `OPENSSL_ROOT_DIR` | auto | Explicit OpenSSL root if `find_package(OpenSSL)` fails |
 | `CMAKE_EXPORT_COMPILE_COMMANDS` | `OFF` | Export `compile_commands.json` for clang-tidy / clangd |
 
@@ -700,9 +696,6 @@ jusync-uesample
       include/AnariUsdMessages.h \
       include/AnariUsdProtocol.h \
       include/UsdProcessor.h \
-      include/ParallelDownloadManager.h \
-      include/ParallelDownloader.h \
-      include/MemoryMonitor.h \
       include/CollisionProcessor.h \
       include/HashVerifier.h \
       include/GpuContext.h \
@@ -1219,41 +1212,6 @@ typedef struct {
 
 ---
 
-## GUI Testing Application
-
-An optional Dear ImGui-based testing tool lives in:
-
-```
-tools/ReceiverUI
-```
-
-Build it with:
-
-```bash
-cmake -S . -B build -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_JUSYNC_Receiver_GUI=ON
-
-cmake --build build --parallel
-```
-
-Run:
-
-```bash
-./build/tools/ReceiverUI/ReceiverUI
-```
-
-Features:
-
-- Real-time connection status and ZeroMQ state
-- File reception monitoring
-- 3D model viewer for loaded USD
-- Mesh data inspector
-- Texture preview and gradient extraction
-- Performance metrics
-- Point-cloud visualization
-
----
 
 ## USD Processing Capabilities
 
