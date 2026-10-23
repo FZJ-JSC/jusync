@@ -1,6 +1,6 @@
 # RawGeo v3 — Curve Topology for Streamlines
 
-- **Status:** Draft for review
+- **Status:** Implemented on `feat/rawgeo-v3-curves`
 - **Date:** 2026-10-23
 - **Branches:** `feat/rawgeo-v3-curves` in `ANARI-USD`, `jusync`, `jusync-uesample`
 - **Related:** `docs/plans/realtime-streaming.md`, `docs/plans/milestone-2-lidar-squeeze.md`
@@ -467,6 +467,48 @@ hand-placed files with `_r` suffixes.
 - UE auto-quit smoke run with the sample project (existing harness) before/after.
 - Point-cloud RawGeo path re-tested at 10M points (the milestone-2 case) to prove
   the refactor did not change behavior.
+
+### 9.5 Results (branch `feat/rawgeo-v3-curves`)
+
+Fixtures generated with the UE-bundled Python are read twice: the generator's own
+`--verify` and an independent host program that memcpys the C++ `JusyncRawGeoHeader`
+and calls `valid()`. Every generated file passes both.
+
+| # | Scenario | Evidence on this branch |
+|---|---|---|
+| 1 | non-MPI, `S = 1` | `rawgeo_v3_solo` (1 file) passes Python + C++ `valid()`; `JUSYNC.RawGeo.CurveSingle` |
+| 2 | non-MPI, `S = 4` | `rawgeo_v3` (4 files) passes both; `CurveMerge`, `CurveEmptySubset` |
+| 3 | `mpisize = 1` | generator without `--rank` emits no `_r` suffix and matches row 1; `RankParse` fallback |
+| 4 | MPI 2 ranks, `S = 1` | `rawgeo_v3_mpi_s1` (2 files: `_r0`, `_r1`) passes both; `CurveRank` |
+| 5 | MPI 2 ranks, `S = 4` | `rawgeo_v3_mpi_s4` (8 files) passes both; `CurveRank` rank-scoped merges |
+| 6 | MPI, one rank with `C = 0` | sender rejects `NumCurveLengths == 0` and falls back to USD (gate in `TryStoreRawGeo`, so that rank emits no `.geo`); `CurveEmptySubset` covers empty payloads |
+| 7 | MPI, `C < S` | rank 1 of `rawgeo_v3_mpi_s4` has `C = 2`, `S = 4` (2 empty subsets) and verifies; `CurveEmptySubset` |
+| 8 | out-of-order subsets | `CurveMerge` ingests `s1` before `s0`; colors/widths upgrade for late arrival (`c21f03a`, `0d4924c`) |
+| 9 | rank dies mid-frame | 30 s sweep plus budget eviction in `JUSYNCFlushRawGeoMerges`; covered by code review, not a clock-driven test |
+| 10 | old client + v3 file | client accepts versions 1/2/3 and rejects unknown ones; v3 `valid()`/version unit tests; a v2-only client rejects version 3 before reading the payload |
+
+Other regression evidence:
+
+- `ctest --test-dir build -C Release`: 13/13 pass, including `rawgeo_v3` and
+  `binary_static_check`. On Windows the static check searches `lib<name>.dll` while
+  CMake produces `anari_usd_middleware.dll`; copying the DLL to the searched name in
+  the build tree makes the two environment-only tests pass (no source change).
+- UE automation: 11/11 `JUSYNC.RawGeo.*` tests pass after the merge-flag upgrade and
+  the sender-to-client broker check.
+- Sender-to-client E2E: a temporary ANARI `curve` sender (image
+  `jusync-curve-sender:test`) emitted four v3 `.geo` subsets through a live ZMQ
+  broker. `JUSYNC.RawGeo.BrokerCurveE2E` used the middleware C API to list and
+  download all four files, merged them in the client, and asserted a completed
+  `CurveStream` / `BasisCurves` mesh with 120 vertices, 192 triangles, and baked
+  colors. The test is opt-in through `JUSYNC_E2E_ENDPOINT`; without it the test
+  reports a skip and does not touch the network.
+- Point-cloud RawGeo now uses the v2 header (136 bytes) with the single-subset lattice
+  fields (`subset_index = 0`, `subset_count = 1`, `full_num_points = n`). Before this
+  branch the sender stamped v1 and the client synthesized those same defaults in its
+  v1 branch, so rendering behavior is unchanged. `JUSYNC_RAWGEO_VERSION` (= 3) is only
+  used for curve payloads.
+- Sender: `jusync-sender:rawgeo-v3` compiles `UsdBridgeUsdWriter.cpp` against OpenUSD
+  25.11 in the Docker image (the host has no USD toolchain).
 
 ## 10. File map
 

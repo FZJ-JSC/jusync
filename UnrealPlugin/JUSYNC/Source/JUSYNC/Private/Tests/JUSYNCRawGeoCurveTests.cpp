@@ -1,8 +1,10 @@
 #include "Misc/AutomationTest.h"
 
 #include "HAL/IConsoleManager.h"
+#include "HAL/PlatformMisc.h"
 #include "RawGeo/JUSYNCRawGeoCurves.h"
 #include "JUSYNCElementNames.h"
+#include "AnariUsdMiddleware_C.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -482,6 +484,127 @@ bool FJUSYNCRawGeoCurveSidesTest::RunTest(const FString& Parameters)
 
     SetIntCurveCVar(TEXT("jusync.Curve.Sides"), 4);
     return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJUSYNCRawGeoBrokerCurveE2ETest, "JUSYNC.RawGeo.BrokerCurveE2E",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJUSYNCRawGeoBrokerCurveE2ETest::RunTest(const FString& Parameters)
+{
+    // This test needs a live RawGeo v3 sender. Set JUSYNC_E2E_ENDPOINT to opt in;
+    // normal automation runs skip it without touching the network.
+    const FString Endpoint = FPlatformMisc::GetEnvironmentVariable(TEXT("JUSYNC_E2E_ENDPOINT"));
+    if (Endpoint.IsEmpty())
+    {
+        AddInfo(TEXT("Skipped: set JUSYNC_E2E_ENDPOINT to a live RawGeo v3 broker to run this test"));
+        return true;
+    }
+
+    JUSYNCRawGeoCurves::FlushMerges();
+    SetIntCurveCVar(TEXT("jusync.RawGeo.CurveProgressive"), 2);
+
+    auto Cleanup = []()
+    {
+        DisconnectFromBroker_C();
+        ShutdownMiddleware_C();
+    };
+
+    FTCHARToUTF8 EndpointUtf8(*Endpoint);
+    if (InitializeMiddleware_C(EndpointUtf8.Get()) != 1)
+    {
+        AddError(TEXT("failed to initialize JUSYNC middleware"));
+        return false;
+    }
+
+    if (ConnectToBroker_C(EndpointUtf8.Get(), 5000) != 1)
+    {
+        AddError(FString::Printf(TEXT("failed to connect to broker at %s"), *Endpoint));
+        Cleanup();
+        return false;
+    }
+
+    char** Names = nullptr;
+    uint64_t* Sizes = nullptr;
+    int32_t* Ranks = nullptr;
+    uint64_t* HashLo = nullptr;
+    uint64_t* HashHi = nullptr;
+    size_t Count = 0;
+    if (RequestFileListWithSizesAndRanks_C(-1, &Names, &Sizes, &Ranks, &HashLo, &HashHi,
+            &Count, 5000) != 1)
+    {
+        AddError(TEXT("failed to request file list from broker"));
+        Cleanup();
+        return false;
+    }
+
+    TArray<int32> GeoIndices;
+    for (size_t Index = 0; Index < Count; ++Index)
+    {
+        const FString File = UTF8_TO_TCHAR(Names[Index]);
+        if (File.EndsWith(TEXT(".geo")))
+        {
+            GeoIndices.Add(static_cast<int32>(Index));
+        }
+    }
+    TestTrue(TEXT("broker exposes curve subset files"), GeoIndices.Num() >= 4);
+
+    FJUSYNCCompactMeshRef Completed;
+    for (const int32 Index : GeoIndices)
+    {
+        const FString File = UTF8_TO_TCHAR(Names[Index]);
+        const int32 Rank = Ranks ? Ranks[Index] : 0;
+
+        unsigned char* Data = nullptr;
+        size_t Size = 0;
+        if (RequestFile_C(TCHAR_TO_UTF8(*File), Rank, &Data, &Size, 5000) != 1)
+        {
+            AddError(FString::Printf(TEXT("failed to download %s (rank %d)"), *File, Rank));
+            continue;
+        }
+
+        TArray<uint8> Payload;
+        Payload.Append(Data, static_cast<int32>(Size));
+        FreeBuffer_C(Data);
+
+        anari_usd_protocol::JusyncRawGeoHeader Header{};
+        if (!ReadHeader(Payload, Header))
+        {
+            AddError(FString::Printf(TEXT("%s is shorter than a RawGeo header"), *File));
+            continue;
+        }
+        TestEqual(TEXT("broker payload is RawGeo v3"), Header.version,
+            anari_usd_protocol::JUSYNC_RAWGEO_VERSION);
+        TestEqual(TEXT("broker payload uses curve topology"), Header.topology,
+            anari_usd_protocol::JUSYNC_RAWGEO_TOPOLOGY_LINEAR_CURVES);
+
+        FJUSYNCCompactMeshRef Mesh;
+        if (!JUSYNCRawGeoCurves::IngestAndBuild(Payload, *File, Header, Mesh))
+        {
+            AddError(FString::Printf(TEXT("failed to ingest %s"), *File));
+            continue;
+        }
+        if (Mesh.IsValid() && !Mesh->bTransient)
+        {
+            Completed = Mesh;
+        }
+    }
+
+    FreeFileListWithSizesAndRanks_C(Names, Sizes, Ranks, HashLo, HashHi, Count);
+
+    TestTrue(TEXT("all curve subsets complete a frame"), Completed.IsValid());
+    if (Completed.IsValid())
+    {
+        TestEqual(TEXT("element name"), Completed->ElementName, FString(TEXT("CurveStream")));
+        TestEqual(TEXT("type name"), Completed->TypeName, FString(TEXT("BasisCurves")));
+        TestEqual(TEXT("six curves of five nodes become four-sided tubes"),
+            Completed->Points.Num(), 6 * 5 * 4);
+        TestEqual(TEXT("tube band triangle count"), Completed->Triangles.Num() / 3,
+            6 * (5 - 1) * 4 * 2);
+        TestTrue(TEXT("sender colors are baked"), Completed->bHasBakedColors);
+    }
+
+    Cleanup();
+    return !HasAnyErrors();
 }
 
 #endif // WITH_DEV_AUTOMATION_TESTS
