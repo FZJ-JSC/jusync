@@ -10,7 +10,7 @@
 	"DocsURL": "https://github.com/staticx-g7",
 	"MarketplaceURL": "",
 	"SupportURL": "https://github.com/staticx-g7",
-	"EngineVersion": "5.7.0",
+	"EngineVersion": "5.8.0",
 	"CanContainContent": true,
 	"Installed": false,
 	"Modules": [
@@ -27,11 +27,11 @@
 	"Plugins": [
 		{
 			"Name": "RealtimeMeshComponent",
-			"Enabled": false,
-			"TargetAllowList": [
-				"UE5.4",
-				"UE5.5"
-			]
+			"Enabled": true
+		},
+		{
+			"Name": "LidarPointCloud",
+			"Enabled": true
 		}
 	]
 }
