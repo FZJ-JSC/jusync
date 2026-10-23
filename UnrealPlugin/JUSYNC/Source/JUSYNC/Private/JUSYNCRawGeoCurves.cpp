@@ -1,5 +1,7 @@
 #include "JUSYNCRawGeoCurves.h"
 
+#include "HAL/IConsoleManager.h"
+#include "HAL/PlatformTime.h"
 #include "JUSYNCModule.h"
 
 namespace
@@ -153,6 +155,206 @@ namespace
             }
         }
     }
+
+    void EmitCurveTubes(const FJUSYNCRawGeoCurvePayload& Payload, FJUSYNCCompactMeshRef& OutMesh)
+    {
+        FJUSYNCCompactMeshRef Mesh = MakeShared<FJUSYNCCompactMeshData, ESPMode::ThreadSafe>();
+        BuildTubes(Payload, *Mesh);
+        OutMesh = MoveTemp(Mesh);
+    }
+
+    constexpr double GCurveMergeMaxAgeSeconds = 30.0;    constexpr int64 GCurveMergeDefaultBudgetKPoints = 16384;
+    constexpr int32 GCurveMaxSubsets = 8;
+
+    TAutoConsoleVariable<int32> CVarJusyncCurveProgressive(
+        TEXT("jusync.RawGeo.CurveProgressive"), 2,
+        TEXT("RawGeo v3 curve refinement policy. 2 (default) = coarse subset 0 now, full mesh on completion; 1 = also emit after every subset; 0 = coarse only, drop refinements."),
+        ECVF_Default);
+
+    // One frame's curve lattice. Curves are stored per ordinal (not per subset
+    // point), so concatenating in ordinal order is the same geometry a single
+    // S=1 payload carries.
+    struct FJUSYNCRawGeoCurveMerge
+    {
+        int64 SubsetCount = 0;
+        int64 FullCurveCount = 0;
+        int64 FullNumPoints = 0;
+        int64 Filled = 0;
+        double Time = 0.0;
+        double LastUseSeconds = 0.0;
+        FString PrimName;
+        bool bHasColors = false;
+        bool bHasWidths = false;
+        TArray<uint8> FilledSlots;
+        TArray<TArray<FVector3f>> Points;
+        TArray<TArray<FColor>> Colors;
+        TArray<TArray<float>> Widths;
+    };
+
+    FCriticalSection GRawGeoCurveMergeLock;
+    TMap<FString, FJUSYNCRawGeoCurveMerge> GRawGeoCurveMerges;
+    int64 GRawGeoCurveMergeTotalPoints = 0;
+    TSet<FString> GRawGeoCurveWarnedKeys;
+
+    int64 CurveMergeBudgetPoints()
+    {
+        if (const IConsoleVariable* Var =
+            IConsoleManager::Get().FindConsoleVariable(TEXT("jusync.RawGeo.RefineBudgetKPoints")))
+        {
+            return FMath::Max<int64>(1024, static_cast<int64>(Var->GetInt()) * 1024);
+        }
+        return GCurveMergeDefaultBudgetKPoints * 1024;
+    }
+
+    // Caller holds the merge lock.
+    void PruneCurveMergesLocked(double Now)
+    {
+        for (auto It = GRawGeoCurveMerges.CreateIterator(); It; ++It)
+        {
+            if (Now - It.Value().LastUseSeconds > GCurveMergeMaxAgeSeconds)
+            {
+                GRawGeoCurveMergeTotalPoints -= It.Value().FullNumPoints;
+                It.RemoveCurrent();
+            }
+        }
+    }
+
+    // Caller holds the merge lock. Drops least-recently-used frames until the
+    // new one fits; false when the stream alone is over the shared budget.
+    bool CurveMergeKeyFitsBudgetLocked(int64 FullNumPoints)
+    {
+        const int64 Budget = CurveMergeBudgetPoints();
+        if (FullNumPoints > Budget)
+        {
+            return false;
+        }
+        while (GRawGeoCurveMergeTotalPoints + FullNumPoints > Budget && GRawGeoCurveMerges.Num() > 0)
+        {
+            FString OldestKey;
+            double Oldest = TNumericLimits<double>::Max();
+            for (const TPair<FString, FJUSYNCRawGeoCurveMerge>& Pair : GRawGeoCurveMerges)
+            {
+                if (Pair.Value.LastUseSeconds < Oldest)
+                {
+                    Oldest = Pair.Value.LastUseSeconds;
+                    OldestKey = Pair.Key;
+                }
+            }
+            if (OldestKey.IsEmpty())
+            {
+                break;
+            }
+            if (const FJUSYNCRawGeoCurveMerge* Victim = GRawGeoCurveMerges.Find(OldestKey))
+            {
+                GRawGeoCurveMergeTotalPoints -= Victim->FullNumPoints;
+            }
+            GRawGeoCurveMerges.Remove(OldestKey);
+        }
+        return GRawGeoCurveMergeTotalPoints + FullNumPoints <= Budget;
+    }
+
+    bool ScatterCurveSubset(FJUSYNCRawGeoCurveMerge& Merge, const FJUSYNCRawGeoCurvePayload& Payload)
+    {
+        const int32 Subset = static_cast<int32>(Payload.SubsetIndex);
+        const int32 Count = static_cast<int32>(Payload.SubsetCount);
+        if (!Merge.FilledSlots.IsValidIndex(Subset))
+        {
+            return false;
+        }
+
+        int32 Start = 0;
+        for (int32 i = 0; i < Payload.CurveCounts.Num(); ++i)
+        {
+            const int64 Ordinal = static_cast<int64>(Subset) + static_cast<int64>(i) * Count;
+            if (Ordinal < 0 || Ordinal >= Merge.FullCurveCount)
+            {
+                return false;
+            }
+            const int32 Length = Payload.CurveCounts[i];
+            if (Length < 0 || Start + Length > Payload.Points.Num())
+            {
+                return false;
+            }
+
+            TArray<FVector3f>& DstPoints = Merge.Points[static_cast<int32>(Ordinal)];
+            DstPoints.Reset(Length);
+            DstPoints.Append(Payload.Points.GetData() + Start, Length);
+
+            if (Merge.bHasColors)
+            {
+                TArray<FColor>& DstColors = Merge.Colors[static_cast<int32>(Ordinal)];
+                DstColors.Reset(Length);
+                if (Payload.bHasColors && Payload.Colors.Num() >= Start + Length)
+                {
+                    DstColors.Append(Payload.Colors.GetData() + Start, Length);
+                }
+                else
+                {
+                    DstColors.Init(FColor::White, Length);
+                }
+            }
+            if (Merge.bHasWidths)
+            {
+                TArray<float>& DstWidths = Merge.Widths[static_cast<int32>(Ordinal)];
+                DstWidths.Reset(Length);
+                if (Payload.bHasWidths && Payload.Widths.Num() >= Start + Length)
+                {
+                    DstWidths.Append(Payload.Widths.GetData() + Start, Length);
+                }
+                else
+                {
+                    DstWidths.Init(GCurveDefaultRadius, Length);
+                }
+            }
+            Start += Length;
+        }
+
+        if (Merge.FilledSlots[Subset] == 0)
+        {
+            Merge.FilledSlots[Subset] = 1;
+            ++Merge.Filled;
+        }
+        return true;
+    }
+
+    // Concatenates every filled ordinal in order, so an incomplete merge (policy
+    // 1) shows the curves that have arrived without holes in the middle.
+    void BuildMergedCurvePayload(const FJUSYNCRawGeoCurveMerge& Merge, FJUSYNCRawGeoCurvePayload& Out)
+    {
+        Out.ElementName = Merge.PrimName;
+        Out.Time = Merge.Time;
+        Out.SubsetIndex = 0;
+        Out.SubsetCount = Merge.SubsetCount;
+        Out.FullCurveCount = Merge.FullCurveCount;
+        Out.FullNumPoints = Merge.FullNumPoints;
+        Out.bHasColors = Merge.bHasColors;
+        Out.bHasWidths = Merge.bHasWidths;
+
+        for (int64 Curve = 0; Curve < Merge.FullCurveCount; ++Curve)
+        {
+            const int64 Slot = Curve % Merge.SubsetCount;
+            if (!Merge.FilledSlots.IsValidIndex(static_cast<int32>(Slot)) ||
+                Merge.FilledSlots[static_cast<int32>(Slot)] == 0)
+            {
+                continue;
+            }
+            const TArray<FVector3f>& CurvePoints = Merge.Points[static_cast<int32>(Curve)];
+            if (CurvePoints.Num() < 2)
+            {
+                continue;
+            }
+            Out.CurveCounts.Add(CurvePoints.Num());
+            Out.Points.Append(CurvePoints);
+            if (Out.bHasColors && Merge.Colors.IsValidIndex(static_cast<int32>(Curve)))
+            {
+                Out.Colors.Append(Merge.Colors[static_cast<int32>(Curve)]);
+            }
+            if (Out.bHasWidths && Merge.Widths.IsValidIndex(static_cast<int32>(Curve)))
+            {
+                Out.Widths.Append(Merge.Widths[static_cast<int32>(Curve)]);
+            }
+        }
+    }
 }
 
 namespace JUSYNCRawGeoCurves
@@ -256,6 +458,7 @@ namespace JUSYNCRawGeoCurves
         Out.SubsetIndex = static_cast<int64>(Hdr.subset_index);
         Out.SubsetCount = static_cast<int64>(Hdr.subset_count);
         Out.FullCurveCount = static_cast<int64>(Hdr.full_curve_count);
+        Out.FullNumPoints = static_cast<int64>(Hdr.full_num_points);
         Out.bHasColors = Hdr.color_components != 0;
         Out.bHasWidths = Hdr.width_components != 0;
         return true;
@@ -266,7 +469,6 @@ namespace JUSYNCRawGeoCurves
                         FJUSYNCCompactMeshRef& OutMesh)
     {
         OutMesh.Reset();
-        (void)Filename;
 
         FJUSYNCRawGeoCurvePayload Payload;
         if (!ParsePayload(Buffer.GetData(), static_cast<SIZE_T>(Buffer.Num()), Hdr, Payload))
@@ -277,9 +479,107 @@ namespace JUSYNCRawGeoCurves
             return false;
         }
 
-        FJUSYNCCompactMeshRef Mesh = MakeShared<FJUSYNCCompactMeshData, ESPMode::ThreadSafe>();
-        BuildTubes(Payload, *Mesh);
-        OutMesh = MoveTemp(Mesh);
+        const int64 Subset = Payload.SubsetIndex;
+        const int64 Count = FMath::Max<int64>(1, Payload.SubsetCount);
+        const int64 Curves = Payload.FullCurveCount;
+        if (Subset < 0 || Subset >= Count || Count > GCurveMaxSubsets || Curves < 0 ||
+            static_cast<int64>(Payload.CurveCounts.Num()) > Curves)
+        {
+            return false;
+        }
+
+        const int32 Policy = CVarJusyncCurveProgressive.GetValueOnAnyThread();
+        if (Policy == 0)
+        {
+            // Coarse-only mode: keep subset 0, drop every refinement.
+            if (Subset == 0)
+            {
+                EmitCurveTubes(Payload, OutMesh);
+            }
+            return true;
+        }
+
+        if (Count == 1)
+        {
+            EmitCurveTubes(Payload, OutMesh);
+            return true;
+        }
+
+        const double Now = FPlatformTime::Seconds();
+        const FString Key = StripSubsetSuffix(Filename);
+
+        FScopeLock Lock(&GRawGeoCurveMergeLock);
+        PruneCurveMergesLocked(Now);
+
+        FJUSYNCRawGeoCurveMerge* Merge = GRawGeoCurveMerges.Find(Key);
+        if (Merge && (Merge->SubsetCount != Count || Merge->FullCurveCount != Curves))
+        {
+            if (!GRawGeoCurveWarnedKeys.Contains(Key))
+            {
+                GRawGeoCurveWarnedKeys.Add(Key);
+                UE_LOG(LogJUSYNC, Warning,
+                    TEXT("RawGeo curve merge '%s' restarted: subset metadata changed (S %d->%d, C %d->%d)"),
+                    *Key, static_cast<int32>(Merge->SubsetCount), static_cast<int32>(Count),
+                    static_cast<int32>(Merge->FullCurveCount), static_cast<int32>(Curves));
+            }
+            GRawGeoCurveMergeTotalPoints -= Merge->FullNumPoints;
+            GRawGeoCurveMerges.Remove(Key);
+            Merge = nullptr;
+        }
+
+        if (Merge == nullptr)
+        {
+            if (!CurveMergeKeyFitsBudgetLocked(Payload.FullNumPoints))
+            {
+                // Over the shared budget: show this frame's coarse subset and
+                // let its refinements fall away.
+                if (Subset == 0)
+                {
+                    EmitCurveTubes(Payload, OutMesh);
+                }
+                return true;
+            }
+
+            FJUSYNCRawGeoCurveMerge NewMerge;
+            NewMerge.SubsetCount = Count;
+            NewMerge.FullCurveCount = Curves;
+            NewMerge.FullNumPoints = Payload.FullNumPoints;
+            NewMerge.Time = Payload.Time;
+            NewMerge.LastUseSeconds = Now;
+            NewMerge.PrimName = Payload.ElementName;
+            NewMerge.bHasColors = Payload.bHasColors;
+            NewMerge.bHasWidths = Payload.bHasWidths;
+            NewMerge.FilledSlots.SetNumZeroed(static_cast<int32>(Count));
+            NewMerge.Points.SetNum(static_cast<int32>(Curves));
+            NewMerge.Colors.SetNum(static_cast<int32>(Curves));
+            NewMerge.Widths.SetNum(static_cast<int32>(Curves));
+            Merge = &GRawGeoCurveMerges.Add(Key, MoveTemp(NewMerge));
+            GRawGeoCurveMergeTotalPoints += Merge->FullNumPoints;
+        }
+
+        Merge->LastUseSeconds = Now;
+
+        if (!ScatterCurveSubset(*Merge, Payload))
+        {
+            GRawGeoCurveMergeTotalPoints -= Merge->FullNumPoints;
+            GRawGeoCurveMerges.Remove(Key);
+            return false;
+        }
+
+        const bool bComplete = Merge->Filled == Merge->SubsetCount;
+        const bool bEmit = (Policy == 1) || (Subset == 0) || bComplete;
+        if (bEmit)
+        {
+            FJUSYNCRawGeoCurvePayload Merged;
+            BuildMergedCurvePayload(*Merge, Merged);
+            EmitCurveTubes(Merged, OutMesh);
+        }
+
+        if (bComplete)
+        {
+            GRawGeoCurveMergeTotalPoints -= Merge->FullNumPoints;
+            GRawGeoCurveMerges.Remove(Key);
+        }
         return true;
     }
 
@@ -319,5 +619,9 @@ namespace JUSYNCRawGeoCurves
 
     void FlushMerges()
     {
+        FScopeLock Lock(&GRawGeoCurveMergeLock);
+        GRawGeoCurveMerges.Empty();
+        GRawGeoCurveMergeTotalPoints = 0;
+        GRawGeoCurveWarnedKeys.Empty();
     }
 }

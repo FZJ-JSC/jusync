@@ -13,6 +13,7 @@ struct FJUSYNCRawGeoCurvePayload
     int64 SubsetIndex = 0;
     int64 SubsetCount = 1;
     int64 FullCurveCount = 0;
+    int64 FullNumPoints = 0;
     bool bHasColors = false;
     bool bHasWidths = false;
     TArray<int32> CurveCounts;

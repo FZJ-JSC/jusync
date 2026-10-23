@@ -2015,6 +2015,7 @@ void JUSYNCFlushRawGeoMerges()
     FScopeLock Lock(&GRawGeoMergeLock);
     GRawGeoMerges.Empty();
     GRawGeoMergeTotalPoints = 0;
+    JUSYNCRawGeoCurves::FlushMerges();
 }
 #endif // WITH_ANARI_USD_MIDDLEWARE
 

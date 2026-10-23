@@ -1,6 +1,7 @@
 #include "Misc/AutomationTest.h"
 
 #include "JUSYNCRawGeoCurves.h"
+#include "JUSYNCElementNames.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -183,6 +184,197 @@ bool FJUSYNCRawGeoCurveDegenerateTest::RunTest(const FString& Parameters)
         TestTrue(TEXT("normal is finite"), FMath::IsFinite(Normal.X) && FMath::IsFinite(Normal.Y) && FMath::IsFinite(Normal.Z));
     }
 
+    return true;
+}
+
+namespace
+{
+    bool IngestCurveBuffer(const TArray<uint8>& Buffer, const TCHAR* Filename,
+                           FJUSYNCCompactMeshRef& OutMesh)
+    {
+        anari_usd_protocol::JusyncRawGeoHeader Header{};
+        if (!ReadHeader(Buffer, Header))
+        {
+            return false;
+        }
+        return JUSYNCRawGeoCurves::IngestAndBuild(Buffer, Filename, Header, OutMesh);
+    }
+
+    FVector3f CurveRingCenter(const FJUSYNCCompactMeshData& Mesh, int32 NodeIndex)
+    {
+        const int32 Base = NodeIndex * 4;
+        return (Mesh.Points[Base] + Mesh.Points[Base + 1] + Mesh.Points[Base + 2] + Mesh.Points[Base + 3])
+            * 0.25f;
+    }
+
+    TArray<TArray<FVector3f>> MergeCurves()
+    {
+        TArray<TArray<FVector3f>> Curves;
+        Curves.Add({ FVector3f(1.0f, 1.0f, 1.0f), FVector3f(2.0f, 1.0f, 2.0f) });
+        Curves.Add({ FVector3f(3.0f, 1.0f, 3.0f), FVector3f(4.0f, 1.0f, 4.0f), FVector3f(5.0f, 1.0f, 5.0f) });
+        Curves.Add({ FVector3f(6.0f, 1.0f, 6.0f), FVector3f(7.0f, 1.0f, 7.0f) });
+        Curves.Add({ FVector3f(8.0f, 1.0f, 8.0f), FVector3f(9.0f, 1.0f, 9.0f),
+                     FVector3f(10.0f, 1.0f, 10.0f), FVector3f(11.0f, 1.0f, 11.0f) });
+        return Curves;
+    }
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJUSYNCRawGeoCurveMergeTest, "JUSYNC.RawGeo.CurveMerge",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJUSYNCRawGeoCurveMergeTest::RunTest(const FString& Parameters)
+{
+    JUSYNCRawGeoCurves::FlushMerges();
+
+    const TArray<TArray<FVector3f>> Curves = MergeCurves();
+    const int32 TotalNodes = 2 + 3 + 2 + 4;
+
+    FJUSYNCCompactMeshRef Mesh;
+    TestTrue(TEXT("subset 1 ingests"),
+        IngestCurveBuffer(MakeCurveBuffer(Curves, 1, 2), TEXT("clips/Wave_Geom__0_s1.geo"), Mesh));
+    TestFalse(TEXT("subset 1 alone is not a completed frame"), Mesh.IsValid());
+
+    TestTrue(TEXT("subset 0 ingests"),
+        IngestCurveBuffer(MakeCurveBuffer(Curves, 0, 2), TEXT("clips/Wave_Geom__0_s0.geo"), Mesh));
+    TestTrue(TEXT("completion emits a mesh"), Mesh.IsValid());
+    if (Mesh.IsValid())
+    {
+        TestEqual(TEXT("merged vertex count"), Mesh->Points.Num(), TotalNodes * 4);
+        TestEqual(TEXT("merged triangle count"), Mesh->Triangles.Num() / 3, (1 + 2 + 1 + 3) * 4 * 2);
+        TestTrue(TEXT("first curve is ordinal 0 from subset 0"),
+            CurveRingCenter(*Mesh, 0).Equals(FVector3f(1.0f, 1.0f, -1.0f)));
+        TestTrue(TEXT("last curve is ordinal 3 from subset 1"),
+            CurveRingCenter(*Mesh, TotalNodes - 1).Equals(FVector3f(11.0f, 11.0f, -1.0f)));
+    }
+
+    // A completed merge is dropped, so the same subset starts a fresh frame and
+    // policy 2 (default) emits that frame's coarse preview.
+    Mesh.Reset();
+    TestTrue(TEXT("fresh subset 0 ingests"),
+        IngestCurveBuffer(MakeCurveBuffer(Curves, 0, 2), TEXT("clips/Wave_Geom__0_s0.geo"), Mesh));
+    TestTrue(TEXT("fresh coarse mesh"), Mesh.IsValid());
+    if (Mesh.IsValid())
+    {
+        TestEqual(TEXT("coarse vertex count"), Mesh->Points.Num(), (2 + 2) * 4);
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJUSYNCRawGeoCurveEmptySubsetTest, "JUSYNC.RawGeo.CurveEmptySubset",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJUSYNCRawGeoCurveEmptySubsetTest::RunTest(const FString& Parameters)
+{
+    JUSYNCRawGeoCurves::FlushMerges();
+
+    TArray<TArray<FVector3f>> Curves;
+    Curves.Add({ FVector3f(1.0f, 1.0f, 1.0f), FVector3f(2.0f, 1.0f, 2.0f), FVector3f(3.0f, 1.0f, 3.0f) });
+
+    FJUSYNCCompactMeshRef Mesh;
+    for (const int32 Subset : { 3, 2, 1 })
+    {
+        const FString Name = FString::Printf(TEXT("clips/Empty_Geom__0_s%d.geo"), Subset);
+        Mesh.Reset();
+        TestTrue(TEXT("empty subset ingests"), IngestCurveBuffer(MakeCurveBuffer(Curves, Subset, 4), *Name, Mesh));
+        TestFalse(TEXT("empty subset does not complete"), Mesh.IsValid());
+    }
+
+    Mesh.Reset();
+    TestTrue(TEXT("last subset ingests"),
+        IngestCurveBuffer(MakeCurveBuffer(Curves, 0, 4), TEXT("clips/Empty_Geom__0_s0.geo"), Mesh));
+    TestTrue(TEXT("frame completes after empty subsets"), Mesh.IsValid());
+    if (Mesh.IsValid())
+    {
+        TestEqual(TEXT("single curve vertex count"), Mesh->Points.Num(), 3 * 4);
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJUSYNCRawGeoCurveRankTest, "JUSYNC.RawGeo.CurveRank",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJUSYNCRawGeoCurveRankTest::RunTest(const FString& Parameters)
+{
+    JUSYNCRawGeoCurves::FlushMerges();
+
+    TArray<TArray<FVector3f>> Rank0;
+    Rank0.Add({ FVector3f(1.0f, 1.0f, 1.0f), FVector3f(2.0f, 1.0f, 2.0f) });
+    Rank0.Add({ FVector3f(3.0f, 1.0f, 3.0f), FVector3f(4.0f, 1.0f, 4.0f) });
+
+    TArray<TArray<FVector3f>> Rank1;
+    Rank1.Add({ FVector3f(10.0f, 1.0f, 10.0f), FVector3f(11.0f, 1.0f, 11.0f), FVector3f(12.0f, 1.0f, 12.0f) });
+    Rank1.Add({ FVector3f(13.0f, 1.0f, 13.0f), FVector3f(14.0f, 1.0f, 14.0f) });
+
+    FJUSYNCCompactMeshRef Mesh0;
+    TestTrue(TEXT("rank 0 subset 1 ingests"),
+        IngestCurveBuffer(MakeCurveBuffer(Rank0, 1, 2), TEXT("clips/Wave_Geom__r0_0_s1.geo"), Mesh0));
+    TestFalse(TEXT("rank 0 subset 1 incomplete"), Mesh0.IsValid());
+    TestTrue(TEXT("rank 0 subset 0 ingests"),
+        IngestCurveBuffer(MakeCurveBuffer(Rank0, 0, 2), TEXT("clips/Wave_Geom__r0_0_s0.geo"), Mesh0));
+
+    FJUSYNCCompactMeshRef Mesh1;
+    TestTrue(TEXT("rank 1 subset 1 ingests"),
+        IngestCurveBuffer(MakeCurveBuffer(Rank1, 1, 2), TEXT("clips/Wave_Geom__r1_0_s1.geo"), Mesh1));
+    TestFalse(TEXT("rank 1 subset 1 incomplete"), Mesh1.IsValid());
+    TestTrue(TEXT("rank 1 subset 0 ingests"),
+        IngestCurveBuffer(MakeCurveBuffer(Rank1, 0, 2), TEXT("clips/Wave_Geom__r1_0_s0.geo"), Mesh1));
+
+    TestTrue(TEXT("rank 0 completes separately"), Mesh0.IsValid());
+    TestTrue(TEXT("rank 1 completes separately"), Mesh1.IsValid());
+    if (Mesh0.IsValid() && Mesh1.IsValid())
+    {
+        TestEqual(TEXT("rank 0 vertex count"), Mesh0->Points.Num(), 4 * 4);
+        TestEqual(TEXT("rank 1 vertex count"), Mesh1->Points.Num(), 5 * 4);
+        TestTrue(TEXT("rank 0 starts at its own curve"),
+            CurveRingCenter(*Mesh0, 0).Equals(FVector3f(1.0f, 1.0f, -1.0f)));
+        TestTrue(TEXT("rank 1 starts at its own curve"),
+            CurveRingCenter(*Mesh1, 0).Equals(FVector3f(10.0f, 10.0f, -1.0f)));
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJUSYNCRawGeoCurveDriftTest, "JUSYNC.RawGeo.CurveDrift",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJUSYNCRawGeoCurveDriftTest::RunTest(const FString& Parameters)
+{
+    JUSYNCRawGeoCurves::FlushMerges();
+
+    const TArray<TArray<FVector3f>> Curves = MergeCurves();
+
+    FJUSYNCCompactMeshRef Mesh;
+    TestTrue(TEXT("subset 1 under S=2 ingests"),
+        IngestCurveBuffer(MakeCurveBuffer(Curves, 1, 2), TEXT("clips/Drift_Geom__0_s1.geo"), Mesh));
+    TestFalse(TEXT("S=2 subset 1 is incomplete"), Mesh.IsValid());
+
+    Mesh.Reset();
+    TestTrue(TEXT("subset 1 under S=4 ingests"),
+        IngestCurveBuffer(MakeCurveBuffer(Curves, 1, 4), TEXT("clips/Drift_Geom__0_s1.geo"), Mesh));
+    TestFalse(TEXT("S drift resets instead of completing"), Mesh.IsValid());
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJUSYNCRawGeoRankParseTest, "JUSYNC.RawGeo.RankParse",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJUSYNCRawGeoRankParseTest::RunTest(const FString& Parameters)
+{
+    int32 Rank = INDEX_NONE;
+    TestTrue(TEXT("rank after the last __"), JUSYNCElementNames::ParseFileRank(
+        TEXT("Wave_Geom__r3_7_s2.geo"), Rank));
+    TestEqual(TEXT("parsed rank"), Rank, 3);
+
+    Rank = INDEX_NONE;
+    TestTrue(TEXT("rank zero"), JUSYNCElementNames::ParseFileRank(
+        TEXT("Wave_Geom__r0_0_s1.geo"), Rank));
+    TestEqual(TEXT("parsed rank zero"), Rank, 0);
+
+    TestFalse(TEXT("no rank mark"), JUSYNCElementNames::ParseFileRank(
+        TEXT("Wave_Geom__7_s2.geo"), Rank));
+    TestFalse(TEXT("rank mark before the last __"), JUSYNCElementNames::ParseFileRank(
+        TEXT("Foo_r2_Geom__0.geo"), Rank));
+    TestFalse(TEXT("rank mark without a trailing token"), JUSYNCElementNames::ParseFileRank(
+        TEXT("Wave_Geom__r3.geo"), Rank));
     return true;
 }
 

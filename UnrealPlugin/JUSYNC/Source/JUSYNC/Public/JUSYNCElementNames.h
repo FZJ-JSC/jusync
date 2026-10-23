@@ -172,6 +172,43 @@ namespace JUSYNCElementNames
         return Base + TEXT("_r") + FString::FromInt(FMath::Max(Rank, 0));
     }
 
+    // Producer rank encoded in a clip name: "_r<digits>_" immediately after the
+    // last "__" (e.g. "Wave_Geom__r3_7_s2.geo" -> 3). The rank suffix is what
+    // keeps the pieces of one element spread over several ranks from sharing a
+    // merge or a morph key. Returns false when the mark is absent.
+    inline bool ParseFileRank(const FString& Filename, int32& OutRank)
+    {
+        OutRank = INDEX_NONE;
+
+        FString Name = FPaths::GetCleanFilename(Filename);
+        Name = FPaths::GetBaseFilename(Name);
+
+        const int32 Tail = Name.Find(TEXT("__"), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+        if (Tail == INDEX_NONE)
+        {
+            return false;
+        }
+
+        const FString After = Name.Mid(Tail + 2);
+        if (!After.StartsWith(TEXT("r"), ESearchCase::CaseSensitive))
+        {
+            return false;
+        }
+
+        int32 DigitsEnd = 1;
+        while (DigitsEnd < After.Len() && FChar::IsDigit(After[DigitsEnd]))
+        {
+            ++DigitsEnd;
+        }
+        if (DigitsEnd == 1 || DigitsEnd >= After.Len() || After[DigitsEnd] != TEXT('_'))
+        {
+            return false;
+        }
+
+        OutRank = FCString::Atoi(*After.Mid(1, DigitsEnd - 1));
+        return OutRank >= 0;
+    }
+
     // Splits a rank mark off the end, then the rebuild uniquifier off what is
     // left. The rank mark is kept in the element so the pieces of one element
     // spread over several ranks never compete in the same visibility election -

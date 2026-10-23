@@ -5531,6 +5531,12 @@ int32 AJUSYNCFileSpawnerActor::ResolveFileRank(const FString& Filename, int32 Kn
         return KnownRank;
     }
 
+    int32 ParsedRank = INDEX_NONE;
+    if (JUSYNCElementNames::ParseFileRank(Filename, ParsedRank))
+    {
+        return ParsedRank;
+    }
+
     for (int32 i = 0; i < FilteredFiles.Num(); ++i)
     {
         if (FilteredFiles[i] == Filename && FilteredRanks.IsValidIndex(i) && FilteredRanks[i] >= 0)
