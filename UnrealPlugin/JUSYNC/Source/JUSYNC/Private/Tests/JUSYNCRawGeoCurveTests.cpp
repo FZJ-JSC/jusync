@@ -353,7 +353,10 @@ bool FJUSYNCRawGeoCurveRejectCountTest::RunTest(const FString& Parameters)
     TestFalse(TEXT("unbounded full_curve_count is rejected"),
         IngestCurveBuffer(Buffer, TEXT("clips/Reject_Geom__0_s0.geo"), Mesh));
 
+    Header.subset_index = 0;
+    Header.subset_count = 1;
     Header.full_curve_count = 4ull * 1024ull * 1024ull + 1ull;
+    Header.curve_count = static_cast<uint32_t>(Header.full_curve_count);
     Header.full_num_points = Header.full_curve_count * 2ull;
     TestFalse(TEXT("the exact 4M curve cap is enforced"),
         JUSYNCRawGeoCurves::ValidateCurveHeader(Header));

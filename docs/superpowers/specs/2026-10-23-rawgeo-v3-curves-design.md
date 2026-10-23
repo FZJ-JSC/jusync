@@ -184,10 +184,13 @@ For `topology == 1` and `subset_count = S`:
   for `i = 0 … curve_count-1`.
 - The number of curves in subset `k` is `ceil((C - k) / S)` where
   `C = full_curve_count`. `curve_count` must equal that value.
-- For `S > 1`, the sender must stamp `full_num_points` with the full-frame point
-  total (not the subset total). The host packer rejects a missing total and any
-  total below the subset's points, and requires `C <= full_num_points / 2`; this is
-  the same bound the client applies before allocating curve slots.
+- For `S > 1`, the sender must stamp the full-frame `full_num_points` and
+  `full_curve_count` (not the subset totals). The host packer rejects a missing
+  value, a point total below the subset's points, or `C > full_num_points / 2`;
+  this is the same bound the client applies before allocating curve slots. It also
+  mirrors the client's `subset_count <= 8` and `full_curve_count <= 4,194,304`
+  ceilings, so an oversized frame falls back to the USD path instead of being
+  stored and rejected after download.
 - No ordinal array is transmitted: ordinals are derivable from `k`, `S`, and `i`.
 - The coarse preview is subset `0`: *fewer streamlines, each at full shape*. It is
   always a valid polyline set, never a chord approximation.
@@ -530,10 +533,12 @@ Other regression evidence:
   `CurveLateUpgrade` (colors/widths from a later subset, default radius backfill),
   `CurveSubsetKey` (`_s<k>` does not change the element/group key), and
   `CurveDispatch` (middleware buffer -> finalized `BasisCurves` mesh).
-- Host packer: `test_rawgeo_curve_pack` passes, including full-frame point totals
-  for every subset, two-attribute round-trip, `C = 10, S = 4 -> 3, 3, 2, 2`,
-  wrong-subset rejection, empty-subset width retention, and the
-  `StoreKeysForFile` base-twin/`_s0.._s7` expansion, `__`-marker, and dedup cases.
+- Host packer: `test_rawgeo_curve_pack` passes, including full-frame point/curve
+  totals for every subset, the `S > 1` required-metadata and `C <= points/2`
+  guards, the eight-subset ceiling, two-attribute round-trip,
+  `C = 10, S = 4 -> 3, 3, 2, 2`, wrong-subset rejection, empty-subset width
+  retention, and the `StoreKeysForFile` base-twin/`_s0.._s7` expansion,
+  `__`-marker, and dedup cases.
 - Sender-to-client E2E (rerun after the review fixes): a temporary ANARI `curve`
   sender (image `jusync-curve-sender:test`) emitted four v3 `.geo` subsets through a
   live ZMQ broker on host port 5557. `JUSYNC.RawGeo.BrokerCurveE2E` used the
