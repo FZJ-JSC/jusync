@@ -1536,6 +1536,7 @@ struct FJUSYNCRawGeoMerge
     bool bSawWidthStream = false;
     TArray<FLidarPointCloudPoint> Points;
     TArray<float> Widths;
+    TArray<FJUSYNCPointAttribute> Attributes;
     TBitArray<> FilledSlots;
 };
 
@@ -1543,10 +1544,60 @@ static FCriticalSection GRawGeoMergeLock;
 static TMap<FString, FJUSYNCRawGeoMerge> GRawGeoMerges;
 static int64 GRawGeoMergeTotalPoints = 0;
 
+static void JUSYNCReadRawGeoAttributes(
+    const anari_usd_protocol::JusyncRawGeoAttrDesc* Descs,
+    uint32 NumAttributes, const float* AttributeSection,
+    int64 PointCount, int64 UniformCount,
+    TArray<FJUSYNCPointAttribute>& Out)
+{
+    Out.Reset();
+    if (!Descs || !AttributeSection || NumAttributes == 0)
+    {
+        return;
+    }
+
+    const int64 Count = FMath::Min<int64>(PointCount, UniformCount);
+    const float* Section = AttributeSection;
+    Out.SetNum(static_cast<int32>(NumAttributes));
+    for (uint32 a = 0; a < NumAttributes; ++a)
+    {
+        FJUSYNCPointAttribute& Attribute = Out[static_cast<int32>(a)];
+        Attribute.Name = UTF8_TO_TCHAR(Descs[a].name);
+        Attribute.Components = static_cast<int32>(Descs[a].components);
+        const int64 Values = Count * Attribute.Components;
+        Attribute.Values.SetNumUninitialized(static_cast<int32>(Values));
+        if (Values > 0)
+        {
+            FMemory::Memcpy(Attribute.Values.GetData(), Section,
+                static_cast<SIZE_T>(Values) * sizeof(float));
+        }
+        Section += UniformCount * Attribute.Components;
+    }
+}
+
+static bool JUSYNCAttributeProductsMatch(const TArray<FJUSYNCPointAttribute>& A,
+                                         const TArray<FJUSYNCPointAttribute>& B)
+{
+    if (A.Num() != B.Num())
+    {
+        return false;
+    }
+    for (int32 i = 0; i < A.Num(); ++i)
+    {
+        if (!A[i].Name.Equals(B[i].Name, ESearchCase::CaseSensitive) ||
+            A[i].Components != B[i].Components)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 static FJUSYNCPointCloudRef JUSYNCBuildCloudFromMergedPoints(
     const FString& ElementName, bool bHasColors, bool bHasWidths,
     TArray<FLidarPointCloudPoint>&& Points, TArray<float>&& Widths,
-    double Time = -1.0)
+    TArray<FJUSYNCPointAttribute>&& Attributes,
+    bool bComplete, int32 FullPointCount, double Time = -1.0)
 {
     FJUSYNCPointCloudRef PC = MakeShared<FJUSYNCPointCloudData, ESPMode::ThreadSafe>();
     PC->ElementName = ElementName;
@@ -1556,7 +1607,11 @@ static FJUSYNCPointCloudRef JUSYNCBuildCloudFromMergedPoints(
     PC->bHasColors = bHasColors;
     PC->bHasNormals = false;
     PC->bHasLidarPoints = true;
+    PC->bFromRawGeo = true;
+    PC->bComplete = bComplete;
+    PC->FullPointCount = FullPointCount > 0 ? FullPointCount : PC->PointCount;
     PC->LidarPoints = MoveTemp(Points);
+    PC->Attributes = MoveTemp(Attributes);
     if (bHasWidths)
     {
         PC->Widths = MoveTemp(Widths);
@@ -1752,6 +1807,10 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
         }
     }
 
+    TArray<FJUSYNCPointAttribute> SubsetAttributes;
+    JUSYNCReadRawGeoAttributes(Descs, Hdr.num_attributes, AttrF, N,
+        (int64)Hdr.attr_uniform_count, SubsetAttributes);
+
     auto MakePoint = [&](int64 i)
     {
         const float* p = PosF + i * 3;
@@ -1779,6 +1838,10 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
         PC->PointCount = (int32)N;
         PC->bHasColors = Hdr.color_components != 0;
         PC->bHasNormals = false;
+        PC->bFromRawGeo = true;
+        PC->bComplete = true;
+        PC->FullPointCount = (int32)N;
+        PC->Attributes = MoveTemp(SubsetAttributes);
 
         static_assert(sizeof(FLidarPointCloudPoint) == sizeof(CPointCloudLidarPoint_v1),
             "FLidarPointCloudPoint layout no longer matches CPointCloudLidarPoint_v1");
@@ -1867,7 +1930,8 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
             Pts.SetNumUninitialized((int32)N);
             ParallelFor((int32)N, [&](int32 i) { Pts[i] = MakePoint(i); });
             OutCloud = JUSYNCBuildCloudFromMergedPoints(
-                ElementName, Hdr.color_components != 0, false, MoveTemp(Pts), {}, Hdr.time);
+                ElementName, Hdr.color_components != 0, false, MoveTemp(Pts), {},
+                MoveTemp(SubsetAttributes), false, (int32)FullN, Hdr.time);
         }
         return true;
     }
@@ -1888,7 +1952,8 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
     }
 
     FJUSYNCRawGeoMerge* Merge = GRawGeoMerges.Find(Key);
-    if (Merge && (Merge->Stride != S || Merge->FullN != FullN))
+    if (Merge && (Merge->Stride != S || Merge->FullN != FullN ||
+                  !JUSYNCAttributeProductsMatch(Merge->Attributes, SubsetAttributes)))
     {
         GRawGeoMergeTotalPoints -= (int64)Merge->FullN;
         GRawGeoMerges.Remove(Key);
@@ -1912,7 +1977,8 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
                 Pts.SetNumUninitialized((int32)N);
                 ParallelFor((int32)N, [&](int32 i) { Pts[i] = MakePoint(i); });
                 OutCloud = JUSYNCBuildCloudFromMergedPoints(
-                    ElementName, Hdr.color_components != 0, false, MoveTemp(Pts), {}, Hdr.time);
+                    ElementName, Hdr.color_components != 0, false, MoveTemp(Pts), {},
+                    MoveTemp(SubsetAttributes), false, (int32)FullN, Hdr.time);
             }
             return true; // subsets beyond the coarse base: dropped
         }
@@ -1939,6 +2005,14 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
         Fresh.Points.SetNumUninitialized((int32)FullN);
         if (Fresh.bHasWidths)
             Fresh.Widths.SetNumZeroed((int32)FullN);
+        Fresh.Attributes.SetNum(SubsetAttributes.Num());
+        for (int32 a = 0; a < SubsetAttributes.Num(); ++a)
+        {
+            Fresh.Attributes[a].Name = SubsetAttributes[a].Name;
+            Fresh.Attributes[a].Components = SubsetAttributes[a].Components;
+            Fresh.Attributes[a].Values.SetNumZeroed(
+                static_cast<int32>((int64)FullN * SubsetAttributes[a].Components));
+        }
         Fresh.FilledSlots.Init(false, (int32)FullN);
         Merge = &Fresh;
         GRawGeoMergeTotalPoints += (int64)FullN;
@@ -1955,6 +2029,22 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
         Merge->Points[Idx] = MakePoint(j);
         if (Merge->bHasWidths && j < WidthCount)
             Merge->Widths[Idx] = WidthF[j * WidthComps];
+        for (int32 a = 0; a < Merge->Attributes.Num(); ++a)
+        {
+            const int32 Components = Merge->Attributes[a].Components;
+            if (Components <= 0 || !SubsetAttributes.IsValidIndex(a))
+                continue;
+            const int64 SrcBase = j * Components;
+            const int64 DstBase = Idx * Components;
+            if (SrcBase + Components <= SubsetAttributes[a].Values.Num() &&
+                DstBase + Components <= Merge->Attributes[a].Values.Num())
+            {
+                FMemory::Memcpy(
+                    Merge->Attributes[a].Values.GetData() + DstBase,
+                    SubsetAttributes[a].Values.GetData() + SrcBase,
+                    static_cast<SIZE_T>(Components) * sizeof(float));
+            }
+        }
         if (!Merge->FilledSlots[(int32)Idx])
         {
             Merge->FilledSlots[(int32)Idx] = true;
@@ -1976,11 +2066,13 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
 
     TArray<FLidarPointCloudPoint> OutPts;
     TArray<float> OutW;
+    TArray<FJUSYNCPointAttribute> OutAttrs;
     bool bOutWidths = Merge->bHasWidths;
     if (bComplete)
     {
         OutPts = MoveTemp(Merge->Points);
         OutW = MoveTemp(Merge->Widths);
+        OutAttrs = MoveTemp(Merge->Attributes);
         GRawGeoMergeTotalPoints -= (int64)Merge->FullN;
         GRawGeoMerges.Remove(Key);
         UE_LOG(LogTemp, Log, TEXT("JUSYNC: RawGeo refine FULL '%s' t=%.4f: %d points from %llu subsets"),
@@ -2006,10 +2098,32 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
         OutPts.SetNum(w, EAllowShrinking::No);
         if (bOutWidths)
             OutW.SetNum(w, EAllowShrinking::No);
+
+        OutAttrs.SetNum(Merge->Attributes.Num());
+        for (int32 a = 0; a < Merge->Attributes.Num(); ++a)
+        {
+            const int32 Components = Merge->Attributes[a].Components;
+            OutAttrs[a].Name = Merge->Attributes[a].Name;
+            OutAttrs[a].Components = Components;
+            OutAttrs[a].Values.SetNumUninitialized(w * Components);
+            int32 Dst = 0;
+            for (int32 i = 0; i < (int32)Merge->FullN; ++i)
+            {
+                if (!Merge->FilledSlots[i])
+                    continue;
+                FMemory::Memcpy(
+                    OutAttrs[a].Values.GetData() + Dst * Components,
+                    Merge->Attributes[a].Values.GetData() + (int64)i * Components,
+                    static_cast<SIZE_T>(Components) * sizeof(float));
+                ++Dst;
+            }
+            OutAttrs[a].Values.SetNum(Dst * Components, EAllowShrinking::No);
+        }
     }
 
     OutCloud = JUSYNCBuildCloudFromMergedPoints(
-        ElementName, bOutColors, bOutWidths, MoveTemp(OutPts), MoveTemp(OutW), Hdr.time);
+        ElementName, bOutColors, bOutWidths, MoveTemp(OutPts), MoveTemp(OutW),
+        MoveTemp(OutAttrs), bComplete, (int32)FullN, Hdr.time);
     return true;
 }
 

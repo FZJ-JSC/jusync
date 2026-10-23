@@ -154,6 +154,22 @@ struct JUSYNC_API FJUSYNCRealtimeMeshData
 };
 
 USTRUCT(BlueprintType)
+struct JUSYNC_API FJUSYNCPointAttribute
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	FString Name;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	int32 Components = 0;
+
+	// Point-major: Values[Index * Components + Component].
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	TArray<float> Values;
+};
+
+USTRUCT(BlueprintType)
 struct JUSYNC_API FJUSYNCPointCloudData
 {
 	GENERATED_BODY()
@@ -193,6 +209,24 @@ struct JUSYNC_API FJUSYNCPointCloudData
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
 	bool bHasNormals = false;
 
+	// RawGeo point attributes are point-major and survive progressive merges.
+	// USD point clouds leave this empty.
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	TArray<FJUSYNCPointAttribute> Attributes;
+
+	// False for coarse/intermediate RawGeo subsets. Consumers that need stable
+	// identities (pathlines) must ignore incomplete clouds.
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	bool bComplete = true;
+
+	// Lattice size a progressive merge was cut from (PointCount for whole
+	// frames). Zero for clouds that did not come from RawGeo.
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	int32 FullPointCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
+	bool bFromRawGeo = false;
+
 	TArray64<FLidarPointCloudPoint> LidarPoints;
 	bool bHasLidarPoints = false;
 
@@ -215,6 +249,55 @@ struct JUSYNC_API FJUSYNCPointCloudData
 	bool HasNormals() const { return bHasNormals; }
 	bool HasWidths() const { return Widths.Num() > 0; }
 	bool HasLidarPoints() const { return bHasLidarPoints && LidarPoints.Num() > 0; }
+
+	const FJUSYNCPointAttribute* FindAttribute(const FString& Name) const
+	{
+		return Attributes.FindByPredicate(
+			[&Name](const FJUSYNCPointAttribute& Attribute)
+			{
+				return Attribute.Name.Equals(Name, ESearchCase::CaseSensitive);
+			});
+	}
+
+	bool GetAttributeScalar(int32 Index, const FString& Name, int32 Component, float& Out) const
+	{
+		if (Index < 0)
+		{
+			return false;
+		}
+		const FJUSYNCPointAttribute* Attribute = FindAttribute(Name);
+		if (!Attribute || Component < 0 || Component >= Attribute->Components)
+		{
+			return false;
+		}
+		const int64 ValueIndex =
+			static_cast<int64>(Index) * Attribute->Components + Component;
+		if (!Attribute->Values.IsValidIndex(static_cast<int32>(ValueIndex)))
+		{
+			return false;
+		}
+		Out = Attribute->Values[static_cast<int32>(ValueIndex)];
+		return true;
+	}
+
+	FVector GetPosition(int32 Index) const
+	{
+		if (bHasLidarPoints && Index >= 0 && Index < LidarPoints.Num())
+		{
+			const FVector3f& Location = LidarPoints[Index].Location;
+			return FVector(Location.X, Location.Y, Location.Z);
+		}
+		if (Positions.IsValidIndex(Index))
+		{
+			return Positions[Index];
+		}
+		return FVector::ZeroVector;
+	}
+
+	float GetWidth(int32 Index) const
+	{
+		return Widths.IsValidIndex(Index) ? Widths[Index] : 1.0f;
+	}
 
 	int32 GetPointCount() const { return PointCount; }
 };
