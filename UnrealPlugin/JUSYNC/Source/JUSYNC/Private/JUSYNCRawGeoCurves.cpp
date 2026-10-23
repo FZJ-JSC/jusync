@@ -672,6 +672,34 @@ namespace JUSYNCRawGeoCurves
             GRawGeoCurveMergeTotalPoints += Merge->FullNumPoints;
         }
 
+        // A subset that arrives before subset 0 (possible with file ordering)
+        // must not permanently strip colors or widths from the merge. Upgrade
+        // the flags and backfill default values for slots already filled.
+        if (Payload.bHasColors && !Merge->bHasColors)
+        {
+            Merge->bHasColors = true;
+            for (int32 c = 0; c < Merge->Points.Num(); ++c)
+            {
+                if (Merge->Points[c].Num() > 0 &&
+                    Merge->Colors[c].Num() != Merge->Points[c].Num())
+                {
+                    Merge->Colors[c].Init(FColor::White, Merge->Points[c].Num());
+                }
+            }
+        }
+        if (Payload.bHasWidths && !Merge->bHasWidths)
+        {
+            Merge->bHasWidths = true;
+            for (int32 c = 0; c < Merge->Points.Num(); ++c)
+            {
+                if (Merge->Points[c].Num() > 0 &&
+                    Merge->Widths[c].Num() != Merge->Points[c].Num())
+                {
+                    Merge->Widths[c].Init(CurveDefaultRadius(), Merge->Points[c].Num());
+                }
+            }
+        }
+
         Merge->LastUseSeconds = Now;
 
         if (!ScatterCurveSubset(*Merge, Payload))
