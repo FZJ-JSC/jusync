@@ -5,6 +5,33 @@
 
 namespace JUSYNCElementNames
 {
+    // VTK's ANARI mapper names geometry "vtk_actor_<id>_<representation>_<n>".
+    // ParaView recreates the actor across frames, so <id> is not stable even
+    // when the visible element is the same. Fold that id away so one UE actor
+    // and one cache key represent the element across time. The representation
+    // suffix (e.g. "triangles_0", "spheres_0") stays intact, so genuinely
+    // distinct geometry still gets distinct keys.
+    inline FString CanonicalActorIdentity(const FString& ElementName)
+    {
+        static const FString Prefix = TEXT("vtk_actor_");
+        if (!ElementName.StartsWith(Prefix, ESearchCase::CaseSensitive))
+        {
+            return ElementName;
+        }
+
+        int32 DigitsEnd = Prefix.Len();
+        while (DigitsEnd < ElementName.Len() && FChar::IsDigit(ElementName[DigitsEnd]))
+        {
+            ++DigitsEnd;
+        }
+
+        if (DigitsEnd > Prefix.Len() && DigitsEnd < ElementName.Len() && ElementName[DigitsEnd] == TEXT('_'))
+        {
+            return Prefix + ElementName.Mid(DigitsEnd + 1);
+        }
+        return ElementName;
+    }
+
     enum class EPayload : uint8
     {
         RawGeo,

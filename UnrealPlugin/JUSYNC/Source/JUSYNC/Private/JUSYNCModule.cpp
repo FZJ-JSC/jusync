@@ -6,6 +6,12 @@
 #include "HAL/PlatformFileManager.h"
 #include "HAL/IConsoleManager.h"
 #include "JUSYNCFileSpawnerActor.h"
+#if WITH_EDITOR
+#include "Editor.h"
+#include "JUSYNCFileSpawnerCustomization.h"
+#include "Misc/CoreDelegates.h"
+#include "PropertyEditorModule.h"
+#endif
 #include "Misc/App.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
@@ -234,6 +240,52 @@ void FJUSYNCModule::LogMiddlewareCapabilities() {
 }
 
 void FJUSYNCModule::RegisterModuleSystems() {
+#if WITH_EDITOR
+    if (!bPlaybackDetailsRegistered && !PostEngineInitHandle.IsValid())
+    {
+        auto RegisterPlaybackDetails = [this]()
+        {
+            if (bPlaybackDetailsRegistered)
+            {
+                return;
+            }
+
+            FPropertyEditorModule& PropertyModule =
+                FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
+            const FName ClassName = AJUSYNCFileSpawnerActor::StaticClass()->GetFName();
+
+            UE_LOG(LogJUSYNC, Log, TEXT("Registering JUSYNC playback Details for class %s"),
+                *ClassName.ToString());
+
+            PropertyModule.RegisterCustomClassLayout(
+                ClassName,
+                FOnGetDetailCustomizationInstance::CreateStatic(
+                    &FJUSYNCFileSpawnerCustomization::MakeInstance));
+
+            // Existing Details views keep the layout they were built with until
+            // they are told that customizations changed.
+            PropertyModule.NotifyCustomizationModuleChanged();
+
+            bPlaybackDetailsRegistered = true;
+            UE_LOG(LogJUSYNC, Log, TEXT("Registered JUSYNC sample-playback Details timeline and buttons"));
+        };
+
+        if (GEditor != nullptr)
+        {
+            RegisterPlaybackDetails();
+        }
+        else
+        {
+            // JUSYNC loads at PostConfigInit, which is before the editor and
+            // the details panels exist. Register once the engine is ready so
+            // the PropertyEditor module used by the Details panel is the same
+            // one that owns our customization.
+            PostEngineInitHandle = FCoreDelegates::OnPostEngineInit.AddLambda(RegisterPlaybackDetails);
+            UE_LOG(LogJUSYNC, Log, TEXT("Deferred JUSYNC playback Details registration until post engine init"));
+        }
+    }
+#endif
+
 #if WITH_ANARI_USD_MIDDLEWARE
     if (!GJusyncDiagCmd)
     {
@@ -262,6 +314,27 @@ void FJUSYNCModule::RegisterModuleSystems() {
 }
 
 void FJUSYNCModule::UnregisterModuleSystems() {
+#if WITH_EDITOR
+    if (PostEngineInitHandle.IsValid())
+    {
+        FCoreDelegates::OnPostEngineInit.Remove(PostEngineInitHandle);
+        PostEngineInitHandle.Reset();
+    }
+
+    if (bPlaybackDetailsRegistered)
+    {
+        if (FModuleManager::Get().IsModuleLoaded("PropertyEditor"))
+        {
+            FPropertyEditorModule& PropertyModule =
+                FModuleManager::GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
+            PropertyModule.UnregisterCustomClassLayout(
+                AJUSYNCFileSpawnerActor::StaticClass()->GetFName());
+            PropertyModule.NotifyCustomizationModuleChanged();
+        }
+        bPlaybackDetailsRegistered = false;
+    }
+#endif
+
 #if WITH_ANARI_USD_MIDDLEWARE
     if (GJusyncDiagCmd)
     {

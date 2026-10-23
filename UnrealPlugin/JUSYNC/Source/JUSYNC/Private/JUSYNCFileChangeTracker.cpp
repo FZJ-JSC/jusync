@@ -1,6 +1,6 @@
 #include "JUSYNCFileChangeTracker.h"
 
-uint64 FJUSYNCFileChangeTracker::QueueChange(const FString& Filename, int32 Rank, int64 Size, uint64 HashLo, uint64 HashHi, int32 FileIndex, bool bManual)
+uint64 FJUSYNCFileChangeTracker::QueueChange(const FString& Filename, int32 Rank, int64 Size, uint64 HashLo, uint64 HashHi, int32 FileIndex, bool bManual, uint64 SampleId)
 {
     if (Filename.IsEmpty())
     {
@@ -19,6 +19,7 @@ uint64 FJUSYNCFileChangeTracker::QueueChange(const FString& Filename, int32 Rank
     Request.HashLo = HashLo;
     Request.HashHi = HashHi;
     Request.FileIndex = FileIndex;
+    Request.SampleId = SampleId;
     Request.bManual = bManual || Request.bManual;
 
     if (Request.State == EJUSYNCFileChangeState::Completed ||

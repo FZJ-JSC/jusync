@@ -893,6 +893,10 @@ void UJUSYNCSubsystem::ApplyLidarPerformanceCvars() const
 
 void UJUSYNCSubsystem::Deinitialize()
 {
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    extern void JUSYNCFlushRawGeoMerges();
+    JUSYNCFlushRawGeoMerges();
+#endif
     ShutdownMiddleware();
 
     g_SubsystemInstance.store(nullptr);
@@ -932,6 +936,10 @@ bool UJUSYNCSubsystem::InitializeMiddleware(const FString& Endpoint)
     }
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
+    // A (re)connect invalidates any in-flight refinement merges.
+    extern void JUSYNCFlushRawGeoMerges();
+    JUSYNCFlushRawGeoMerges();
+
     FTCHARToUTF8 EndpointConverter(*Endpoint);
     const char* EndpointCStr = Endpoint.IsEmpty() ? "tcp://*:5556" : EndpointConverter.Get();
 
@@ -1493,16 +1501,175 @@ bool UJUSYNCSubsystem::LoadUSDFullFromBufferNoCopy(const TArray<uint8>& Buffer, 
 }
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
+// ---- RawGeo progressive refinement (wire v2) client merge ------------------
+// The sender cuts each frame into S complementary lattice subsets (subset k
+// carries source indices k, k+S, k+2S, ...). We scatter each arriving subset
+// into its lattice slot, so the completed merge is point-for-point identical
+// to a stride-1 stream. The coarse subset (k=0) emits immediately for a fast
+// first view; the completed cloud replaces it as a live update.
+static TAutoConsoleVariable<int32> CVarJusyncRawGeoProgressive(
+    TEXT("jusync.RawGeo.Progressive"), 2,
+    TEXT("RawGeo v2 refinement client policy. 2 (default) = emit coarse (subset 0) now, full cloud when all subsets merged; 1 = also emit after every subset; 0 = merge off (coarse-only, extra subsets dropped)."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarJusyncRawGeoRefineBudget(
+    TEXT("jusync.RawGeo.RefineBudgetKPoints"), 16384,
+    TEXT("Total point budget (in thousands) shared by all in-flight RawGeo refinement merges (~40 bytes/point). Streams larger than the budget fall back to coarse-only display."),
+    ECVF_Default);
+
+void JUSYNCFlushRawGeoMerges();
+
+struct FJUSYNCRawGeoMerge
+{
+    uint64 Stride = 0;
+    uint64 FullN = 0;
+    int64 Filled = 0;
+    double Time = 0.0;
+    double LastUseSeconds = 0.0;
+    FString PrimName;
+    bool bHasColors = false;
+    bool bHasWidths = false;
+    bool bSawWidthStream = false;
+    TArray<FLidarPointCloudPoint> Points;
+    TArray<float> Widths;
+    TBitArray<> FilledSlots;
+};
+
+static FCriticalSection GRawGeoMergeLock;
+static TMap<FString, FJUSYNCRawGeoMerge> GRawGeoMerges;
+static int64 GRawGeoMergeTotalPoints = 0;
+
+static FJUSYNCPointCloudRef JUSYNCBuildCloudFromMergedPoints(
+    const FString& ElementName, bool bHasColors, bool bHasWidths,
+    TArray<FLidarPointCloudPoint>&& Points, TArray<float>&& Widths,
+    double Time = -1.0)
+{
+    FJUSYNCPointCloudRef PC = MakeShared<FJUSYNCPointCloudData, ESPMode::ThreadSafe>();
+    PC->ElementName = ElementName;
+    PC->TypeName = TEXT("GeomPoints");
+    PC->Time = Time;
+    PC->PointCount = Points.Num();
+    PC->bHasColors = bHasColors;
+    PC->bHasNormals = false;
+    PC->bHasLidarPoints = true;
+    PC->LidarPoints = MoveTemp(Points);
+    if (bHasWidths)
+    {
+        PC->Widths = MoveTemp(Widths);
+    }
+
+    FVector Min(TNumericLimits<double>::Max());
+    FVector Max(TNumericLimits<double>::Lowest());
+    const int32 N = PC->LidarPoints.Num();
+    const int32 Per = FMath::DivideAndRoundUp<int32>(FMath::Max(N, 1), 64);
+    const int32 NumChunks = FMath::Clamp<int32>((N + Per - 1) / Per, 1, 64);
+    const int32 ChunkStride = FMath::DivideAndRoundUp<int32>(FMath::Max(N, 1), NumChunks);
+    struct FChunkBox { double Min[3]; double Max[3]; };
+    TArray<FChunkBox> Boxes;
+    Boxes.SetNumUninitialized(NumChunks);
+    ParallelFor(NumChunks, [&](int32 c)
+    {
+        const int32 Begin = c * ChunkStride;
+        const int32 End = FMath::Min(N, Begin + ChunkStride);
+        double* mn = Boxes[c].Min;
+        double* mx = Boxes[c].Max;
+        mn[0] = mn[1] = mn[2] = TNumericLimits<double>::Max();
+        mx[0] = mx[1] = mx[2] = TNumericLimits<double>::Lowest();
+        for (int32 i = Begin; i < End; ++i)
+        {
+            const FVector3f& P = PC->LidarPoints[i].Location;
+            mn[0] = FMath::Min(mn[0], (double)P.X); mx[0] = FMath::Max(mx[0], (double)P.X);
+            mn[1] = FMath::Min(mn[1], (double)P.Y); mx[1] = FMath::Max(mx[1], (double)P.Y);
+            mn[2] = FMath::Min(mn[2], (double)P.Z); mx[2] = FMath::Max(mx[2], (double)P.Z);
+        }
+    });
+    if (N > 0)
+    {
+        double mn[3] = { TNumericLimits<double>::Max(), TNumericLimits<double>::Max(), TNumericLimits<double>::Max() };
+        double mx[3] = { TNumericLimits<double>::Lowest(), TNumericLimits<double>::Lowest(), TNumericLimits<double>::Lowest() };
+        for (const FChunkBox& B : Boxes)
+        {
+            for (int32 k = 0; k < 3; ++k)
+            {
+                mn[k] = FMath::Min(mn[k], B.Min[k]);
+                mx[k] = FMath::Max(mx[k], B.Max[k]);
+            }
+        }
+        Min = FVector(mn[0], mn[1], mn[2]);
+        Max = FVector(mx[0], mx[1], mx[2]);
+    }
+    else
+    {
+        Min = FVector::ZeroVector;
+        Max = FVector::ZeroVector;
+    }
+    PC->BoundingBoxMin = Min;
+    PC->BoundingBoxMax = Max;
+    return PC;
+}
+
+static bool JUSYNCMergeKeyFitsBudget(int64 FullN, FString& OutEvictNote)
+{
+    // Caller holds GRawGeoMergeLock. Drops oldest-use entries until the new
+    // merge fits; returns false only when the stream alone exceeds budget.
+    const int64 Budget = FMath::Max<int64>(1024,
+        (int64)CVarJusyncRawGeoRefineBudget.GetValueOnAnyThread() * 1024);
+    if (FullN > Budget)
+    {
+        return false;
+    }
+    while (GRawGeoMergeTotalPoints + FullN > Budget && GRawGeoMerges.Num() > 0)
+    {
+        double Oldest = TNumericLimits<double>::Max();
+        FString OldestKey;
+        for (const TPair<FString, FJUSYNCRawGeoMerge>& Pair : GRawGeoMerges)
+        {
+            if (Pair.Value.LastUseSeconds < Oldest)
+            {
+                Oldest = Pair.Value.LastUseSeconds;
+                OldestKey = Pair.Key;
+            }
+        }
+        if (OldestKey.IsEmpty())
+        {
+            return false;
+        }
+        if (FJUSYNCRawGeoMerge* Victim = GRawGeoMerges.Find(OldestKey))
+        {
+            GRawGeoMergeTotalPoints -= (int64)Victim->FullN;
+            OutEvictNote = Victim->PrimName;
+        }
+        GRawGeoMerges.Remove(OldestKey);
+    }
+    return GRawGeoMergeTotalPoints + FullN <= Budget;
+}
+
 static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, FJUSYNCPointCloudRef& OutCloud)
 {
     using namespace anari_usd_protocol;
 
-    if (Buffer.Num() < (int32)sizeof(JusyncRawGeoHeader))
+    if (Buffer.Num() < (int32)(2 * sizeof(uint32)))
         return false;
 
     const uint8* Src = Buffer.GetData();
+    uint32 MaybeVersion = 0;
+    FMemory::Memcpy(&MaybeVersion, Src + offsetof(JusyncRawGeoHeader, version), sizeof(MaybeVersion));
+    if (MaybeVersion != 1 && MaybeVersion != JUSYNC_RAWGEO_VERSION)
+        return false;
+    const size_t HdrSize = JusyncRawGeoHeader::header_bytes(MaybeVersion);
+    if ((size_t)Buffer.Num() < HdrSize)
+        return false;
+
     JusyncRawGeoHeader Hdr;
-    FMemory::Memcpy(&Hdr, Src, sizeof(Hdr));
+    FMemory::Memzero(&Hdr, sizeof(Hdr));
+    FMemory::Memcpy(&Hdr, Src, HdrSize);
+    if (MaybeVersion == 1)
+    {
+        // v1 payload = whole frame; a valid prefix of the v2 struct.
+        Hdr.subset_index = 0;
+        Hdr.subset_count = 1;
+        Hdr.full_num_points = Hdr.num_points;
+    }
     if (!Hdr.valid((size_t)Buffer.Num()))
         return false;
     if (Hdr.num_points == 0 || Hdr.num_points > (uint64)MAX_int32 || Hdr.num_attributes > 16)
@@ -1510,9 +1677,9 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, FJUSYNCPointClo
 
     const int64 N = (int64)Hdr.num_points;
     const int64 AttrTableBytes = (int64)Hdr.num_attributes * (int64)sizeof(JusyncRawGeoAttrDesc);
-    const JusyncRawGeoAttrDesc* Descs = reinterpret_cast<const JusyncRawGeoAttrDesc*>(Src + sizeof(Hdr));
+    const JusyncRawGeoAttrDesc* Descs = reinterpret_cast<const JusyncRawGeoAttrDesc*>(Src + HdrSize);
 
-    uint64 Expected = sizeof(Hdr) + (uint64)AttrTableBytes + (uint64)N * 3 * sizeof(float);
+    uint64 Expected = HdrSize + (uint64)AttrTableBytes + (uint64)N * 3 * sizeof(float);
     if (Hdr.color_components)
         Expected += (uint64)N * Hdr.color_components * sizeof(float);
     for (uint32 a = 0; a < Hdr.num_attributes; ++a)
@@ -1524,7 +1691,7 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, FJUSYNCPointClo
     if ((uint64)Buffer.Num() < Expected)
         return false;
 
-    const float* PosF = reinterpret_cast<const float*>(Src + sizeof(Hdr) + AttrTableBytes);
+    const float* PosF = reinterpret_cast<const float*>(Src + HdrSize + AttrTableBytes);
     const float* ColF = nullptr;
     const float* AttrF = nullptr;
     if (Hdr.color_components)
@@ -1563,84 +1730,272 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, FJUSYNCPointClo
         }
     }
 
-    auto PC = MakeShared<FJUSYNCPointCloudData, ESPMode::ThreadSafe>();
-    PC->ElementName = UTF8_TO_TCHAR(Hdr.prim_name);
-    PC->TypeName = TEXT("GeomPoints");
-    PC->PointCount = (int32)N;
-    PC->bHasColors = Hdr.color_components != 0;
-    PC->bHasNormals = false;
-
-    static_assert(sizeof(FLidarPointCloudPoint) == sizeof(CPointCloudLidarPoint_v1),
-        "FLidarPointCloudPoint layout no longer matches CPointCloudLidarPoint_v1");
-    PC->bHasLidarPoints = true;
-    PC->LidarPoints.SetNumUninitialized(N);
-
-    if (WidthF && WidthCount > 0)
-        PC->Widths.SetNumUninitialized((int32)WidthCount);
-
-    struct FChunkBox { float Min[3]; float Max[3]; };
-    const int64 Per = FMath::DivideAndRoundUp<int64>(N, 64);
-    const int32 NumChunks = (int32)FMath::Clamp<int64>(
-        (N + Per - 1) / Per, 1, (N > 0) ? FMath::Min<int64>(64, N) : 1);
-    const int64 ChunkStride = FMath::DivideAndRoundUp<int64>(N, NumChunks);
-    TArray<FChunkBox> Boxes;
-    Boxes.SetNumUninitialized(NumChunks);
-
-    ParallelFor(NumChunks, [&](int32 c)
+    auto MakePoint = [&](int64 i)
     {
-        const int64 Begin = (int64)c * ChunkStride;
-        const int64 End = FMath::Min<int64>(N, Begin + ChunkStride);
-        float MinC[3] = { TNumericLimits<float>::Max(), TNumericLimits<float>::Max(), TNumericLimits<float>::Max() };
-        float MaxC[3] = { TNumericLimits<float>::Lowest(), TNumericLimits<float>::Lowest(), TNumericLimits<float>::Lowest() };
-
-        for (int64 i = Begin; i < End; ++i)
+        const float* p = PosF + i * 3;
+        float r = 1.f, g = 1.f, b = 1.f, a = 1.f;
+        if (ColF)
         {
-            const float x = PosF[i * 3 + 0];
-            const float y = PosF[i * 3 + 1];
-            const float z = PosF[i * 3 + 2];
+            const float* cc = ColF + i * Hdr.color_components;
+            r = cc[0]; g = cc[1]; b = cc[2];
+            if (Hdr.color_components == 4) a = cc[3];
+        }
+        return FLidarPointCloudPoint((double)p[0], (double)p[2], (double)(-p[1]), r, g, b, a);
+    };
 
-            MinC[0] = FMath::Min(MinC[0], x); MaxC[0] = FMath::Max(MaxC[0], x);
-            MinC[1] = FMath::Min(MinC[1], y); MaxC[1] = FMath::Max(MaxC[1], y);
-            MinC[2] = FMath::Min(MinC[2], z); MaxC[2] = FMath::Max(MaxC[2], z);
+    const FString ElementName = UTF8_TO_TCHAR(Hdr.prim_name);
+    const bool bSub = Hdr.subset_count > 1;
+    const int32 Policy = CVarJusyncRawGeoProgressive.GetValueOnAnyThread();
 
-            float r = 1.f, g = 1.f, b = 1.f, a = 1.f;
-            if (ColF)
+    if (!bSub)
+    {
+        // Whole-frame payload (v1 or a v2 single-shot): historical path.
+        auto PC = MakeShared<FJUSYNCPointCloudData, ESPMode::ThreadSafe>();
+        PC->ElementName = ElementName;
+        PC->TypeName = TEXT("GeomPoints");
+        PC->Time = Hdr.time;
+        PC->PointCount = (int32)N;
+        PC->bHasColors = Hdr.color_components != 0;
+        PC->bHasNormals = false;
+
+        static_assert(sizeof(FLidarPointCloudPoint) == sizeof(CPointCloudLidarPoint_v1),
+            "FLidarPointCloudPoint layout no longer matches CPointCloudLidarPoint_v1");
+        PC->bHasLidarPoints = true;
+        PC->LidarPoints.SetNumUninitialized(N);
+
+        if (WidthF && WidthCount > 0)
+            PC->Widths.SetNumUninitialized((int32)WidthCount);
+
+        struct FChunkBox { float Min[3]; float Max[3]; };
+        const int64 Per = FMath::DivideAndRoundUp<int64>(N, 64);
+        const int32 NumChunks = (int32)FMath::Clamp<int64>(
+            (N + Per - 1) / Per, 1, (N > 0) ? FMath::Min<int64>(64, N) : 1);
+        const int64 ChunkStride = FMath::DivideAndRoundUp<int64>(N, NumChunks);
+        TArray<FChunkBox> Boxes;
+        Boxes.SetNumUninitialized(NumChunks);
+
+        ParallelFor(NumChunks, [&](int32 c)
+        {
+            const int64 Begin = (int64)c * ChunkStride;
+            const int64 End = FMath::Min<int64>(N, Begin + ChunkStride);
+            float MinC[3] = { TNumericLimits<float>::Max(), TNumericLimits<float>::Max(), TNumericLimits<float>::Max() };
+            float MaxC[3] = { TNumericLimits<float>::Lowest(), TNumericLimits<float>::Lowest(), TNumericLimits<float>::Lowest() };
+
+            for (int64 i = Begin; i < End; ++i)
             {
-                const float* cc = ColF + i * Hdr.color_components;
-                r = cc[0]; g = cc[1]; b = cc[2];
-                if (Hdr.color_components == 4) a = cc[3];
+                const float x = PosF[i * 3 + 0];
+                const float y = PosF[i * 3 + 1];
+                const float z = PosF[i * 3 + 2];
+
+                MinC[0] = FMath::Min(MinC[0], x); MaxC[0] = FMath::Max(MaxC[0], x);
+                MinC[1] = FMath::Min(MinC[1], y); MaxC[1] = FMath::Max(MaxC[1], y);
+                MinC[2] = FMath::Min(MinC[2], z); MaxC[2] = FMath::Max(MaxC[2], z);
+
+                PC->LidarPoints[i] = MakePoint(i);
+
+                if (WidthF && i < WidthCount)
+                    PC->Widths[(int32)i] = WidthF[i * WidthComps];
             }
 
-            PC->LidarPoints[i] = FLidarPointCloudPoint(
-                (double)x, (double)z, (double)(-y), r, g, b, a);
+            for (int32 k = 0; k < 3; ++k)
+            {
+                Boxes[c].Min[k] = MinC[k];
+                Boxes[c].Max[k] = MaxC[k];
+            }
+        });
 
-            if (WidthF && i < WidthCount)
-                PC->Widths[(int32)i] = WidthF[i * WidthComps];
-        }
-
-        for (int32 k = 0; k < 3; ++k)
+        float MinU[3] = { 0.f, 0.f, 0.f };
+        float MaxU[3] = { 0.f, 0.f, 0.f };
+        for (const FChunkBox& B : Boxes)
         {
-            Boxes[c].Min[k] = MinC[k];
-            Boxes[c].Max[k] = MaxC[k];
+            for (int32 k = 0; k < 3; ++k)
+            {
+                MinU[k] = FMath::Min(MinU[k], B.Min[k]);
+                MaxU[k] = FMath::Max(MaxU[k], B.Max[k]);
+            }
         }
-    });
 
-    float MinU[3] = { 0.f, 0.f, 0.f };
-    float MaxU[3] = { 0.f, 0.f, 0.f };
-    for (const FChunkBox& B : Boxes)
+        PC->BoundingBoxMin = FVector(MinU[0], MinU[2], -MinU[1]);
+        PC->BoundingBoxMax = FVector(MaxU[0], MaxU[2], -MaxU[1]);
+
+        OutCloud = MoveTemp(PC);
+        return true;
+    }
+
+    // ---- subset payload: lattice merge ----
+    const uint64 S = Hdr.subset_count;
+    const uint64 K = Hdr.subset_index;
+    const uint64 FullN = Hdr.full_num_points;
+    // Lattice consistency: the payload must be exactly the points
+    // K, K+S, ... below FullN.
+    const uint64 ExpectedSubsetN = (FullN > K) ? (FullN - K + S - 1) / S : 0;
+    if (S < 2 || S > 4096 || FullN > (uint64)MAX_int32 || (uint64)N != ExpectedSubsetN)
     {
-        for (int32 k = 0; k < 3; ++k)
+        UE_LOG(LogTemp, Warning, TEXT("JUSYNC: RawGeo subset %llu/%llu malformed lattice for '%s' (dropped)"),
+            K, S, *ElementName);
+        return false;
+    }
+
+    if (Policy == 0)
+    {
+        if (K == 0)
         {
-            MinU[k] = FMath::Min(MinU[k], B.Min[k]);
-            MaxU[k] = FMath::Max(MaxU[k], B.Max[k]);
+            // Coarse-only: show what the base carries, ignore the rest.
+            TArray<FLidarPointCloudPoint> Pts;
+            Pts.SetNumUninitialized((int32)N);
+            ParallelFor((int32)N, [&](int32 i) { Pts[i] = MakePoint(i); });
+            OutCloud = JUSYNCBuildCloudFromMergedPoints(
+                ElementName, Hdr.color_components != 0, false, MoveTemp(Pts), {}, Hdr.time);
+        }
+        return true;
+    }
+
+    const double NowSeconds = FPlatformTime::Seconds();
+    const FString Key = FString::Printf(TEXT("%s@%.6f"), *ElementName, Hdr.time);
+
+    FScopeLock Lock(&GRawGeoMergeLock);
+
+    // Age out abandoned merges (dropped subsets, dead sessions).
+    for (auto It = GRawGeoMerges.CreateIterator(); It; ++It)
+    {
+        if (NowSeconds - It.Value().LastUseSeconds > 300.0)
+        {
+            GRawGeoMergeTotalPoints -= (int64)It.Value().FullN;
+            It.RemoveCurrent();
         }
     }
 
-    PC->BoundingBoxMin = FVector(MinU[0], MinU[2], -MinU[1]);
-    PC->BoundingBoxMax = FVector(MaxU[0], MaxU[2], -MaxU[1]);
+    FJUSYNCRawGeoMerge* Merge = GRawGeoMerges.Find(Key);
+    if (Merge && (Merge->Stride != S || Merge->FullN != FullN))
+    {
+        GRawGeoMergeTotalPoints -= (int64)Merge->FullN;
+        GRawGeoMerges.Remove(Key);
+        Merge = nullptr;
+    }
+    if (!Merge)
+    {
+        FString EvictNote;
+        if (!JUSYNCMergeKeyFitsBudget((int64)FullN, EvictNote))
+        {
+            static FString LastBudgetWarnKey;
+            if (LastBudgetWarnKey != Key)
+            {
+                LastBudgetWarnKey = Key;
+                UE_LOG(LogTemp, Warning, TEXT("JUSYNC: RawGeo refine budget too small for '%s' t=%.4f (%llu pts); coarse-only. Raise jusync.RawGeo.RefineBudgetKPoints."),
+                    *ElementName, Hdr.time, FullN);
+            }
+            if (K == 0)
+            {
+                TArray<FLidarPointCloudPoint> Pts;
+                Pts.SetNumUninitialized((int32)N);
+                ParallelFor((int32)N, [&](int32 i) { Pts[i] = MakePoint(i); });
+                OutCloud = JUSYNCBuildCloudFromMergedPoints(
+                    ElementName, Hdr.color_components != 0, false, MoveTemp(Pts), {}, Hdr.time);
+            }
+            return true; // subsets beyond the coarse base: dropped
+        }
 
-    OutCloud = MoveTemp(PC);
+        // A fresh timestep for an element replaces that element's older-time
+        // merges (their windows are gone with the superseded spawns anyway).
+        for (auto It = GRawGeoMerges.CreateIterator(); It; ++It)
+        {
+            if (It.Value().PrimName == ElementName && It.Value().Time != Hdr.time)
+            {
+                GRawGeoMergeTotalPoints -= (int64)It.Value().FullN;
+                It.RemoveCurrent();
+            }
+        }
+
+        FJUSYNCRawGeoMerge& Fresh = GRawGeoMerges.Add(Key);
+        Fresh.Stride = S;
+        Fresh.FullN = FullN;
+        Fresh.Time = Hdr.time;
+        Fresh.PrimName = ElementName;
+        Fresh.bHasColors = Hdr.color_components != 0;
+        Fresh.bSawWidthStream = WidthF != nullptr && WidthCount > 0;
+        Fresh.bHasWidths = Fresh.bSawWidthStream;
+        Fresh.Points.SetNumUninitialized((int32)FullN);
+        if (Fresh.bHasWidths)
+            Fresh.Widths.SetNumZeroed((int32)FullN);
+        Fresh.FilledSlots.Init(false, (int32)FullN);
+        Merge = &Fresh;
+        GRawGeoMergeTotalPoints += (int64)FullN;
+    }
+
+    Merge->LastUseSeconds = NowSeconds;
+
+    // Scatter this subset into its lattice slots (idempotent on re-delivery).
+    for (int64 j = 0; j < N; ++j)
+    {
+        const int64 Idx = (int64)(K + (uint64)j * S);
+        if (Idx >= (int64)FullN)
+            break;
+        Merge->Points[Idx] = MakePoint(j);
+        if (Merge->bHasWidths && j < WidthCount)
+            Merge->Widths[Idx] = WidthF[j * WidthComps];
+        if (!Merge->FilledSlots[(int32)Idx])
+        {
+            Merge->FilledSlots[(int32)Idx] = true;
+            ++Merge->Filled;
+        }
+    }
+
+    const bool bComplete = Merge->Filled >= (int64)Merge->FullN;
+    const bool bEmit = bComplete || K == 0 || Policy == 1;
+    const bool bOutColors = Merge->bHasColors;
+
+    if (!bEmit)
+    {
+        // Intermediate subset: density improved, but don't thrash the client
+        // with a rebuild per subset. Coarse is on screen; the FULL emit lands
+        // when the merge completes.
+        return true;
+    }
+
+    TArray<FLidarPointCloudPoint> OutPts;
+    TArray<float> OutW;
+    bool bOutWidths = Merge->bHasWidths;
+    if (bComplete)
+    {
+        OutPts = MoveTemp(Merge->Points);
+        OutW = MoveTemp(Merge->Widths);
+        GRawGeoMergeTotalPoints -= (int64)Merge->FullN;
+        GRawGeoMerges.Remove(Key);
+        UE_LOG(LogTemp, Log, TEXT("JUSYNC: RawGeo refine FULL '%s' t=%.4f: %d points from %llu subsets"),
+            *ElementName, Hdr.time, (int32)FullN, S);
+    }
+    else
+    {
+        // Partial (coarse or per-subset policy): compact the filled lattice.
+        OutPts.SetNumUninitialized((int32)Merge->Filled);
+        if (bOutWidths)
+            OutW.SetNumUninitialized((int32)Merge->Filled);
+        int32 w = 0;
+        for (int32 i = 0; i < (int32)Merge->FullN; ++i)
+        {
+            if (Merge->FilledSlots[i])
+            {
+                OutPts[w] = Merge->Points[i];
+                if (bOutWidths)
+                    OutW[w] = Merge->Widths[i];
+                ++w;
+            }
+        }
+        OutPts.SetNum(w, EAllowShrinking::No);
+        if (bOutWidths)
+            OutW.SetNum(w, EAllowShrinking::No);
+    }
+
+    OutCloud = JUSYNCBuildCloudFromMergedPoints(
+        ElementName, bOutColors, bOutWidths, MoveTemp(OutPts), MoveTemp(OutW), Hdr.time);
     return true;
+}
+
+void JUSYNCFlushRawGeoMerges()
+{
+    FScopeLock Lock(&GRawGeoMergeLock);
+    GRawGeoMerges.Empty();
+    GRawGeoMergeTotalPoints = 0;
 }
 #endif // WITH_ANARI_USD_MIDDLEWARE
 
@@ -1686,9 +2041,19 @@ bool UJUSYNCSubsystem::LoadUSDFullCompactFromBuffer(const TArray<uint8>& Buffer,
             FJUSYNCPointCloudRef Cloud;
             if (JUSYNCParseRawGeoBuffer(Buffer, Cloud))
             {
-                OutPointCloudData.Add(MoveTemp(Cloud));
-                UE_LOG(LogTemp, Log, TEXT("JUSYNC: RawGeo payload: 1 point cloud (%d points) from '%s'"),
-                    OutPointCloudData[0]->PointCount, *Filename);
+                // Progressive refinement: intermediate subsets parse successfully
+                // but deliberately emit no cloud (the merge is still filling in;
+                // the coarse base is already on screen and the completed cloud
+                // arrives with the last subset). Nothing to spawn in that case.
+                if (Cloud.IsValid())
+                {
+                    const int32 PointCount = Cloud->PointCount;
+                    const FVector P0 = Cloud->Positions.Num() > 0 ? Cloud->Positions[0] : FVector::ZeroVector;
+                    UE_LOG(LogTemp, Log,
+                        TEXT("JUSYNC: RawGeo payload: 1 point cloud (%d points) p0=(%.4f,%.4f,%.4f) from '%s'"),
+                        PointCount, P0.X, P0.Y, P0.Z, *Filename);
+                    OutPointCloudData.Add(MoveTemp(Cloud));
+                }
                 return true;
             }
             UE_LOG(LogTemp, Warning, TEXT("JUSYNC: RawGeo magic but malformed payload for '%s' (%d bytes)"),
@@ -1768,19 +2133,21 @@ bool UJUSYNCSubsystem::LoadUSDFullCompactFromBuffer(const TArray<uint8>& Buffer,
         {
             FJUSYNCCompactMeshData& Mesh = *OutMeshes[i];
 
-            // USD/ParaView scenes are right-handed Y-up; the point-cloud path maps
-            // (x, y, z) -> (x, z, -y) for UE (see cpc.positions transform above).
-            // Compact meshes used to flow through raw and rendered 90 deg off the clouds.
+            // The middleware's compact mesh fill already mirrors Y
+            // ((x,y,z) -> (x,-y,z)), because USD is right-handed. Undo that
+            // mirror with a plain Y/Z swap so the result is (x,z,-y) in UE,
+            // exactly like the RawGeo point-cloud path. The combined transform
+            // has determinant +1, so triangle winding is preserved.
             if (CVarJusyncMeshConvertYUp.GetValueOnAnyThread() != 0)
             {
                 const bool bFlipWinding = CVarJusyncMeshFlipWinding.GetValueOnAnyThread() != 0;
                 for (FVector3f& P : Mesh.Points)
                 {
-                    P = FVector3f(P.X, P.Z, -P.Y);
+                    P = FVector3f(P.X, P.Z, P.Y);
                 }
                 for (FVector3f& N : Mesh.Normals)
                 {
-                    N = FVector3f(N.X, N.Z, -N.Y);
+                    N = FVector3f(N.X, N.Z, N.Y);
                 }
                 if (bFlipWinding)
                 {
@@ -1793,7 +2160,7 @@ bool UJUSYNCSubsystem::LoadUSDFullCompactFromBuffer(const TArray<uint8>& Buffer,
                 if (!LoggedMeshes.Contains(Mesh.ElementName))
                 {
                     LoggedMeshes.Add(Mesh.ElementName);
-                    UE_LOG(LogJUSYNC, Log, TEXT("Compact mesh '%s': mapped USD Y-up -> UE (x,z,-y), winding=%s"),
+                    UE_LOG(LogJUSYNC, Log, TEXT("Compact mesh '%s': mapped to UE (x,z,-y) like point clouds (middleware Y mirror undone), winding=%s"),
                         *Mesh.ElementName, bFlipWinding ? TEXT("flipped") : TEXT("kept"));
                 }
             }
@@ -1807,6 +2174,28 @@ bool UJUSYNCSubsystem::LoadUSDFullCompactFromBuffer(const TArray<uint8>& Buffer,
                 }
             }
             Mesh.bHasBakedColors = Mesh.VertexColors.Num() > 0;
+
+            // Diagnostic for the morph pipeline: if these hashes/bounds are
+            // identical across successive refreshes, the sender is still
+            // exporting the same vertex positions (the mesh cannot morph).
+            if (Mesh.Points.Num() > 0)
+            {
+                uint64 H = 1469598103934665603ull;
+                const uint8* Bytes = reinterpret_cast<const uint8*>(Mesh.Points.GetData());
+                const int32 NumBytes = Mesh.Points.Num() * static_cast<int32>(sizeof(FVector3f));
+                for (int32 b = 0; b < NumBytes; ++b)
+                {
+                    H ^= static_cast<uint64>(Bytes[b]);
+                    H *= 1099511628211ull;
+                }
+                const FBox B = Mesh.GetLocalBounds();
+                const FVector3f& P0 = Mesh.Points[0];
+                UE_LOG(LogTemp, Display,
+                    TEXT("JUSYNC: [MeshHash] '%s' vtx=%d hash=%016llx p0=(%.4f,%.4f,%.4f) min=(%.3f,%.3f,%.3f) max=(%.3f,%.3f,%.3f)"),
+                    *Mesh.ElementName, Mesh.Points.Num(), (unsigned long long)H,
+                    P0.X, P0.Y, P0.Z,
+                    B.Min.X, B.Min.Y, B.Min.Z, B.Max.X, B.Max.Y, B.Max.Z);
+            }
         }
     }
 
@@ -2262,6 +2651,38 @@ static TAutoConsoleVariable<FString> CVarJUSyncMorphMeshMaterial(
     TEXT(" unless the spawn material itself is morph-capable)."),
     ECVF_Default);
 
+static TAutoConsoleVariable<float> CVarJUSyncMeshEmissiveFloor(
+    TEXT("jusync.Mesh.EmissiveFloor"), 0.004f,
+    TEXT("Self-lit lift applied to streamed mesh materials (0 = lit only, 0.1+ = halo).")
+    TEXT(" Re-applied to the mesh MIDs on every streamed update, so it can be tuned live."),
+    ECVF_Default);
+
+// Applies the live brightness knob to a mesh material. Returns a MID when the material
+// exposes EmissiveFloor; callers should use the return value (if any) as the material.
+static UMaterialInstanceDynamic* ApplyMeshEmissiveFloor(UMaterialInterface* Base, UObject* Outer)
+{
+    if (!Base || !Outer)
+    {
+        return nullptr;
+    }
+    float Unused = 0.f;
+    if (!Base->GetScalarParameterValue(TEXT("EmissiveFloor"), Unused))
+    {
+        return nullptr;
+    }
+    UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(Base);
+    if (!MID)
+    {
+        MID = UMaterialInstanceDynamic::Create(Base, Outer);
+    }
+    if (MID)
+    {
+        MID->SetScalarParameterValue(TEXT("EmissiveFloor"),
+                                     CVarJUSyncMeshEmissiveFloor.GetValueOnGameThread());
+    }
+    return MID;
+}
+
 // One morph-MID per streamed component so concurrent meshes ramp independently;
 // weak on both ends so the cache never keeps a mesh or material alive.
 static TMap<TWeakObjectPtr<URealtimeMeshComponent>, TWeakObjectPtr<UMaterialInstanceDynamic>>
@@ -2291,6 +2712,8 @@ static UMaterialInstanceDynamic* GetOrCreateMorphOverrideMID(UJUSYNCSubsystem* S
     {
         if (UMaterialInstanceDynamic* MID = Cached->Get())
         {
+            MID->SetScalarParameterValue(TEXT("EmissiveFloor"),
+                                         CVarJUSyncMeshEmissiveFloor.GetValueOnGameThread());
             return MID;
         }
     }
@@ -2316,6 +2739,8 @@ static UMaterialInstanceDynamic* GetOrCreateMorphOverrideMID(UJUSYNCSubsystem* S
     {
         MID->SetScalarParameterValue(FJUSYNCMeshMorpher::MorphActiveParameter, 0.f);
         MID->SetScalarParameterValue(FJUSYNCMeshMorpher::MorphTParameter, 1.f);
+        MID->SetScalarParameterValue(TEXT("EmissiveFloor"),
+                                     CVarJUSyncMeshEmissiveFloor.GetValueOnGameThread());
         GJUSyncMorphOverrideMIDs.Add(Comp, MID);
     }
     return MID;
@@ -2357,6 +2782,27 @@ bool UJUSYNCSubsystem::UpdateRealtimeMeshFromJUSYNC_WithCompact(
         bMorphBlend = (MeshMorpher->BeginUpdate(RealtimeMeshComponent, IntentMaterial,
                                                 MeshData, UpdateStart, MorphPrev)
                        == FJUSYNCMeshMorpher::EApplyMode::Blend);
+    }
+
+    // Diagnostic: distinguishes "geometry never reached the component" from
+    // "the update landed but the GPU blend did not engage".
+    {
+        float MaxDelta = 0.0f;
+        if (bMorphBlend && MorphPrev.Num() == MeshData.Points.Num())
+        {
+            for (int32 i = 0; i < MorphPrev.Num(); ++i)
+            {
+                MaxDelta = FMath::Max(MaxDelta, (MorphPrev[i] - MeshData.Points[i]).Size());
+            }
+        }
+        UMaterialInterface* DebugMat = MaterialToApply
+            ? MaterialToApply
+            : static_cast<UMaterialInterface*>(RealtimeMeshComponent->GetMaterial(0));
+        UE_LOG(LogJUSYNC, Log,
+            TEXT("MeshMorphApply '%s': blend=%d prev=%d/%d maxDelta=%.5f mat=%s capable=%d"),
+            *MeshData.ElementName, bMorphBlend ? 1 : 0, MorphPrev.Num(), MeshData.Points.Num(),
+            MaxDelta, DebugMat ? *DebugMat->GetName() : TEXT("None"),
+            FJUSYNCMeshMorpher::IsMaterialMorphCapable(DebugMat) ? 1 : 0);
     }
 
     RealtimeMesh::FRealtimeMeshStreamSet Streams;
@@ -4027,7 +4473,12 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation_WithStreams(const F
 
     if (CustomMaterial)
     {
-        MeshComp->SetMaterial(0, CustomMaterial);
+        UMaterialInterface* SpawnMat = CustomMaterial;
+        if (UMaterialInstanceDynamic* FloorMID = ApplyMeshEmissiveFloor(CustomMaterial, MeshComp))
+        {
+            SpawnMat = FloorMID;
+        }
+        MeshComp->SetMaterial(0, SpawnMat);
     }
 
     SpawnedActor->SetActorLocation(SpawnLocation);

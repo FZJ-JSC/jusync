@@ -30,6 +30,16 @@ static TAutoConsoleVariable<int32> CVarJUSyncMorphMaxBlendMs(
     TEXT("Cap in ms for the auto mesh blend window."),
     ECVF_Default);
 
+// Auto mode follows the measured sample gap so a slow stream still gets a
+// full-length blend. At interactive rates that gap is the *update* interval
+// (often 0.5 s because the scene diff polls), which leaves the mesh one whole
+// update behind on screen. Keep auto snappy by default; raise this if you want
+// slow samples to blend for their whole gap.
+static TAutoConsoleVariable<int32> CVarJUSyncMorphAutoMaxMs(
+    TEXT("jusync.Morph.MeshAutoMaxMs"), 200,
+    TEXT("Cap in ms for the auto mesh blend when MeshBlendMs is 0 (default 200)."),
+    ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarJUSyncMorphTopologyMatch(
     TEXT("jusync.Morph.MeshTopologyMatch"), 1,
     TEXT("1 = morph across samples whose triangle topology changed (sender re-meshes every timestep)")
@@ -387,7 +397,11 @@ FJUSYNCMeshMorpher::EApplyMode FJUSYNCMeshMorpher::BeginUpdate(
     }
     else
     {
-        JUSyncMorph::WriteDisplayedPrev(TArray<FVector3f>{}, Entry->CurrPoints, 0.f,
+        // No blend in flight: the displayed pose is exactly the previous sample. Start the
+        // new blend from Entry->CurrPoints. (Passing an empty FromA here made the overlap
+        // zero and filled Out with the NEW points instead, producing a zero delta and an
+        // instant snap for every sample that arrived after the previous ramp had finished.)
+        JUSyncMorph::WriteDisplayedPrev(Entry->CurrPoints, Entry->CurrPoints, 0.f,
                                         MeshData.Points.Num(), MeshData.Points, OutPrevPoints);
     }
 
@@ -419,9 +433,12 @@ void FJUSYNCMeshMorpher::Commit(
         Entry.PrevPoints = MoveTemp(UploadedPrev);
         const int32 ForcedMs = CVarJUSyncMorphBlendMs.GetValueOnGameThread();
         const double MaxBlend = FMath::Max(CVarJUSyncMorphMaxBlendMs.GetValueOnGameThread(), 8) / 1000.0;
+        const double AutoMax = FMath::Clamp(
+            CVarJUSyncMorphAutoMaxMs.GetValueOnGameThread(), 8,
+            FMath::Max(8, CVarJUSyncMorphMaxBlendMs.GetValueOnGameThread())) / 1000.0;
         Entry.Duration = (ForcedMs > 0)
-            ? ForcedMs / 1000.0
-            : FMath::Clamp(Gap, JUSyncMorph::MinDurationSeconds, FMath::Max(JUSyncMorph::MinDurationSeconds, MaxBlend));
+            ? FMath::Max(ForcedMs, 8) / 1000.0
+            : FMath::Clamp(Gap, JUSyncMorph::MinDurationSeconds, FMath::Max(JUSyncMorph::MinDurationSeconds, FMath::Min(MaxBlend, AutoMax)));
         Entry.BlendStart = NowSeconds;
         Entry.bBlending = true;
 

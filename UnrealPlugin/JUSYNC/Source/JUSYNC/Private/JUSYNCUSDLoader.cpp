@@ -192,13 +192,14 @@ void FJUSYNCUSDLoader::ParseAsync(
     uint64 Generation,
     uint64 HashLo,
     uint64 HashHi,
+    uint64 SampleId,
     int64 Size,
     TFunction<void(FJUSYNCParsedFileResult&&)>&& OnGameThread)
 {
     TWeakObjectPtr<UJUSYNCSubsystem> WeakSubsystem = Subsystem;
 
     FFunctionGraphTask::CreateAndDispatchWhenReady(
-        [WeakSubsystem, Buffer = MoveTemp(Buffer), Filename = MoveTemp(Filename), LUT = MoveTemp(LUT), LUTVersion, bPrebuildStreams, FileIndex, Rank, Generation, HashLo, HashHi, Size, OnGameThread = MoveTemp(OnGameThread)]() mutable
+        [WeakSubsystem, Buffer = MoveTemp(Buffer), Filename = MoveTemp(Filename), LUT = MoveTemp(LUT), LUTVersion, bPrebuildStreams, FileIndex, Rank, Generation, HashLo, HashHi, SampleId, Size, OnGameThread = MoveTemp(OnGameThread)]() mutable
         {
             FJUSYNCParsedFileResult Result;
             Result.Filename = MoveTemp(Filename);
@@ -207,6 +208,7 @@ void FJUSYNCUSDLoader::ParseAsync(
             Result.Generation = Generation;
             Result.HashLo = HashLo;
             Result.HashHi = HashHi;
+            Result.SampleId = SampleId;
             Result.Size = Size;
             Result.LUTVersion = LUTVersion;
 

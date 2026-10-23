@@ -27,8 +27,9 @@ static TAutoConsoleVariable<int32> CVarJusyncCloudBlendMs(
     ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarJusyncCloudMaxBlendMs(
-    TEXT("jusync.Morph.CloudMaxBlendMs"), 2000,
-    TEXT("Cap in ms for the auto cloud blend window."),
+    TEXT("jusync.Morph.CloudMaxBlendMs"), 200,
+    TEXT("Cap in ms for the auto cloud blend window. Kept short so a swap always\n")
+    TEXT("completes between streamed samples instead of being retargeted forever."),
     ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarJusyncCloudSmooth(
@@ -54,7 +55,7 @@ static TAutoConsoleVariable<FString> CVarJusyncCloudMaterial(
     ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarJusyncCloudEmissiveFloor(
-    TEXT("jusync.Spawner.CloudEmissiveFloor"), 0.5f,
+    TEXT("jusync.Spawner.CloudEmissiveFloor"), 0.004f,
     TEXT("M_JusyncCloud 'EmissiveFloor' param: point color * this goes to emissive. Keep <=1 to stay\n")
     TEXT("below the bloom threshold."),
     ECVF_Default);
@@ -161,6 +162,13 @@ void FJUSYNCPointCloudSpawner::SetGradientLUT(const TArray<FColor>& InLUT)
         PendingNoColorClouds.Empty();
     }
 
+    // Cached playback must not replay live payloads that were waiting on the
+    // gradient LUT. They are retained by the sample cache instead.
+    if (bPlaybackMode)
+    {
+        return;
+    }
+
     for (FPendingNoColorCloud& Pending : ToFlush)
     {
         EnqueuePointCloud(MoveTemp(Pending.Data), Pending.Rank);
@@ -169,6 +177,13 @@ void FJUSYNCPointCloudSpawner::SetGradientLUT(const TArray<FColor>& InLUT)
 
 void FJUSYNCPointCloudSpawner::FlushExpiredNoColorClouds()
 {
+    if (bPlaybackMode)
+    {
+        FScopeLock Lock(&QueueMutex);
+        PendingNoColorClouds.Empty();
+        return;
+    }
+
     const TArray<FColor> LUT = GetGradientLUT();
     const bool bLUTReady = LUT.Num() > 0;
 
@@ -202,27 +217,133 @@ void FJUSYNCPointCloudSpawner::FlushExpiredNoColorClouds()
     }
 }
 
-void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudRef&& PCRef, int32 InRank)
+bool FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudRef&& PCRef, int32 InRank)
 {
     if (!PCRef || !PCRef->IsValid())
     {
-        return;
+        return false;
     }
 
     if (PCRef.IsUnique())
     {
         FJUSYNCPointCloudData Owned = MoveTemp(*PCRef);
-        EnqueuePointCloud(MoveTemp(Owned), InRank);
-        return;
+        return EnqueuePointCloud(MoveTemp(Owned), InRank);
     }
 
     FJUSYNCPointCloudData Copy = *PCRef;
-    EnqueuePointCloud(MoveTemp(Copy), InRank);
+    return EnqueuePointCloud(MoveTemp(Copy), InRank);
 }
 
-void FJUSYNCPointCloudSpawner::EnqueuePointCloud(const FJUSYNCPointCloudData& PCData, int32 InRank)
+bool FJUSYNCPointCloudSpawner::EnqueuePointCloudForPlayback(FJUSYNCPointCloudRef&& PCRef, int32 InRank)
 {
-    EnqueuePointCloud(FJUSYNCPointCloudData(PCData), InRank);
+    if (!PCRef || !PCRef->IsValid() || !Owner.IsValid() || bShuttingDown.load())
+    {
+        return false;
+    }
+
+    FJUSYNCPointCloudData PCData = PCRef.IsUnique() ? MoveTemp(*PCRef) : *PCRef;
+
+    const JUSYNCElementNames::FVariant ElementVariant =
+        JUSYNCElementNames::ParseElement(PCData.ElementName);
+    if (!ElementVariant.Element.IsEmpty())
+    {
+        PCData.ElementName = JUSYNCElementNames::CanonicalActorIdentity(ElementVariant.Element);
+    }
+
+    if (IsElementFiltered(PCData.ElementName))
+    {
+        return false;
+    }
+
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    FPointCloudReadyEntry Entry;
+    Entry.ElementName = PCData.ElementName;
+    Entry.Key = JUSYNCElementNames::MakeRankedElementKey(PCData.ElementName, InRank);
+    Entry.Rank = InRank;
+    Entry.PointSize = PointSize;
+    Entry.bSpawned = false;
+    Entry.bNeedsRecolor = false;
+    Entry.bPlaybackMorph = true;
+
+    if (PCData.HasLidarPoints())
+    {
+        Entry.Points = MoveTemp(PCData.LidarPoints);
+        if (!PCData.HasBakedColors() && PCData.Widths.Num() > 0)
+        {
+            const TArray<FColor> LUT = GetGradientLUT();
+            if (LUT.Num() > 0)
+            {
+                ParallelFor(static_cast<int32>(Entry.Points.Num()), [&](int32 i)
+                {
+                    const float Attr0 = (i < PCData.Widths.Num()) ? PCData.Widths[i] : 0.0f;
+                    const int32 LUTIdx = FMath::Clamp(
+                        FMath::RoundToInt(Attr0 * static_cast<float>(LUT.Num() - 1)),
+                        0,
+                        LUT.Num() - 1);
+                    Entry.Points[i].Color = LUT[LUTIdx];
+                });
+            }
+        }
+    }
+    else
+    {
+        const int32 PointCount = PCData.Positions.Num();
+        if (PointCount <= 0)
+        {
+            return false;
+        }
+
+        const bool bHasColors = PCData.Colors.Num() == PointCount;
+        const TArray<FColor> LUT = GetGradientLUT();
+        const bool bUseGradient = LUT.Num() > 0;
+        Entry.Points.SetNum(PointCount);
+        for (int32 i = 0; i < PointCount; ++i)
+        {
+            const FVector& P = PCData.Positions[i];
+            FColor Col;
+            if (bHasColors)
+            {
+                Col = PCData.Colors[i];
+            }
+            else if (bUseGradient && PCData.Widths.Num() > i)
+            {
+                const int32 LUTIdx = FMath::Clamp(
+                    FMath::RoundToInt(PCData.Widths[i] * static_cast<float>(LUT.Num() - 1)),
+                    0,
+                    LUT.Num() - 1);
+                Col = LUT[LUTIdx];
+            }
+            else
+            {
+                Col = FColor(128, 128, 128);
+            }
+
+            Entry.Points[i] = FLidarPointCloudPoint(
+                P.X, P.Y, P.Z,
+                Col.R / 255.f, Col.G / 255.f, Col.B / 255.f, Col.A / 255.f);
+        }
+    }
+
+    if (Entry.Points.Num() == 0)
+    {
+        return false;
+    }
+
+    {
+        FScopeLock Lock(&QueueMutex);
+        ReadyQueue.Add(MoveTemp(Entry));
+        DrainReadyQueueLocked();
+    }
+    return true;
+#else
+    (void)InRank;
+    return false;
+#endif
+}
+
+bool FJUSYNCPointCloudSpawner::EnqueuePointCloud(const FJUSYNCPointCloudData& PCData, int32 InRank)
+{
+    return EnqueuePointCloud(FJUSYNCPointCloudData(PCData), InRank);
 }
 
 bool FJUSYNCPointCloudSpawner::IsElementFiltered(const FString& ElementName) const
@@ -257,9 +378,26 @@ bool FJUSYNCPointCloudSpawner::IsElementFiltered(const FString& ElementName) con
     return false;
 }
 
-void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData, int32 InRank, bool bAllowNoGradient)
+bool FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData, int32 InRank, bool bAllowNoGradient)
 {
-    if (!PCData.IsValid() || !Owner.IsValid() || bShuttingDown.load()) return;
+    if (!PCData.IsValid() || !Owner.IsValid() || bShuttingDown.load()) return false;
+
+    // Keep one actor (and one morph chain) per logical element. The sender
+    // alternates "<element>" and "<element>_u<k>" for consecutive samples; if
+    // the raw name keys the actor, every variant allocates a new cloud and the
+    // previous sample is left visible. The RawGeo subset merge already happened
+    // upstream, so folding here cannot mix two samples' points.
+    {
+        const JUSYNCElementNames::FVariant ElementVariant =
+            JUSYNCElementNames::ParseElement(PCData.ElementName);
+        if (!ElementVariant.Element.IsEmpty())
+        {
+            const FString StableElement = JUSYNCElementNames::CanonicalActorIdentity(ElementVariant.Element);
+            UE_LOG(LogTemp, Verbose, TEXT("JUSYNC Spawner: canonical cloud '%s' onto '%s'"),
+                *PCData.ElementName, *StableElement);
+            PCData.ElementName = StableElement;
+        }
+    }
 
     // Rankless data would key its morph chain like rank 0 and blend rank 0's
     // previous positions into this sample, so say so instead of only showing it
@@ -273,7 +411,7 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
     {
         UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: SKIPPED filtered PC '%s' (%d points)"),
                *PCData.ElementName, PCData.PointCount);
-        return;
+        return false;
     }
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
@@ -295,13 +433,13 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
                 const FString ElementNameForLog = Pending.Data.ElementName;
                 PendingNoColorClouds.Add(MoveTemp(Pending));
                 UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: delaying PC '%s' for gradient LUT"), *ElementNameForLog);
-                return;
+                return true;
             }
         }
 
         if (!BeginTask())
         {
-            return;
+            return false;
         }
 
         UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: queued PC '%s' for direct LiDAR spawn (%d points)"),
@@ -357,6 +495,13 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
             FFunctionGraphTask::CreateAndDispatchWhenReady(
                 [this, Entry = MoveTemp(Entry)]() mutable
                 {
+                    // Live payloads that finish conversion after the user
+                    // entered playback must not overwrite the cached frame on
+                    // the next tick.
+                    if (bPlaybackMode)
+                    {
+                        return;
+                    }
                     {
                         FScopeLock Lock(&QueueMutex);
                         ReadyQueue.Add(MoveTemp(Entry));
@@ -371,7 +516,7 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
 
             EndTask();
         });
-        return;
+        return true;
     }
 #endif
 
@@ -389,13 +534,13 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
             const FString ElementNameForLog = Pending.Data.ElementName;
             PendingNoColorClouds.Add(MoveTemp(Pending));
             UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: delaying PC '%s' for gradient LUT"), *ElementNameForLog);
-            return;
+            return true;
         }
     }
 
     if (!BeginTask())
     {
-        return;
+        return false;
     }
 
     UE_LOG(LogTemp, Log, TEXT("JUSYNC Spawner: queued PC '%s' for async conversion (%d points)"),
@@ -457,6 +602,10 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
         FFunctionGraphTask::CreateAndDispatchWhenReady(
             [this, Entry = MoveTemp(Entry)]() mutable
             {
+                if (bPlaybackMode)
+                {
+                    return;
+                }
                 {
                     FScopeLock Lock(&QueueMutex);
                     ReadyQueue.Add(MoveTemp(Entry));
@@ -483,6 +632,7 @@ void FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData,
 #endif
         EndTask();
     });
+    return true;
 }
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
@@ -517,6 +667,29 @@ void FJUSYNCPointCloudSpawner::StartAsyncCloudBuild(const FString& Key, FPointCl
     if (!Existing)
     {
         InFlightBuilds.Add(Key, F);
+    }
+
+    // A deferred swap is waiting for its morph window to elapse, but a newer
+    // sample has arrived. If we simply overwrite the in-flight slot, the old
+    // cloud stays displayed forever under a continuous stream (the morph is
+    // retargeted before its window ends, so the swap never fires) and the old
+    // assets are never released. Land the completed build now, then start the
+    // newer one; the actor advances one sample at a time instead of freezing.
+    if (!bChainStep && F->bDeferred && !F->bBuilding)
+    {
+        const uint64 DeferredGeneration = F->Generation;
+        OnAsyncCloudBuildFinished(Key, DeferredGeneration, true);
+
+        Existing = InFlightBuilds.Find(Key);
+        if (Existing)
+        {
+            F = *Existing;
+        }
+        else
+        {
+            F = MakeShared<FInFlightCloudBuild>();
+            InFlightBuilds.Add(Key, F);
+        }
     }
 
     if (F->bBuilding)
@@ -868,6 +1041,106 @@ void FJUSYNCPointCloudSpawner::AbortDeferredSwap(const FString& Key)
     }
 }
 
+void FJUSYNCPointCloudSpawner::EnterPlaybackMode()
+{
+    bPlaybackMode = true;
+
+    // Live clouds that were already converted/queued must not land after the
+    // cached frame. In-flight builds are aborted per key below; builds that
+    // finished and are only waiting out a morph window are dropped immediately.
+    {
+        FScopeLock Lock(&QueueMutex);
+        ReadyQueue.Empty();
+        PendingNoColorClouds.Empty();
+    }
+
+    RampChains.Empty();
+    SmoothMorphs.Empty();
+    CloudWalkInputIdx.Empty();
+    CloudDisplayPos.Empty();
+    CloudLastArrival.Empty();
+
+    TArray<FString> Keys;
+    InFlightBuilds.GetKeys(Keys);
+    for (const FString& Key : Keys)
+    {
+        PreparePointCloudForPlayback(Key);
+    }
+}
+
+void FJUSYNCPointCloudSpawner::PreparePointCloudForPlayback(const FString& Key)
+{
+    // A scrub is an explicit jump, not a continuation of the live animation.
+    // Stop every morph/ramp path for this element and make sure a build that
+    // was already running cannot land its live payload on top of the cached
+    // frame we are about to enqueue. Keep CloudDisplayPos: it is the pose the
+    // next manually selected cached frame morphs from. Drop the correspondence
+    // map so a mid-morph snapshot gets a fresh mapping.
+    RampChains.Remove(Key);
+    SmoothMorphs.Remove(Key);
+    CloudWalkInputIdx.Remove(Key);
+    CloudLastArrival.Remove(Key);
+
+    // Seed the morph anchor from the cloud currently on screen. Without this,
+    // the first cached selection in playback mode has no CloudDisplayPos and
+    // every later selection also snaps because ShouldStartCloudRamp() never
+    // becomes true.
+    if (!CloudDisplayPos.Contains(Key))
+    {
+        if (AActor* Actor = FindActorByElementKey(Key))
+        {
+            if (ALidarPointCloudActor* LidarActor = Cast<ALidarPointCloudActor>(Actor))
+            {
+                if (ULidarPointCloudComponent* Comp = LidarActor->GetPointCloudComponent())
+                {
+                    if (ULidarPointCloud* Cloud = Comp->GetPointCloud())
+                    {
+                        TArray<FVector3f> Displayed;
+                        Displayed.Reserve(Cloud->GetNumPoints());
+                        Cloud->ExecuteActionOnAllPoints(
+                            [&](FLidarPointCloudPoint* P) { Displayed.Add(P->Location); },
+                            /*bVisibleOnly*/false);
+                        if (Displayed.Num() > 0)
+                        {
+                            CloudDisplayPos.Add(Key, MoveTemp(Displayed));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (TSharedRef<FInFlightCloudBuild>* Found = InFlightBuilds.Find(Key))
+    {
+        FInFlightCloudBuild& F = **Found;
+        F.bHasPending = false;
+        F.PendingReplacement = FPointCloudReadyEntry();
+        F.bChainStep = false;
+        F.bChainFinal = false;
+
+        if (F.bBuilding)
+        {
+            // The worker owns F.Points until its completion callback. Flag it
+            // so OnAsyncCloudBuildFinished discards the result instead of
+            // swapping the live cloud back in.
+            F.bChainAborted = true;
+        }
+        else if (F.bDeferred)
+        {
+            // The build already finished and is only waiting out its morph
+            // window; land-and-discard it now so the slot is free.
+            F.bChainAborted = true;
+            const uint64 Generation = F.Generation;
+            OnAsyncCloudBuildFinished(Key, Generation, true);
+            InFlightBuilds.Remove(Key);
+        }
+        else
+        {
+            InFlightBuilds.Remove(Key);
+        }
+    }
+}
+
 void FJUSYNCPointCloudSpawner::TickCloudRamps(double NowSeconds)
 {
     for (TPair<FString, TSharedRef<FInFlightCloudBuild>>& Pair : InFlightBuilds)
@@ -1146,6 +1419,16 @@ void FJUSYNCPointCloudSpawner::ApplyVisualSettings(ULidarPointCloudComponent* Co
     {
         Comp->ScalingMethod = ELidarPointCloudScalingMethod::FixedScreenSize;
         Comp->PointSize = FMath::Max(0.0f, CVarJusyncCloudScreenSize.GetValueOnGameThread());
+    }
+
+    // The renderer multiplies sprite size by the component world scale
+    // (LidarPointCloudRendering: SpriteSizeMultiplier = PointSize * ComponentScale),
+    // and every actor this spawner touches carries SpawnScale on its transform.
+    // Divide that back out so points render at the configured size no matter how
+    // the batch was scaled up (manual SpawnScale or the spawner's Fit Volume).
+    if (SpawnScale > KINDA_SMALL_NUMBER)
+    {
+        Comp->PointSize /= SpawnScale;
     }
 
     if (Comp->GetPointShape() != PointShape)
@@ -1460,6 +1743,19 @@ void FJUSYNCPointCloudSpawner::SetSpawnLocation(const FVector& In)
     SpawnLocation = In;
 }
 
+void FJUSYNCPointCloudSpawner::ReapplyTransformToAllActors()
+{
+    for (AActor* Actor : ActiveActors)
+    {
+        if (!Actor || !Actor->IsValidLowLevel())
+        {
+            continue;
+        }
+        ApplyTransformToActor(Actor);
+        ApplyVisualSettingsToActor(Actor);
+    }
+}
+
 void FJUSYNCPointCloudSpawner::ApplyTransformToActor(AActor* Actor)
 {
     if (!Actor || !Actor->IsValidLowLevel())
@@ -1483,10 +1779,13 @@ void FJUSYNCPointCloudSpawner::Tick(float DeltaTime)
 
     const int32 FixedNow = CVarJusyncCloudFixedSize.GetValueOnGameThread();
     const float ScreenNow = CVarJusyncCloudScreenSize.GetValueOnGameThread();
-    if (FixedNow != LastFixedSizeState || ScreenNow != LastFixedScreenSize)
+    const float CloudFloorNow = CVarJusyncCloudEmissiveFloor.GetValueOnGameThread();
+    if (FixedNow != LastFixedSizeState || ScreenNow != LastFixedScreenSize
+        || !FMath::IsNearlyEqual(CloudFloorNow, LastCloudEmissiveFloor))
     {
         LastFixedSizeState = FixedNow;
         LastFixedScreenSize = ScreenNow;
+        LastCloudEmissiveFloor = CloudFloorNow;
         ApplySizingToActiveActors();
     }
 #endif
@@ -1501,6 +1800,43 @@ void FJUSYNCPointCloudSpawner::DrainReadyQueue()
 void FJUSYNCPointCloudSpawner::DrainReadyQueueLocked()
 {
     if (ReadyQueue.Num() == 0) return;
+
+    // Coalesce pending updates per element BEFORE spawning. A progressively
+    // refined frame enqueues its coarse base and its full cloud within a few
+    // milliseconds; at one item per tick they used to be applied on separate
+    // ticks, so the coarse (lower point count) could land last and become the
+    // ramp's final entry - the element stayed at coarse density. Keep the
+    // densest pending entry per key (the newest wins on ties).
+    {
+        TArray<FPointCloudReadyEntry> Pending = MoveTemp(ReadyQueue);
+        ReadyQueue.Reset();
+
+        TMap<FString, int32> IndexByKey;
+        TArray<FPointCloudReadyEntry> Keep;
+        IndexByKey.Reserve(Pending.Num());
+        for (FPointCloudReadyEntry& E : Pending)
+        {
+            if (E.bSpawned)
+            {
+                continue;
+            }
+            if (E.Key.IsEmpty())
+            {
+                E.Key = JUSYNCElementNames::MakeRankedElementKey(E.ElementName, E.Rank);
+            }
+            int32* ExistingIdx = IndexByKey.Find(E.Key);
+            if (!ExistingIdx)
+            {
+                IndexByKey.Add(E.Key, Keep.Num());
+                Keep.Add(MoveTemp(E));
+            }
+            else if (E.Points.Num() >= Keep[*ExistingIdx].Points.Num())
+            {
+                Keep[*ExistingIdx] = MoveTemp(E);
+            }
+        }
+        ReadyQueue = MoveTemp(Keep);
+    }
 
     double StartTime = FPlatformTime::Seconds();
     int32 ItemsProcessed = 0;
@@ -1534,6 +1870,11 @@ void FJUSYNCPointCloudSpawner::DrainReadyQueueLocked()
                 ReleaseActor(ExistingActor);
             }
             UE_LOG(LogTemp, Warning, TEXT("JUSYNC Spawner: skipped empty PC entry '%s'"), *Entry.Key);
+            // The file spawner counted this cloud as pending when it enqueued
+            // it. An empty cloud is dropped here, so report it as finished or
+            // the initial-spawn barrier never opens (and live updates stay
+            // blocked after an editor restart).
+            OnPointCloudSpawned.Broadcast(Entry.Key, nullptr);
             continue;
         }
 
@@ -1552,8 +1893,13 @@ void FJUSYNCPointCloudSpawner::DrainReadyQueueLocked()
         ApplyTransformToActor(Actor);
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
+        // Cached selections use the same async smooth-morph path as live
+        // samples, but only for entries explicitly marked as playback morphs;
+        // ordinary live entries are still dropped while the playback window is
+        // frozen.
+        const bool bAllowCloudMorph = !bPlaybackMode || Entry.bPlaybackMorph;
         if (CVarJusyncAsyncCloudBuild.GetValueOnGameThread() > 0
-            && Entry.Points.Num() > 0 && !Entry.bNeedsRecolor)
+            && Entry.Points.Num() > 0 && !Entry.bNeedsRecolor && bAllowCloudMorph)
         {
             if (!bInPlaceUpdate)
             {
@@ -1565,16 +1911,19 @@ void FJUSYNCPointCloudSpawner::DrainReadyQueueLocked()
             const double NowSeconds = FPlatformTime::Seconds();
             const FString Key = Entry.Key;
 
-            if (bInPlaceUpdate && ShouldStartCloudRamp(Key, NowSeconds))
+            if (bAllowCloudMorph && bInPlaceUpdate && ShouldStartCloudRamp(Key, NowSeconds))
             {
                 AbortDeferredSwap(Key);
                 RampChains.Remove(Key);
 
                 const int32 ForcedMs = CVarJusyncCloudBlendMs.GetValueOnGameThread();
                 const double MaxBlend = FMath::Max(CVarJusyncCloudMaxBlendMs.GetValueOnGameThread(), 8) / 1000.0;
-                const double BlendSeconds = (ForcedMs > 0)
-                    ? ForcedMs / 1000.0
-                    : FMath::Clamp(NowSeconds - CloudLastArrival.FindRef(Key), 0.008, MaxBlend);
+                const bool bPlaybackMorph = bPlaybackMode && Entry.bPlaybackMorph;
+                const double BlendSeconds = bPlaybackMorph
+                    ? (ForcedMs > 0 ? ForcedMs / 1000.0 : MaxBlend)
+                    : (ForcedMs > 0
+                        ? ForcedMs / 1000.0
+                        : FMath::Clamp(NowSeconds - CloudLastArrival.FindRef(Key), 0.008, MaxBlend));
                 CloudLastArrival.Add(Key, NowSeconds);
 
                 if (CVarJusyncCloudSmooth.GetValueOnGameThread() > 0

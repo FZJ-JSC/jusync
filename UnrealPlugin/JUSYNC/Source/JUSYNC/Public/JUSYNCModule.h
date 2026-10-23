@@ -24,6 +24,9 @@ private:
     void UnregisterModuleSystems();
     void CleanupPlatformSpecific();
 
+    bool bPlaybackDetailsRegistered = false;
+    FDelegateHandle PostEngineInitHandle;
+
 #if WITH_ANARI_USD_MIDDLEWARE
     void MaybeStartHeadlessHarness();
 #endif

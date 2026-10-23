@@ -14,6 +14,9 @@ struct FJUSYNCParsedFileResult
     uint64 Generation = 0;
     uint64 HashLo = 0;
     uint64 HashHi = 0;
+    // Sender frame timestamp shared by every clip from the same render frame.
+    // Zero means "unknown" (initial file-list load / scene diff).
+    uint64 SampleId = 0;
     int64 Size = 0;
     bool bParsed = false;
     uint64 LUTVersion = 0;
@@ -56,6 +59,7 @@ public:
         uint64 Generation,
         uint64 HashLo,
         uint64 HashHi,
+        uint64 SampleId,
         int64 Size,
         TFunction<void(FJUSYNCParsedFileResult&&)>&& OnGameThread);
 };

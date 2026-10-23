@@ -24,6 +24,7 @@ public class JUSYNC : ModuleRules
         {
             "Slate",
             "SlateCore",
+            "InputCore",
             "RenderCore",
             "RHI",
             "GameplayTasks",
@@ -31,6 +32,20 @@ public class JUSYNC : ModuleRules
             "ImageWrapper",
             "Json"
         });
+
+        // The sample scrubber is a real Slate slider in the actor's Details
+        // panel, so the editor-only customization needs PropertyEditor.
+        if (Target.bBuildEditor)
+        {
+            PrivateDependencyModuleNames.AddRange(new string[]
+            {
+                "UnrealEd",
+                "PropertyEditor",
+                // Provides the Sequencer-style timeline scrubber used by the
+                // DaySequence time-of-day preview details panel.
+                "ToolWidgets"
+            });
+        }
 
         // Setup third-party includes
         string ThirdPartyPath = Path.Combine(ModuleDirectory, "..", "ThirdParty");

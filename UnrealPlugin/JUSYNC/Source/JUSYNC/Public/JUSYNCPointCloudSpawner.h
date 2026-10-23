@@ -26,12 +26,15 @@ struct FPointCloudReadyEntry
     float PointSize;
     bool bSpawned;
     bool bNeedsRecolor;
+    // Cached-playback selection: keep the live smooth-morph path instead of
+    // snapping to the selected cloud, so clicking through samples animates.
+    bool bPlaybackMorph;
 
     TArray<FVector> Positions;
     TArray<float> Widths;
 
     FPointCloudReadyEntry()
-        : Rank(0), PointSize(1.0f), bSpawned(false), bNeedsRecolor(false)
+        : Rank(0), PointSize(1.0f), bSpawned(false), bNeedsRecolor(false), bPlaybackMorph(false)
     {}
 };
 
@@ -41,13 +44,25 @@ public:
     FJUSYNCPointCloudSpawner(TWeakObjectPtr<UObject> InOwner);
     virtual ~FJUSYNCPointCloudSpawner();
 
-    void EnqueuePointCloud(const FJUSYNCPointCloudData& PCData, int32 InRank = 0);
-    void EnqueuePointCloud(FJUSYNCPointCloudData&& PCData, int32 InRank = 0, bool bAllowNoGradient = false);
+    bool EnqueuePointCloud(const FJUSYNCPointCloudData& PCData, int32 InRank = 0);
+    bool EnqueuePointCloud(FJUSYNCPointCloudData&& PCData, int32 InRank = 0, bool bAllowNoGradient = false);
     // Shared overload: avoids an extra copy when the caller owns the payload exclusively.
 
-    void EnqueuePointCloud(FJUSYNCPointCloudRef&& PCRef, int32 InRank = 0);
+    bool EnqueuePointCloud(FJUSYNCPointCloudRef&& PCRef, int32 InRank = 0);
+    // Synchronous cached-playback path. Converts and swaps on the game thread so
+    // the selected frame is visible immediately instead of waiting for a
+    // background conversion/build and a later tick.
+    bool EnqueuePointCloudForPlayback(FJUSYNCPointCloudRef&& PCRef, int32 InRank = 0);
 
     bool IsElementFiltered(const FString& ElementName) const;
+
+    // Cached-sample scrubbing wants the selected frame on screen now, not a
+    // 200 ms morph from the live frame. Playback mode also lets the spawner
+    // discard live builds that were already in flight when the user scrubbed.
+    void SetPlaybackMode(bool bEnabled) { bPlaybackMode = bEnabled; }
+    void EnterPlaybackMode();
+    void PreparePointCloudForPlayback(const FString& Key);
+
     virtual void Tick(float DeltaTime) override;
     virtual ETickableTickType GetTickableTickType() const override { return ETickableTickType::Conditional; }
     virtual bool IsTickable() const override { return Owner.IsValid() && !bShuttingDown.load(); }
@@ -57,6 +72,11 @@ public:
     void SetBudgetMs(float InBudget) { BudgetMs = InBudget; }
     void SetSpawnLocation(const FVector& In);
     void SetSpawnScale(float In) { SpawnScale = In; }
+
+    /** Re-applies the current SpawnLocation/SpawnScale to every active point
+     *  cloud actor. Used when the FitVolume transform changes after actors have
+     *  already been spawned (e.g. once the full-scene bounds are known). */
+    void ReapplyTransformToAllActors();
 
     void SetPointSize(float InSize) { PointSize = InSize; }
     void SetPointSizeBias(float InBias) { PointSizeBias = InBias; }
@@ -125,6 +145,7 @@ private:
     float PointSizeBias = 0.035f;
     float GapFillingStrength = 0.0f;
     bool bPerfLogging = false;
+    bool bPlaybackMode = false;
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     ELidarPointCloudSpriteShape PointShape = ELidarPointCloudSpriteShape::Circle;
     ELidarPointCloudSpriteOrientation PointOrientation = ELidarPointCloudSpriteOrientation::PreferFacingCamera;
@@ -138,6 +159,7 @@ private:
     void MaybeCalculateNormals(ULidarPointCloud* Cloud, AActor* Actor, int32 PointCount);
     int32 LastFixedSizeState = -999999;
     float LastFixedScreenSize = -999999.0f;
+    float LastCloudEmissiveFloor = -999999.0f;
 #endif
     std::atomic<bool> bShuttingDown{false};
     std::atomic<int32> InFlightTasks{0};

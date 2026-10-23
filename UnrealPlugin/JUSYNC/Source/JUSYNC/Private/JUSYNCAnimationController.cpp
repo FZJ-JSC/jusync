@@ -174,7 +174,21 @@ void FJUSYNCAnimationController::SetCurrentTimeStepIndex(int32 NewIndex)
 int64 FJUSYNCAnimationController::DetectTimeStepOrder(const FString& Filename, FString& OutLabel)
 {
     OutLabel = FPaths::GetBaseFilename(Filename);
-    const FString Base = FPaths::GetBaseFilename(Filename);
+    FString Base = FPaths::GetBaseFilename(Filename);
+
+    // Progressive-refinement subsets ("<base>_s<k>.geo", RawGeo v2) belong to
+    // their base file's timestep; the "_s<k>" tail is neither a time nor a
+    // rank mark. Without this strip, "...__7_s2" would bucket as step 2.
+    const int32 RefineUnderscore = Base.Find(TEXT("_s"), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+    if (RefineUnderscore != INDEX_NONE)
+    {
+        const FString RefineTail = Base.Mid(RefineUnderscore + 2);
+        if (!RefineTail.IsEmpty() && RefineTail.IsNumeric())
+        {
+            Base = Base.Left(RefineUnderscore);
+            OutLabel = Base;
+        }
+    }
 
     const int32 TimeSep = Base.Find(TEXT("__"), ESearchCase::IgnoreCase, ESearchDir::FromEnd);
     if (TimeSep != INDEX_NONE)
