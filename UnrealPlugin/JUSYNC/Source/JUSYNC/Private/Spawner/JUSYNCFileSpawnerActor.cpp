@@ -244,6 +244,7 @@ static bool JUSYNCMaterialUsesVertexColor(UMaterialInterface* Material)
         return false;
     }
 
+#if WITH_EDITORONLY_DATA
     const UMaterial* Mat = Cast<UMaterial>(Material->GetMaterial());
     if (!Mat)
     {
@@ -251,6 +252,10 @@ static bool JUSYNCMaterialUsesVertexColor(UMaterialInterface* Material)
     }
 
     return Mat->HasAnyExpressionsInMaterialAndFunctionsOfType<UMaterialExpressionVertexColor>();
+#else
+    // The material expression graph is editor-only data; runtime builds cannot inspect it.
+    return false;
+#endif
 }
 
 static bool JUSYNCFindColorTextureParameter(UMaterialInterface* Material, FName& OutParameterName)
@@ -267,8 +272,9 @@ static bool JUSYNCFindColorTextureParameter(UMaterialInterface* Material, FName&
         return false;
     }
 
-    TArray<UMaterialExpressionTextureSampleParameter2D*> Params;
-    Mat->GetAllExpressionsInMaterialAndFunctionsOfType<UMaterialExpressionTextureSampleParameter2D>(Params);
+    TArray<FMaterialParameterInfo> Params;
+    TArray<FGuid> ParamIds;
+    Material->GetAllTextureParameterInfo(Params, ParamIds);
     if (Params.Num() == 0)
     {
         return false;
@@ -297,21 +303,21 @@ static bool JUSYNCFindColorTextureParameter(UMaterialInterface* Material, FName&
 
     for (const FName Preferred : PreferredParams)
     {
-        for (UMaterialExpressionTextureSampleParameter2D* Param : Params)
+        for (const FMaterialParameterInfo& Param : Params)
         {
-            if (Param && Param->ParameterName == Preferred && !IsNonColorTextureParam(Param->ParameterName))
+            if (Param.Name == Preferred && !IsNonColorTextureParam(Param.Name))
             {
-                OutParameterName = Param->ParameterName;
+                OutParameterName = Param.Name;
                 return true;
             }
         }
     }
 
-    for (UMaterialExpressionTextureSampleParameter2D* Param : Params)
+    for (const FMaterialParameterInfo& Param : Params)
     {
-        if (Param && !IsNonColorTextureParam(Param->ParameterName))
+        if (!IsNonColorTextureParam(Param.Name))
         {
-            OutParameterName = Param->ParameterName;
+            OutParameterName = Param.Name;
             return true;
         }
     }

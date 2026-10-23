@@ -77,12 +77,17 @@ static bool JUSYNCMatHasVertexColorNode(UMaterialInterface* Material)
     {
         return false;
     }
+#if WITH_EDITORONLY_DATA
     const UMaterial* BaseMat = Cast<UMaterial>(Material->GetMaterial());
     if (!BaseMat)
     {
         return false;
     }
     return BaseMat->HasAnyExpressionsInMaterialAndFunctionsOfType<UMaterialExpressionVertexColor>();
+#else
+    // The material expression graph is editor-only data; runtime builds cannot inspect it.
+    return false;
+#endif
 }
 
 static bool JUSYNCMatHasScalarParam(UMaterialInterface* Material, const TCHAR* ParamName)
@@ -96,11 +101,12 @@ static bool JUSYNCMatHasScalarParam(UMaterialInterface* Material, const TCHAR* P
     {
         return false;
     }
-    TArray<UMaterialExpressionScalarParameter*> ScalarParams;
-    BaseMat->GetAllExpressionsInMaterialAndFunctionsOfType<UMaterialExpressionScalarParameter>(ScalarParams);
-    for (UMaterialExpressionScalarParameter* Param : ScalarParams)
+    TArray<FMaterialParameterInfo> ScalarParams;
+    TArray<FGuid> ParamIds;
+    Material->GetAllScalarParameterInfo(ScalarParams, ParamIds);
+    for (const FMaterialParameterInfo& Param : ScalarParams)
     {
-        if (Param && Param->ParameterName == FName(ParamName))
+        if (Param.Name == FName(ParamName))
         {
             return true;
         }
@@ -119,15 +125,12 @@ static bool JUSYNCMatHasBoundColorTexture(UMaterialInterface* Material)
     {
         return false;
     }
-    TArray<UMaterialExpressionTextureSampleParameter2D*> TextureParams;
-    BaseMat->GetAllExpressionsInMaterialAndFunctionsOfType<UMaterialExpressionTextureSampleParameter2D>(TextureParams);
-    for (UMaterialExpressionTextureSampleParameter2D* Param : TextureParams)
+    TArray<FMaterialParameterInfo> TextureParams;
+    TArray<FGuid> ParamIds;
+    Material->GetAllTextureParameterInfo(TextureParams, ParamIds);
+    for (const FMaterialParameterInfo& Param : TextureParams)
     {
-        if (!Param)
-        {
-            continue;
-        }
-        const FString ParamStr = Param->ParameterName.ToString();
+        const FString ParamStr = Param.Name.ToString();
         if (ParamStr.Contains(TEXT("Normal")) || ParamStr.Contains(TEXT("Rough")) ||
             ParamStr.Contains(TEXT("Metal")) || ParamStr.Contains(TEXT("Opacity")) ||
             ParamStr.Contains(TEXT("Mask")) || ParamStr.Contains(TEXT("AO")) ||
@@ -136,7 +139,7 @@ static bool JUSYNCMatHasBoundColorTexture(UMaterialInterface* Material)
             continue;
         }
         UTexture* BoundTexture = nullptr;
-        if (Material->GetTextureParameterValue(Param->ParameterName, BoundTexture) && BoundTexture)
+        if (Material->GetTextureParameterValue(Param.Name, BoundTexture) && BoundTexture)
         {
             const FString TexName = BoundTexture->GetName();
             if (TexName.Contains(TEXT("Default")) || TexName.Contains(TEXT("None")) ||
