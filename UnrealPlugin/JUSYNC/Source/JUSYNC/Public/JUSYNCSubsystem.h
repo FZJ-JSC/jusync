@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "JUSYNCTypes.h"
+#include "JUSYNCPointCloudSpawner.h"
 #include "RealtimeMeshComponent.h"
 #include "RealtimeMeshSimple.h"
 #include "Mesh/RealtimeMeshBasicShapeTools.h"
@@ -19,7 +20,6 @@
 #endif
 
 class UJUSYNCBlueprintLibrary;
-class FJUSYNCPointCloudSpawner;
 
 #include "JUSYNCMeshMorpher.h"
 
@@ -33,6 +33,9 @@ class JUSYNC_API UJUSYNCSubsystem : public UGameInstanceSubsystem
     GENERATED_BODY()
 
 public:
+    UJUSYNCSubsystem();
+    virtual ~UJUSYNCSubsystem();
+
     virtual void Initialize(FSubsystemCollectionBase& Collection) override;
     virtual void Deinitialize() override;
     virtual bool ShouldCreateSubsystem(UObject* Outer) const override;

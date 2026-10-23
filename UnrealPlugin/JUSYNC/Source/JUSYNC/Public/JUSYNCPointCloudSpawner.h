@@ -72,6 +72,8 @@ public:
     void SetBudgetMs(float InBudget) { BudgetMs = InBudget; }
     void SetSpawnLocation(const FVector& In);
     void SetSpawnScale(float In) { SpawnScale = In; }
+    const FVector& GetSpawnLocation() const { return SpawnLocation; }
+    float GetSpawnScale() const { return SpawnScale; }
 
     /** Re-applies the current SpawnLocation/SpawnScale to every active point
      *  cloud actor. Used when the FitVolume transform changes after actors have

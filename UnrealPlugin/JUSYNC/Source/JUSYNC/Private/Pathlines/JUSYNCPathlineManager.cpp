@@ -1,9 +1,12 @@
 #include "JUSYNCPathlineManager.h"
 
 #include "Async/Async.h"
+#include "Engine/World.h"
 #include "HAL/CriticalSection.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
+#include "JUSYNCPathlineActor.h"
+#include "JUSYNCPointCloudSpawner.h"
 #include "Misc/ScopeLock.h"
 
 #include <atomic>
@@ -173,6 +176,9 @@ struct FJUSYNCPathlineManager::FImpl
 	TMap<FString, FElementState> Elements;
 	TArray<TSharedPtr<FWorkItem>> Queue;
 	TArray<FPendingMesh> PendingMeshes;
+
+	// Game-thread only. Never touched by the worker.
+	TMap<FString, TWeakObjectPtr<AJUSYNCPathlineActor>> PathlineActors;
 
 	std::atomic<bool> bWorkerRunning{ false };
 	std::atomic<bool> bShuttingDown{ false };
@@ -894,16 +900,108 @@ void FJUSYNCPathlineManager::RequestRebuild()
 void FJUSYNCPathlineManager::PumpGameThread(UWorld* World,
 	FJUSYNCPointCloudSpawner* Spawner, UMaterialInterface* Material)
 {
-	// Task 4 adds the pathline actor upload here. Until then, drain the queue so
-	// it cannot grow without bound.
+	if (!IsInGameThread())
+	{
+		return;
+	}
+
 	TArray<FPendingMesh> Pending;
 	{
 		FScopeLock Lock(&Impl->PendingLock);
 		Pending = MoveTemp(Impl->PendingMeshes);
 	}
-	(void)World;
-	(void)Spawner;
-	(void)Material;
+
+	bool bEnabled = false;
+	UMaterialInterface* SettingsMaterial = nullptr;
+	TSet<FString> LiveElements;
+	{
+		FScopeLock Lock(&Impl->StateLock);
+		bEnabled = Impl->Settings.bEnabled;
+		SettingsMaterial = Impl->Settings.Material;
+		for (const TPair<FString, FElementState>& Pair : Impl->Elements)
+		{
+			LiveElements.Add(Pair.Key);
+		}
+	}
+
+	UMaterialInterface* UseMaterial = Material ? Material : SettingsMaterial;
+	const FVector SpawnLocation = Spawner
+		? Spawner->GetSpawnLocation() : FVector::ZeroVector;
+	const float SpawnScale = Spawner ? Spawner->GetSpawnScale() : 1.0f;
+	const FVector SpawnScale3D(SpawnScale);
+
+	if (!bEnabled)
+	{
+		for (auto It = Impl->PathlineActors.CreateIterator(); It; ++It)
+		{
+			if (AJUSYNCPathlineActor* Actor = It.Value().Get())
+			{
+				Actor->ClearMesh();
+				Actor->Destroy();
+			}
+			It.RemoveCurrent();
+		}
+		return;
+	}
+
+	// Remove actors for elements that no longer exist. This also handles Reset
+	// and structural re-sampling: the map is pruned before new actors arrive.
+	for (auto It = Impl->PathlineActors.CreateIterator(); It; ++It)
+	{
+		AJUSYNCPathlineActor* Actor = It.Value().Get();
+		if (!Actor || !LiveElements.Contains(It.Key()))
+		{
+			if (Actor)
+			{
+				Actor->ClearMesh();
+				Actor->Destroy();
+			}
+			It.RemoveCurrent();
+		}
+		else
+		{
+			Actor->SetActorLocation(SpawnLocation);
+			Actor->SetActorScale3D(SpawnScale3D);
+		}
+	}
+
+	for (FPendingMesh& Result : Pending)
+	{
+		if (Result.Generation != Impl->Generation.load() ||
+			!LiveElements.Contains(Result.ElementName) ||
+			!Result.Mesh.IsValid())
+		{
+			continue;
+		}
+
+		AJUSYNCPathlineActor* Actor = nullptr;
+		if (TWeakObjectPtr<AJUSYNCPathlineActor>* Existing =
+			Impl->PathlineActors.Find(Result.ElementName))
+		{
+			Actor = Existing->Get();
+		}
+
+		if (!Actor && World)
+		{
+			FActorSpawnParameters SpawnParameters;
+			SpawnParameters.SpawnCollisionHandlingOverride =
+				ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+			SpawnParameters.ObjectFlags |= RF_Transient;
+			Actor = World->SpawnActor<AJUSYNCPathlineActor>(
+				AJUSYNCPathlineActor::StaticClass(), FTransform::Identity, SpawnParameters);
+			if (Actor)
+			{
+				Impl->PathlineActors.Add(Result.ElementName, Actor);
+			}
+		}
+
+		if (Actor)
+		{
+			Actor->SetActorLocation(SpawnLocation);
+			Actor->SetActorScale3D(SpawnScale3D);
+			Actor->ApplyMesh(*Result.Mesh, UseMaterial);
+		}
+	}
 }
 
 FJUSYNCPathlineStats FJUSYNCPathlineManager::GetStats() const

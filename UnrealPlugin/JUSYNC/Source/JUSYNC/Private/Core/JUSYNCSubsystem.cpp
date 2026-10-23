@@ -861,6 +861,10 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
 
 #endif
 
+UJUSYNCSubsystem::UJUSYNCSubsystem() = default;
+
+UJUSYNCSubsystem::~UJUSYNCSubsystem() = default;
+
 void UJUSYNCSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
