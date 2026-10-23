@@ -4,6 +4,8 @@
 #include "HAL/PlatformMisc.h"
 #include "RawGeo/JUSYNCRawGeoCurves.h"
 #include "JUSYNCElementNames.h"
+#include "JUSYNCSubsystem.h"
+#include "Engine/GameInstance.h"
 #include "AnariUsdMiddleware_C.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -12,7 +14,8 @@ namespace
 {
     TArray<uint8> MakeCurveBuffer(const TArray<TArray<FVector3f>>& Curves,
                                   int32 SubsetIndex, int32 SubsetCount,
-                                  const TCHAR* PrimName = TEXT("Streamlines"))
+                                  const TCHAR* PrimName = TEXT("Streamlines"),
+                                  bool bWithColors = true, bool bWithWidths = true)
     {
         TArray<int32> Selected;
         for (int32 Curve = SubsetIndex; Curve < Curves.Num(); Curve += SubsetCount)
@@ -31,11 +34,13 @@ namespace
             NumPoints += Curves[Curve].Num();
         }
 
+        const int32 ColorComponents = bWithColors ? 3 : 0;
+        const int32 WidthComponents = bWithWidths ? 1 : 0;
         const int32 PayloadBytes =
             NumPoints * 3 * static_cast<int32>(sizeof(float))
-            + NumPoints * 3 * static_cast<int32>(sizeof(float))
+            + NumPoints * ColorComponents * static_cast<int32>(sizeof(float))
             + Selected.Num() * static_cast<int32>(sizeof(uint32))
-            + NumPoints * static_cast<int32>(sizeof(float));
+            + NumPoints * WidthComponents * static_cast<int32>(sizeof(float));
 
         TArray<uint8> Buffer;
         Buffer.SetNumZeroed(static_cast<int32>(sizeof(anari_usd_protocol::JusyncRawGeoHeader)) + PayloadBytes);
@@ -47,7 +52,7 @@ namespace
         Header.num_points = NumPoints;
         Header.time = 0.0;
         Header.position_components = 3;
-        Header.color_components = 3;
+        Header.color_components = ColorComponents;
         Header.num_attributes = 0;
         Header.attr_uniform_count = NumPoints;
         Header.payload_bytes = PayloadBytes;
@@ -57,7 +62,7 @@ namespace
         Header.topology = anari_usd_protocol::JUSYNC_RAWGEO_TOPOLOGY_LINEAR_CURVES;
         Header.curve_count = Selected.Num();
         Header.full_curve_count = Curves.Num();
-        Header.width_components = 1;
+        Header.width_components = WidthComponents;
         Header.flags = 0;
 
         FMemory::Memcpy(Buffer.GetData(), &Header, sizeof(Header));
@@ -72,11 +77,14 @@ namespace
                 Cursor += sizeof(Values);
             }
         }
-        for (int32 i = 0; i < NumPoints; ++i)
+        if (bWithColors)
         {
-            const float Values[3] = { 1.0f, 0.5f, 0.25f };
-            FMemory::Memcpy(Cursor, Values, sizeof(Values));
-            Cursor += sizeof(Values);
+            for (int32 i = 0; i < NumPoints; ++i)
+            {
+                const float Values[3] = { 1.0f, 0.5f, 0.25f };
+                FMemory::Memcpy(Cursor, Values, sizeof(Values));
+                Cursor += sizeof(Values);
+            }
         }
         for (const int32 Curve : Selected)
         {
@@ -84,11 +92,14 @@ namespace
             FMemory::Memcpy(Cursor, &Count, sizeof(Count));
             Cursor += sizeof(Count);
         }
-        for (int32 i = 0; i < NumPoints; ++i)
+        if (bWithWidths)
         {
-            const float Width = 0.1f;
-            FMemory::Memcpy(Cursor, &Width, sizeof(Width));
-            Cursor += sizeof(Width);
+            for (int32 i = 0; i < NumPoints; ++i)
+            {
+                const float Width = 0.1f;
+                FMemory::Memcpy(Cursor, &Width, sizeof(Width));
+                Cursor += sizeof(Width);
+            }
         }
         return Buffer;
     }
@@ -153,6 +164,51 @@ bool FJUSYNCRawGeoCurveSingleTest::RunTest(const FString& Parameters)
         TestTrue(TEXT("outward ring normal"), FVector3f::DotProduct(Mesh->Normals[s], Radial) > 0.9f);
     }
 
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJUSYNCRawGeoCurveDispatchTest, "JUSYNC.RawGeo.CurveDispatch",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJUSYNCRawGeoCurveDispatchTest::RunTest(const FString& Parameters)
+{
+    JUSYNCRawGeoCurves::FlushMerges();
+
+    UGameInstance* GameInstance = NewObject<UGameInstance>(GetTransientPackage());
+    UJUSYNCSubsystem* Subsystem = GameInstance
+        ? NewObject<UJUSYNCSubsystem>(GameInstance) : nullptr;
+    if (!Subsystem)
+    {
+        AddError(TEXT("failed to create a transient JUSYNC subsystem"));
+        return false;
+    }
+    if (!Subsystem->InitializeMiddleware(TEXT("tcp://*:5599")))
+    {
+        AddError(TEXT("failed to initialize middleware for the dispatch test"));
+        return false;
+    }
+
+    TArray<TArray<FVector3f>> Curves;
+    Curves.Add({ FVector3f(1.0f, 2.0f, 3.0f), FVector3f(2.0f, 2.0f, 4.0f) });
+    Curves.Add({ FVector3f(4.0f, 0.0f, 0.0f), FVector3f(5.0f, 0.0f, 1.0f) });
+
+    TArray<uint8> Buffer = MakeCurveBuffer(Curves, 0, 1);
+    TArray<FJUSYNCCompactMeshRef> Meshes;
+    TArray<FJUSYNCPointCloudRef> Clouds;
+    const bool bLoaded = Subsystem->LoadUSDFullCompactFromBuffer(
+        Buffer, TEXT("clips/Dispatch_Geom__0.geo"), Meshes, Clouds);
+    Subsystem->ShutdownMiddleware();
+
+    TestTrue(TEXT("RawGeo curve buffer dispatches"), bLoaded);
+    TestEqual(TEXT("one curve mesh produced"), Meshes.Num(), 1);
+    TestEqual(TEXT("no point cloud produced"), Clouds.Num(), 0);
+    if (Meshes.Num() == 1 && Meshes[0].IsValid())
+    {
+        TestEqual(TEXT("dispatched vertex count"), Meshes[0]->Points.Num(), 2 * 2 * 4);
+        TestEqual(TEXT("dispatched triangle count"), Meshes[0]->Triangles.Num() / 3, 2 * 4 * 2);
+        TestTrue(TEXT("finalize normalized normals"),
+            FMath::IsNearlyEqual(Meshes[0]->Normals[0].Size(), 1.0f, 1.0e-3f));
+    }
     return true;
 }
 
@@ -268,6 +324,123 @@ bool FJUSYNCRawGeoCurveMergeTest::RunTest(const FString& Parameters)
     {
         TestEqual(TEXT("coarse vertex count"), Mesh->Points.Num(), (2 + 2) * 4);
     }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJUSYNCRawGeoCurveRejectCountTest, "JUSYNC.RawGeo.CurveRejectCount",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJUSYNCRawGeoCurveRejectCountTest::RunTest(const FString& Parameters)
+{
+    JUSYNCRawGeoCurves::FlushMerges();
+
+    TArray<TArray<FVector3f>> Curves;
+    for (int32 Curve = 0; Curve < 4; ++Curve)
+    {
+        Curves.Add({ FVector3f(static_cast<float>(Curve), 0.0f, 0.0f),
+                     FVector3f(static_cast<float>(Curve) + 1.0f, 0.0f, 1.0f) });
+    }
+
+    TArray<uint8> Buffer = MakeCurveBuffer(Curves, 0, 4);
+    anari_usd_protocol::JusyncRawGeoHeader Header{};
+    TestTrue(TEXT("header readable"), ReadHeader(Buffer, Header));
+    Header.full_curve_count = 1000;
+    Header.full_num_points = 8;
+    FMemory::Memcpy(Buffer.GetData(), &Header, sizeof(Header));
+
+    FJUSYNCCompactMeshRef Mesh;
+    TestFalse(TEXT("unbounded full_curve_count is rejected"),
+        IngestCurveBuffer(Buffer, TEXT("clips/Reject_Geom__0_s0.geo"), Mesh));
+
+    // A truncated subset still has a self-consistent payload; only the
+    // expected ceil((C-k)/S) curve count reveals the missing curves.
+    TArray<TArray<FVector3f>> Truncated;
+    Truncated.Add(Curves[0]);
+    Truncated.Add(Curves[1]);
+    Buffer = MakeCurveBuffer(Truncated, 0, 1);
+    TestTrue(TEXT("truncated header readable"), ReadHeader(Buffer, Header));
+    Header.subset_index = 0;
+    Header.subset_count = 4;
+    Header.full_curve_count = 10;
+    Header.full_num_points = 20;
+    FMemory::Memcpy(Buffer.GetData(), &Header, sizeof(Header));
+
+    Mesh.Reset();
+    TestFalse(TEXT("truncated subset is rejected"),
+        IngestCurveBuffer(Buffer, TEXT("clips/Reject_Geom__0_s0.geo"), Mesh));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJUSYNCRawGeoCurveLateUpgradeTest, "JUSYNC.RawGeo.CurveLateUpgrade",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJUSYNCRawGeoCurveLateUpgradeTest::RunTest(const FString& Parameters)
+{
+    JUSYNCRawGeoCurves::FlushMerges();
+    SetIntCurveCVar(TEXT("jusync.RawGeo.CurveProgressive"), 2);
+    SetIntCurveCVar(TEXT("jusync.Curve.Sides"), 4);
+
+    TArray<TArray<FVector3f>> Curves;
+    Curves.Add({ FVector3f(0.0f, 0.0f, 0.0f), FVector3f(1.0f, 0.0f, 0.0f) });
+    Curves.Add({ FVector3f(0.0f, 1.0f, 0.0f), FVector3f(1.0f, 1.0f, 0.0f) });
+
+    FJUSYNCCompactMeshRef Mesh;
+    TestTrue(TEXT("colorless subset 1 ingests"),
+        IngestCurveBuffer(MakeCurveBuffer(Curves, 1, 2, TEXT("Streamlines"), false, false),
+            TEXT("clips/Upgrade_Geom__0_s1.geo"), Mesh));
+    TestFalse(TEXT("colorless subset 1 is incomplete"), Mesh.IsValid());
+
+    Mesh.Reset();
+    TestTrue(TEXT("colored subset 0 completes"),
+        IngestCurveBuffer(MakeCurveBuffer(Curves, 0, 2), TEXT("clips/Upgrade_Geom__0_s0.geo"), Mesh));
+    TestTrue(TEXT("completed mesh"), Mesh.IsValid());
+    if (!Mesh.IsValid())
+    {
+        return false;
+    }
+
+    TestTrue(TEXT("late colors are upgraded"), Mesh->bHasBakedColors);
+    TestEqual(TEXT("colors cover every ring vertex"), Mesh->VertexColors.Num(), Mesh->Points.Num());
+    TestEqual(TEXT("late curve keeps the default white"), Mesh->VertexColors[2 * 4], FColor::White);
+
+    // Subset 1 arrived without widths, so its nodes use the default radius;
+    // subset 0's nodes use the per-point width from the payload.
+    const FVector3f Center0 = CurveRingCenter(*Mesh, 0);
+    const FVector3f Center1 = CurveRingCenter(*Mesh, 2);
+    TestTrue(TEXT("width from the completing subset"),
+        FMath::IsNearlyEqual(FVector3f::Distance(Mesh->Points[0], Center0), 0.1f, 1.0e-4f));
+    TestTrue(TEXT("default width backfilled for the early subset"),
+        FMath::IsNearlyEqual(FVector3f::Distance(Mesh->Points[2 * 4], Center1), 0.5f, 1.0e-4f));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJUSYNCRawGeoCurveSubsetKeyTest, "JUSYNC.RawGeo.CurveSubsetKey",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJUSYNCRawGeoCurveSubsetKeyTest::RunTest(const FString& Parameters)
+{
+    const JUSYNCElementNames::FVariant Base =
+        JUSYNCElementNames::Parse(TEXT("clips/Wave_Geom__0.000000.geo"));
+    const JUSYNCElementNames::FVariant S0 =
+        JUSYNCElementNames::Parse(TEXT("clips/Wave_Geom__0.000000_s0.geo"));
+    const JUSYNCElementNames::FVariant S3 =
+        JUSYNCElementNames::Parse(TEXT("clips/Wave_Geom__0.000000_s3.geo"));
+
+    TestEqual(TEXT("subset 0 has the base element"), S0.Element, Base.Element);
+    TestEqual(TEXT("subset 3 has the base element"), S3.Element, Base.Element);
+    TestEqual(TEXT("subset 0 has the base group"), S0.GroupKey(), Base.GroupKey());
+    TestEqual(TEXT("subset 3 has the base group"), S3.GroupKey(), Base.GroupKey());
+
+    const JUSYNCElementNames::FVariant RankBase =
+        JUSYNCElementNames::Parse(TEXT("clips/Wave_Geom__r1_0.000000.geo"));
+    const JUSYNCElementNames::FVariant RankS2 =
+        JUSYNCElementNames::Parse(TEXT("clips/Wave_Geom__r1_0.000000_s2.geo"));
+    TestEqual(TEXT("ranked subset keeps the rank element"), RankS2.Element, RankBase.Element);
+    TestEqual(TEXT("ranked subset keeps the rank group"), RankS2.GroupKey(), RankBase.GroupKey());
+
+    TestEqual(TEXT("subset suffix stripped from the base key"),
+        JUSYNCRawGeoCurves::StripSubsetSuffix(TEXT("clips/Wave_Geom__0.000000_s3.geo")),
+        FString(TEXT("clips/Wave_Geom__0.000000")));
     return true;
 }
 
@@ -496,6 +669,12 @@ bool FJUSYNCRawGeoBrokerCurveE2ETest::RunTest(const FString& Parameters)
     const FString Endpoint = FPlatformMisc::GetEnvironmentVariable(TEXT("JUSYNC_E2E_ENDPOINT"));
     if (Endpoint.IsEmpty())
     {
+        const FString Required = FPlatformMisc::GetEnvironmentVariable(TEXT("JUSYNC_E2E_REQUIRED"));
+        if (Required == TEXT("1"))
+        {
+            AddError(TEXT("JUSYNC_E2E_ENDPOINT is required but was not set"));
+            return false;
+        }
         AddInfo(TEXT("Skipped: set JUSYNC_E2E_ENDPOINT to a live RawGeo v3 broker to run this test"));
         return true;
     }
@@ -507,6 +686,7 @@ bool FJUSYNCRawGeoBrokerCurveE2ETest::RunTest(const FString& Parameters)
     {
         DisconnectFromBroker_C();
         ShutdownMiddleware_C();
+        JUSYNCRawGeoCurves::FlushMerges();
     };
 
     FTCHARToUTF8 EndpointUtf8(*Endpoint);

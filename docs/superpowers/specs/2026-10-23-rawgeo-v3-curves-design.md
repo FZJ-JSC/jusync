@@ -107,7 +107,7 @@ struct JusyncRawGeoHeader {            // CURRENT, version 3
             default: return sizeof(JusyncRawGeoHeader);
         }
     }
-    bool valid(size_t totalBytes) const;
+    bool valid(const void* data, size_t totalBytes) const;
 };
 ```
 
@@ -228,6 +228,9 @@ Required invariants:
 1. **Merge key is the filename base with `_s<k>` removed**, e.g.
    `Foo_Geom__r3_7`. Never `prim_name`, never `prim_name + time`.
 2. **Element key is `MakeRankedElementKey(prim_name, rank)`**, as today.
+   `JUSYNCElementNames::Parse` strips the `_s<k>` tail before rank/time parsing, and
+   `JUSYNCBuildLogicalActorKey` strips it from the time mark too, so the coarse and
+   completed frames resolve to the same UE element/actor.
 3. **Rank resolution order** for v3 curves:
    a. rank parsed from `_r<digits>_` in the filename (authoritative, present exactly
       when `mpisize > 1`);
@@ -298,6 +301,12 @@ All ranks must run with the same values; see invariant 6 for the failure mode.
 - Idle detection keys on the frame base (rank + prim + time), not the subset file:
   if the packed full-frame digest matches the previous frame, skip all `S` files.
 - No stride decimation, no PLY snapshot, no idle "burst" upgrade for curves.
+- Empty subsets still advertise the frame-level `width_components` (the packer may
+  receive a non-null dummy pointer with zero points), so merge flags do not depend
+  on which subset arrives first.
+- On prim removal/rename, `RemoveStoreEntriesForFile` expands the base stage key to
+  its `.usd`/`.usda` twins, the base `.geo`, and `_s0.geo` ... `_s7.geo`. A retired
+  curve element cannot leave stale subset aliases in the broker.
 - Each subset file goes through `GetDiffCapture().CapturePreStore(geoKey)` and
   `g_rankMemoryStore->StoreFile(geoKey, …, "application/x-jusync-geo")`.
 
@@ -329,6 +338,13 @@ Dispatch:
 Validation mirrored from 4.3, including the exact byte math and
 `Σ curve_vertex_counts == num_points`.
 
+Before allocating merge slots, the parser also bounds wire metadata:
+`subset_count <= 8`, `full_curve_count <= 4,194,304`,
+`full_curve_count <= full_num_points / 2`, `full_num_points >= num_points`, and
+`curve_count == ceil((full_curve_count - subset_index) / subset_count)`. This rejects
+an unbounded curve-slot allocation and a truncated subset that would otherwise fill
+its slot and complete a frame with missing curves.
+
 ### 7.2 Merge
 
 `FJUSYNCCurveMerge` keyed by `StripSubsetSuffix(Filename)`:
@@ -355,7 +371,8 @@ struct FJUSYNCCurveMerge {
 - Full emission concatenates all slots once `FilledSlots` is all set.
 - Budget: `full_num_points × ~40 bytes` accounted against
   `jusync.RawGeo.RefineBudgetKPoints`, evicting oldest.
-- Age sweep: entries older than 30 s are dropped with a warning.
+- Age sweep: entries older than 30 s are dropped with a warning. The de-duplicated
+  metadata-warning key set is bounded so a long session cannot grow it without limit.
 
 ### 7.3 Tubes
 
@@ -378,7 +395,8 @@ expands polylines into tubes:
 - Positions and normals are mapped `(x, z, -y)`.
 - Budget: if total nodes exceed `jusync.Curve.MaxNodes` (default 4,000,000),
   decimate each curve with a global stride, always keeping the first and last node
-  (minimum 2 nodes), and log the reduction.
+  (minimum 2 nodes), and log the reduction. This is an advisory target, not a hard
+  cap: endpoints are retained, so many very short curves can still exceed it.
 
 Vertex/triangle cost: `nodes × Sides` vertices, `segments × Sides × 2` triangles.
 
@@ -465,8 +483,10 @@ hand-placed files with `_r` suffixes.
 
 - `ctest --test-dir build --output-on-failure` (all labels) in `jusync`.
 - UE auto-quit smoke run with the sample project (existing harness) before/after.
-- Point-cloud RawGeo path re-tested at 10M points (the milestone-2 case) to prove
-  the refactor did not change behavior.
+- Point-cloud RawGeo path: the milestone-2 10M-point case was **not rerun on this
+  branch**. The point path is only changed by the header version bump (v1 -> v2
+  defaults), and the existing CTest/UE suites cover the v2 layout; the 10M
+  performance/byte-hash claim remains prior-branch evidence.
 
 ### 9.5 Results (branch `feat/rawgeo-v3-curves`)
 
@@ -493,15 +513,22 @@ Other regression evidence:
   `binary_static_check`. On Windows the static check searches `lib<name>.dll` while
   CMake produces `anari_usd_middleware.dll`; copying the DLL to the searched name in
   the build tree makes the two environment-only tests pass (no source change).
-- UE automation: 11/11 `JUSYNC.RawGeo.*` tests pass after the merge-flag upgrade and
-  the sender-to-client broker check.
-- Sender-to-client E2E: a temporary ANARI `curve` sender (image
-  `jusync-curve-sender:test`) emitted four v3 `.geo` subsets through a live ZMQ
-  broker. `JUSYNC.RawGeo.BrokerCurveE2E` used the middleware C API to list and
-  download all four files, merged them in the client, and asserted a completed
-  `CurveStream` / `BasisCurves` mesh with 120 vertices, 192 triangles, and baked
-  colors. The test is opt-in through `JUSYNC_E2E_ENDPOINT`; without it the test
-  reports a skip and does not touch the network.
+- UE automation: 15/15 `JUSYNC.RawGeo.*` tests pass after the review fixes. New
+  coverage includes `CurveRejectCount` (unbounded/truncated subset metadata),
+  `CurveLateUpgrade` (colors/widths from a later subset, default radius backfill),
+  `CurveSubsetKey` (`_s<k>` does not change the element/group key), and
+  `CurveDispatch` (middleware buffer -> finalized `BasisCurves` mesh).
+- Host packer: `test_rawgeo_curve_pack` passes, including two-attribute round-trip,
+  `C = 10, S = 4 -> 3, 3, 2, 2`, wrong-subset rejection, and the
+  `StoreKeysForFile` `_s0.._s7` expansion/dedup cases.
+- Sender-to-client E2E (rerun after the review fixes): a temporary ANARI `curve`
+  sender (image `jusync-curve-sender:test`) emitted four v3 `.geo` subsets through a
+  live ZMQ broker on host port 5557. `JUSYNC.RawGeo.BrokerCurveE2E` used the
+  middleware C API to list and download all four files, merged them in the client,
+  and asserted a completed `CurveStream` / `BasisCurves` mesh with 120 vertices,
+  192 triangles, and baked colors. The test is opt-in through `JUSYNC_E2E_ENDPOINT`;
+  without it the test reports a skip and does not touch the network. Set
+  `JUSYNC_E2E_REQUIRED=1` to turn a missing endpoint into a failure in CI.
 - Point-cloud RawGeo now uses the v2 header (136 bytes) with the single-subset lattice
   fields (`subset_index = 0`, `subset_count = 1`, `full_num_points = n`). Before this
   branch the sender stamped v1 and the client synthesized those same defaults in its
@@ -509,6 +536,8 @@ Other regression evidence:
   used for curve payloads.
 - Sender: `jusync-sender:rawgeo-v3` compiles `UsdBridgeUsdWriter.cpp` against OpenUSD
   25.11 in the Docker image (the host has no USD toolchain).
+- The 10M-point point-path regression was not rerun on this branch; the point
+  payload layout is unchanged except for the explicit v2 defaults. See 9.4.
 
 ## 10. File map
 

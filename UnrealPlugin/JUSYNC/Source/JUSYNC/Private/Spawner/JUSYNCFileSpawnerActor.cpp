@@ -1,6 +1,7 @@
 #include "JUSYNCFileSpawnerActor.h"
 #include <atomic>
 #include "JUSYNCSubsystem.h"
+#include "RawGeo/JUSYNCRawGeoCurves.h"
 #include "JUSYNCPointCloudSpawner.h"
 #include "JUSYNCBenchmarkTiming.h"
 #include "JUSYNCUSDLoader.h"
@@ -175,7 +176,14 @@ static FString JUSYNCBuildLogicalActorKey(const FString& Filename)
     }
 
     FString TimeMark;
-    const FString Base = FPaths::GetBaseFilename(FPaths::GetCleanFilename(Filename));
+    FString Base = FPaths::GetBaseFilename(FPaths::GetCleanFilename(Filename));
+    if (Filename.EndsWith(TEXT(".geo"), ESearchCase::IgnoreCase))
+    {
+        // Curve subsets append "_s<k>" after the time. Strip it before
+        // building the time mark so the completed frame reuses the coarse
+        // actor instead of spawning a second one.
+        Base = JUSYNCRawGeoCurves::StripSubsetSuffix(FPaths::GetCleanFilename(Filename));
+    }
     const int32 TimeSep = Base.Find(TEXT("__"), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
     if (TimeSep != INDEX_NONE)
     {

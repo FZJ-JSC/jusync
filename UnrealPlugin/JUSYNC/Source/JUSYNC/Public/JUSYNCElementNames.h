@@ -260,6 +260,16 @@ namespace JUSYNCElementNames
         {
             Head = Name.Left(TimeSep);
             Tail = Name.Mid(TimeSep + 2);
+
+            // RawGeo curve subsets append "_s<k>" after the time. It is a
+            // transport shard, not part of the element identity; keeping it
+            // would give the coarse and completed frames different actor keys.
+            const int32 SubsetSep = Tail.Find(TEXT("_s"), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+            if (SubsetSep != INDEX_NONE &&
+                Private::AllDigits(Tail.Mid(SubsetSep + 2)))
+            {
+                Tail = Tail.Left(SubsetSep);
+            }
         }
 
         // Multi-rank clip keys carry the owner before the time ("__r1_0.500000");

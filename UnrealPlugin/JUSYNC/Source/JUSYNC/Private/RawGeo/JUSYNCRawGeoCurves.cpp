@@ -24,7 +24,7 @@ namespace
 
     TAutoConsoleVariable<int32> CVarJusyncCurveMaxNodes(
         TEXT("jusync.Curve.MaxNodes"), 4000000,
-        TEXT("Maximum curve nodes rendered per RawGeo v3 payload; larger payloads are decimated with a uniform stride."),
+        TEXT("Target maximum curve nodes rendered per RawGeo v3 payload; larger payloads are decimated with a uniform stride. Per-curve endpoints are always retained, so many very short curves can exceed the target."),
         ECVF_Default);
 
     float CurveDefaultRadius()
@@ -270,8 +270,13 @@ namespace
         OutMesh = MoveTemp(Mesh);
     }
 
-    constexpr double GCurveMergeMaxAgeSeconds = 30.0;    constexpr int64 GCurveMergeDefaultBudgetKPoints = 16384;
+    constexpr double GCurveMergeMaxAgeSeconds = 30.0;
+    constexpr int64 GCurveMergeDefaultBudgetKPoints = 16384;
     constexpr int32 GCurveMaxSubsets = 8;
+
+    // `full_curve_count` is wire metadata, not payload-sized. Cap it before
+    // allocating one TArray per curve from a malformed or hostile header.
+    constexpr uint64 GCurveMaxFullCurves = 4ull * 1024ull * 1024ull;
 
     TAutoConsoleVariable<int32> CVarJusyncCurveProgressive(
         TEXT("jusync.RawGeo.CurveProgressive"), 2,
@@ -320,9 +325,19 @@ namespace
         {
             if (Now - It.Value().LastUseSeconds > GCurveMergeMaxAgeSeconds)
             {
+                UE_LOG(LogJUSYNC, Warning,
+                    TEXT("RawGeo curve merge '%s' expired after %.1f s (incomplete subset)"),
+                    *It.Key(), Now - It.Value().LastUseSeconds);
                 GRawGeoCurveMergeTotalPoints -= It.Value().FullNumPoints;
                 It.RemoveCurrent();
             }
+        }
+
+        // The metadata-change warning set is only a de-duplicator; bound it so
+        // a long-lived session cannot grow it without limit.
+        if (GRawGeoCurveWarnedKeys.Num() > 4096)
+        {
+            GRawGeoCurveWarnedKeys.Empty();
         }
     }
 
@@ -478,7 +493,34 @@ namespace JUSYNCRawGeoCurves
         {
             return false;
         }
-        if (Hdr.num_attributes > 16 || Hdr.subset_count == 0)
+        if (Hdr.num_attributes > 16 || Hdr.subset_count == 0 ||
+            Hdr.subset_count > static_cast<uint64>(GCurveMaxSubsets))
+        {
+            return false;
+        }
+        if (Hdr.position_components != 3 ||
+            (Hdr.color_components != 0 && Hdr.color_components != 3 && Hdr.color_components != 4) ||
+            Hdr.width_components > 1)
+        {
+            return false;
+        }
+        if (Hdr.num_points > static_cast<uint64>(TNumericLimits<int32>::Max()) ||
+            Hdr.curve_count > static_cast<uint64>(TNumericLimits<int32>::Max()) ||
+            Hdr.full_curve_count > GCurveMaxFullCurves ||
+            Hdr.full_num_points < Hdr.num_points ||
+            Hdr.full_num_points > static_cast<uint64>(TNumericLimits<int64>::Max()) ||
+            Hdr.full_curve_count > Hdr.full_num_points / 2)
+        {
+            return false;
+        }
+
+        // Every subset of a C-curve frame must carry exactly the curves with
+        // ordinals k, k+S, k+2S, ... . A short payload otherwise fills its slot
+        // and can complete a frame with missing geometry.
+        const uint64 ExpectedCurves = Hdr.full_curve_count > Hdr.subset_index
+            ? (Hdr.full_curve_count - Hdr.subset_index + Hdr.subset_count - 1) / Hdr.subset_count
+            : 0;
+        if (static_cast<uint64>(Hdr.curve_count) != ExpectedCurves)
         {
             return false;
         }
@@ -590,6 +632,7 @@ namespace JUSYNCRawGeoCurves
         const int64 Count = FMath::Max<int64>(1, Payload.SubsetCount);
         const int64 Curves = Payload.FullCurveCount;
         if (Subset < 0 || Subset >= Count || Count > GCurveMaxSubsets || Curves < 0 ||
+            Curves > static_cast<int64>(GCurveMaxFullCurves) ||
             static_cast<int64>(Payload.CurveCounts.Num()) > Curves)
         {
             return false;
