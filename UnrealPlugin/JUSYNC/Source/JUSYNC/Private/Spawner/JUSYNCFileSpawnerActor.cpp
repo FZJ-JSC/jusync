@@ -223,7 +223,10 @@ static double JUSYNCDecodeSenderTime(uint64 RawTimestamp)
 // used as a fallback when the notification did not carry a time.
 static double JUSYNCTimeFromFilename(const FString& Filename)
 {
-    const FString Base = FPaths::GetBaseFilename(FPaths::GetCleanFilename(Filename));
+    const FString Clean = FPaths::GetCleanFilename(Filename);
+    const FString Base = Clean.EndsWith(TEXT(".geo"), ESearchCase::IgnoreCase)
+        ? JUSYNCRawGeoCurves::StripSubsetSuffix(Clean)
+        : FPaths::GetBaseFilename(Clean);
     const int32 TimeSep = Base.Find(TEXT("__"), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
     if (TimeSep == INDEX_NONE)
     {

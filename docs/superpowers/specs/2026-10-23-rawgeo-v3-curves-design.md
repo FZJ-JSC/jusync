@@ -184,6 +184,10 @@ For `topology == 1` and `subset_count = S`:
   for `i = 0 … curve_count-1`.
 - The number of curves in subset `k` is `ceil((C - k) / S)` where
   `C = full_curve_count`. `curve_count` must equal that value.
+- For `S > 1`, the sender must stamp `full_num_points` with the full-frame point
+  total (not the subset total). The host packer rejects a missing total and any
+  total below the subset's points, and requires `C <= full_num_points / 2`; this is
+  the same bound the client applies before allocating curve slots.
 - No ordinal array is transmitted: ordinals are derivable from `k`, `S`, and `i`.
 - The coarse preview is subset `0`: *fewer streamlines, each at full shape*. It is
   always a valid polyline set, never a chord approximation.
@@ -305,8 +309,10 @@ All ranks must run with the same values; see invariant 6 for the failure mode.
   receive a non-null dummy pointer with zero points), so merge flags do not depend
   on which subset arrives first.
 - On prim removal/rename, `RemoveStoreEntriesForFile` expands the base stage key to
-  its `.usd`/`.usda` twins, the base `.geo`, and `_s0.geo` ... `_s7.geo`. A retired
-  curve element cannot leave stale subset aliases in the broker.
+  its `.usd`/`.usda` twins, the base `.geo`, and `_s0.geo` ... `_s7.geo`. This is
+  limited to clip-like names containing the `__<time>` marker; a plain `_s<digits>`
+  name is not shortened. An already-suffixed input still adds the unsuffixed twins.
+  A retired curve element cannot leave stale subset aliases in the broker.
 - Each subset file goes through `GetDiffCapture().CapturePreStore(geoKey)` and
   `g_rankMemoryStore->StoreFile(geoKey, …, "application/x-jusync-geo")`.
 
@@ -334,6 +340,12 @@ Dispatch:
 - v1, or v2/v3 with `topology == 0`: existing point-cloud path.
 - v3 with `topology == 1`: curve path in `JUSYNCCurveBuilder`.
 - Unknown version: reject with a warning (no crash).
+
+`LoadUSDFullCompactFromBuffer` checks the RawGeo magic before the middleware
+initialized gate. Local RawGeo payloads therefore parse and finalize without a
+broker; only the USD path still requires initialized middleware. The
+`CurveDispatch` test uses a transient subsystem, sets `jusync.Curve.Sides`
+explicitly, and touches neither the global middleware singleton nor a fixed port.
 
 Validation mirrored from 4.3, including the exact byte math and
 `Σ curve_vertex_counts == num_points`.
@@ -518,9 +530,10 @@ Other regression evidence:
   `CurveLateUpgrade` (colors/widths from a later subset, default radius backfill),
   `CurveSubsetKey` (`_s<k>` does not change the element/group key), and
   `CurveDispatch` (middleware buffer -> finalized `BasisCurves` mesh).
-- Host packer: `test_rawgeo_curve_pack` passes, including two-attribute round-trip,
-  `C = 10, S = 4 -> 3, 3, 2, 2`, wrong-subset rejection, and the
-  `StoreKeysForFile` `_s0.._s7` expansion/dedup cases.
+- Host packer: `test_rawgeo_curve_pack` passes, including full-frame point totals
+  for every subset, two-attribute round-trip, `C = 10, S = 4 -> 3, 3, 2, 2`,
+  wrong-subset rejection, empty-subset width retention, and the
+  `StoreKeysForFile` base-twin/`_s0.._s7` expansion, `__`-marker, and dedup cases.
 - Sender-to-client E2E (rerun after the review fixes): a temporary ANARI `curve`
   sender (image `jusync-curve-sender:test`) emitted four v3 `.geo` subsets through a
   live ZMQ broker on host port 5557. `JUSYNC.RawGeo.BrokerCurveE2E` used the

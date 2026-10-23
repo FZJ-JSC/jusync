@@ -24,6 +24,9 @@ struct FJUSYNCRawGeoCurvePayload
 
 namespace JUSYNCRawGeoCurves
 {
+    // Reject unsafe or inconsistent v3 metadata before allocating curve slots.
+    bool ValidateCurveHeader(const anari_usd_protocol::JusyncRawGeoHeader& Hdr);
+
     // Decode positions/colors/curve counts/widths from a validated v3 header.
     bool ParsePayload(const uint8* Data, SIZE_T Size,
                       const anari_usd_protocol::JusyncRawGeoHeader& Hdr,

@@ -2062,12 +2062,6 @@ static void JUSYNCFinalizeCurveMesh(FJUSYNCCompactMeshData& Mesh)
 bool UJUSYNCSubsystem::LoadUSDFullCompactFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCCompactMeshRef>& OutMeshes, TArray<FJUSYNCPointCloudRef>& OutPointCloudData)
 {
 #ifdef WITH_ANARI_USD_MIDDLEWARE
-    if (!bIsInitialized.load())
-    {
-        UE_LOG(LogTemp, Error, TEXT("JUSYNC: LoadUSDFullCompactFromBuffer called but middleware is not initialized"));
-        return false;
-    }
-
     OutMeshes.Empty();
     OutPointCloudData.Empty();
 
@@ -2118,6 +2112,12 @@ bool UJUSYNCSubsystem::LoadUSDFullCompactFromBuffer(const TArray<uint8>& Buffer,
                 *Filename, Buffer.Num());
             return false;
         }
+    }
+
+    if (!bIsInitialized.load())
+    {
+        UE_LOG(LogTemp, Error, TEXT("JUSYNC: LoadUSDFullCompactFromBuffer called but middleware is not initialized"));
+        return false;
     }
 
     FTCHARToUTF8 FilenameConverter(*Filename);

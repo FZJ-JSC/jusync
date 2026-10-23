@@ -481,20 +481,18 @@ namespace
 
 namespace JUSYNCRawGeoCurves
 {
-    bool ParsePayload(const uint8* Data, SIZE_T Size,
-                      const anari_usd_protocol::JusyncRawGeoHeader& Hdr,
-                      FJUSYNCRawGeoCurvePayload& Out)
+    bool ValidateCurveHeader(const anari_usd_protocol::JusyncRawGeoHeader& Hdr)
     {
         using namespace anari_usd_protocol;
 
-        if (Data == nullptr ||
-            Hdr.version != JUSYNC_RAWGEO_VERSION ||
+        if (Hdr.version != JUSYNC_RAWGEO_VERSION ||
             Hdr.topology != JUSYNC_RAWGEO_TOPOLOGY_LINEAR_CURVES)
         {
             return false;
         }
         if (Hdr.num_attributes > 16 || Hdr.subset_count == 0 ||
-            Hdr.subset_count > static_cast<uint64>(GCurveMaxSubsets))
+            Hdr.subset_count > static_cast<uint64>(GCurveMaxSubsets) ||
+            Hdr.subset_index >= Hdr.subset_count)
         {
             return false;
         }
@@ -520,7 +518,16 @@ namespace JUSYNCRawGeoCurves
         const uint64 ExpectedCurves = Hdr.full_curve_count > Hdr.subset_index
             ? (Hdr.full_curve_count - Hdr.subset_index + Hdr.subset_count - 1) / Hdr.subset_count
             : 0;
-        if (static_cast<uint64>(Hdr.curve_count) != ExpectedCurves)
+        return static_cast<uint64>(Hdr.curve_count) == ExpectedCurves;
+    }
+
+    bool ParsePayload(const uint8* Data, SIZE_T Size,
+                      const anari_usd_protocol::JusyncRawGeoHeader& Hdr,
+                      FJUSYNCRawGeoCurvePayload& Out)
+    {
+        using namespace anari_usd_protocol;
+
+        if (Data == nullptr || !ValidateCurveHeader(Hdr))
         {
             return false;
         }

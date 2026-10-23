@@ -174,17 +174,19 @@ bool FJUSYNCRawGeoCurveDispatchTest::RunTest(const FString& Parameters)
 {
     JUSYNCRawGeoCurves::FlushMerges();
 
+    // RawGeo buffers are parsed locally. Keep this test off the global
+    // middleware singleton and off any fixed broker port.
+    if (IConsoleVariable* Sides = IConsoleManager::Get().FindConsoleVariable(TEXT("jusync.Curve.Sides")))
+    {
+        Sides->Set(4, ECVF_SetByCode);
+    }
+
     UGameInstance* GameInstance = NewObject<UGameInstance>(GetTransientPackage());
     UJUSYNCSubsystem* Subsystem = GameInstance
         ? NewObject<UJUSYNCSubsystem>(GameInstance) : nullptr;
     if (!Subsystem)
     {
         AddError(TEXT("failed to create a transient JUSYNC subsystem"));
-        return false;
-    }
-    if (!Subsystem->InitializeMiddleware(TEXT("tcp://*:5599")))
-    {
-        AddError(TEXT("failed to initialize middleware for the dispatch test"));
         return false;
     }
 
@@ -197,7 +199,6 @@ bool FJUSYNCRawGeoCurveDispatchTest::RunTest(const FString& Parameters)
     TArray<FJUSYNCPointCloudRef> Clouds;
     const bool bLoaded = Subsystem->LoadUSDFullCompactFromBuffer(
         Buffer, TEXT("clips/Dispatch_Geom__0.geo"), Meshes, Clouds);
-    Subsystem->ShutdownMiddleware();
 
     TestTrue(TEXT("RawGeo curve buffer dispatches"), bLoaded);
     TestEqual(TEXT("one curve mesh produced"), Meshes.Num(), 1);
@@ -351,6 +352,11 @@ bool FJUSYNCRawGeoCurveRejectCountTest::RunTest(const FString& Parameters)
     FJUSYNCCompactMeshRef Mesh;
     TestFalse(TEXT("unbounded full_curve_count is rejected"),
         IngestCurveBuffer(Buffer, TEXT("clips/Reject_Geom__0_s0.geo"), Mesh));
+
+    Header.full_curve_count = 4ull * 1024ull * 1024ull + 1ull;
+    Header.full_num_points = Header.full_curve_count * 2ull;
+    TestFalse(TEXT("the exact 4M curve cap is enforced"),
+        JUSYNCRawGeoCurves::ValidateCurveHeader(Header));
 
     // A truncated subset still has a self-consistent payload; only the
     // expected ceil((C-k)/S) curve count reveals the missing curves.
