@@ -1,5 +1,6 @@
 #include "Misc/AutomationTest.h"
 
+#include "HAL/IConsoleManager.h"
 #include "JUSYNCRawGeoCurves.h"
 #include "JUSYNCElementNames.h"
 
@@ -189,6 +190,14 @@ bool FJUSYNCRawGeoCurveDegenerateTest::RunTest(const FString& Parameters)
 
 namespace
 {
+    void SetIntCurveCVar(const TCHAR* Name, int32 Value)
+    {
+        if (IConsoleVariable* Var = IConsoleManager::Get().FindConsoleVariable(Name))
+        {
+            Var->Set(Value, ECVF_SetByCode);
+        }
+    }
+
     bool IngestCurveBuffer(const TArray<uint8>& Buffer, const TCHAR* Filename,
                            FJUSYNCCompactMeshRef& OutMesh)
     {
@@ -375,6 +384,103 @@ bool FJUSYNCRawGeoRankParseTest::RunTest(const FString& Parameters)
         TEXT("Foo_r2_Geom__0.geo"), Rank));
     TestFalse(TEXT("rank mark without a trailing token"), JUSYNCElementNames::ParseFileRank(
         TEXT("Wave_Geom__r3.geo"), Rank));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJUSYNCRawGeoCurveDecimateTest, "JUSYNC.RawGeo.CurveDecimate",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJUSYNCRawGeoCurveDecimateTest::RunTest(const FString& Parameters)
+{
+    JUSYNCRawGeoCurves::FlushMerges();
+
+    TArray<TArray<FVector3f>> Curves;
+    TArray<FVector3f> LongCurve;
+    for (int32 i = 0; i < 100; ++i)
+    {
+        LongCurve.Add(FVector3f(static_cast<float>(i), 0.0f, 0.0f));
+    }
+    Curves.Add(LongCurve);
+
+    SetIntCurveCVar(TEXT("jusync.Curve.MaxNodes"), 10);
+    FJUSYNCCompactMeshRef Mesh;
+    const bool bIngested = IngestCurveBuffer(MakeCurveBuffer(Curves, 0, 1), TEXT("clips/Long_Geom__0.geo"), Mesh);
+    SetIntCurveCVar(TEXT("jusync.Curve.MaxNodes"), 4000000);
+
+    TestTrue(TEXT("decimated payload ingests"), bIngested);
+    TestTrue(TEXT("mesh produced"), Mesh.IsValid());
+    if (Mesh.IsValid())
+    {
+        const int32 Rings = Mesh->Points.Num() / 4;
+        TestTrue(TEXT("at most budget rings"), Rings <= 10);
+        TestTrue(TEXT("first node kept"), CurveRingCenter(*Mesh, 0).Equals(FVector3f(0.0f, 0.0f, 0.0f)));
+        TestTrue(TEXT("last node kept"), CurveRingCenter(*Mesh, Rings - 1).Equals(FVector3f(99.0f, 0.0f, 0.0f)));
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJUSYNCRawGeoCurveTransientTest, "JUSYNC.RawGeo.CurveTransient",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJUSYNCRawGeoCurveTransientTest::RunTest(const FString& Parameters)
+{
+    JUSYNCRawGeoCurves::FlushMerges();
+    SetIntCurveCVar(TEXT("jusync.RawGeo.CurveProgressive"), 2);
+
+    const TArray<TArray<FVector3f>> Curves = MergeCurves();
+
+    FJUSYNCCompactMeshRef Coarse;
+    TestTrue(TEXT("coarse subset ingests"),
+        IngestCurveBuffer(MakeCurveBuffer(Curves, 0, 2), TEXT("clips/Transient_Geom__0_s0.geo"), Coarse));
+    TestTrue(TEXT("coarse mesh produced"), Coarse.IsValid());
+    if (Coarse.IsValid())
+    {
+        TestTrue(TEXT("coarse frame is transient"), Coarse->bTransient);
+    }
+
+    FJUSYNCCompactMeshRef Complete;
+    TestTrue(TEXT("completing subset ingests"),
+        IngestCurveBuffer(MakeCurveBuffer(Curves, 1, 2), TEXT("clips/Transient_Geom__0_s1.geo"), Complete));
+    TestTrue(TEXT("completed mesh produced"), Complete.IsValid());
+    if (Complete.IsValid())
+    {
+        TestFalse(TEXT("completed frame is cacheable"), Complete->bTransient);
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJUSYNCRawGeoCurveSidesTest, "JUSYNC.RawGeo.CurveSides",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJUSYNCRawGeoCurveSidesTest::RunTest(const FString& Parameters)
+{
+    JUSYNCRawGeoCurves::FlushMerges();
+
+    TArray<TArray<FVector3f>> Curves;
+    Curves.Add({ FVector3f(0.0f, 0.0f, 0.0f), FVector3f(1.0f, 0.0f, 0.0f),
+                 FVector3f(2.0f, 0.0f, 0.0f), FVector3f(3.0f, 0.0f, 0.0f) });
+
+    SetIntCurveCVar(TEXT("jusync.Curve.Sides"), 3);
+    FJUSYNCCompactMeshRef Three;
+    TestTrue(TEXT("three-sided ingest"),
+        IngestCurveBuffer(MakeCurveBuffer(Curves, 0, 1), TEXT("clips/Sides_Geom__0.geo"), Three));
+    TestTrue(TEXT("three-sided mesh"), Three.IsValid());
+    if (Three.IsValid())
+    {
+        TestEqual(TEXT("three sides per node"), Three->Points.Num(), 4 * 3);
+    }
+
+    SetIntCurveCVar(TEXT("jusync.Curve.Sides"), 9);
+    FJUSYNCCompactMeshRef Clamped;
+    TestTrue(TEXT("nine-sided ingest"),
+        IngestCurveBuffer(MakeCurveBuffer(Curves, 0, 1), TEXT("clips/Sides_Geom__0.geo"), Clamped));
+    TestTrue(TEXT("nine-sided mesh"), Clamped.IsValid());
+    if (Clamped.IsValid())
+    {
+        TestEqual(TEXT("sides clamp to 8"), Clamped->Points.Num(), 4 * 8);
+    }
+
+    SetIntCurveCVar(TEXT("jusync.Curve.Sides"), 4);
     return true;
 }
 

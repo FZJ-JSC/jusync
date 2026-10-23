@@ -1856,7 +1856,12 @@ void AJUSYNCFileSpawnerActor::ApplyParsedFileData(FJUSYNCParsedFileResult&& Resu
         ChangeTracker->SetState(Filename, EJUSYNCFileChangeState::Spawning);
     }
 
-    if (bEnableMeshCache && MeshCache && Result.bParsed &&
+    // Coarse RawGeo curve previews are replaced by the completed frame; caching
+    // them would make the scrubber replay a partial frame.
+    const bool bHasTransientMesh = Result.CompactMeshes.ContainsByPredicate(
+        [](const FJUSYNCCompactMeshRef& Mesh) { return Mesh.IsValid() && Mesh->bTransient; });
+
+    if (bEnableMeshCache && MeshCache && Result.bParsed && !bHasTransientMesh &&
         (Result.CompactMeshes.Num() > 0 || Result.Meshes.Num() > 0 || Result.CompactPointClouds.Num() > 0) &&
         !(Result.CompactPointClouds.Num() > 0 && !bCachePointClouds))
     {

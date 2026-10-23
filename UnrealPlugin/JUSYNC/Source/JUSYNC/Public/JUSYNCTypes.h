@@ -230,6 +230,9 @@ struct JUSYNC_API FJUSYNCCompactMeshData
 	TArray<int32> Triangles;
 	uint64 LUTVersion = 0;
 	bool bHasBakedColors = false;
+	// Coarse RawGeo curve preview: on screen immediately, but must not be
+	// written to the sample cache (the completed frame replaces it).
+	bool bTransient = false;
 
 	FJUSYNCCompactMeshData() = default;
 

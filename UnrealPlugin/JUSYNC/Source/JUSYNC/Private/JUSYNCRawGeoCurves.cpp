@@ -2,12 +2,35 @@
 
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
+#include "HAL/ThreadSafeCounter.h"
 #include "JUSYNCModule.h"
 
 namespace
 {
-    constexpr int32 GCurveSides = 4;
-    constexpr float GCurveDefaultRadius = 0.5f;
+    TAutoConsoleVariable<int32> CVarJusyncCurveSides(
+        TEXT("jusync.Curve.Sides"), 4,
+        TEXT("Sides of the tube built around each RawGeo v3 curve, clamped 3-8."),
+        ECVF_Default);
+
+    TAutoConsoleVariable<float> CVarJusyncCurveDefaultRadius(
+        TEXT("jusync.Curve.DefaultRadius"), 0.5f,
+        TEXT("Tube radius used when a RawGeo v3 curve payload has no widths."),
+        ECVF_Default);
+
+    TAutoConsoleVariable<float> CVarJusyncCurveRadiusScale(
+        TEXT("jusync.Curve.RadiusScale"), 1.0f,
+        TEXT("Multiplier applied to RawGeo v3 per-point widths."),
+        ECVF_Default);
+
+    TAutoConsoleVariable<int32> CVarJusyncCurveMaxNodes(
+        TEXT("jusync.Curve.MaxNodes"), 4000000,
+        TEXT("Maximum curve nodes rendered per RawGeo v3 payload; larger payloads are decimated with a uniform stride."),
+        ECVF_Default);
+
+    float CurveDefaultRadius()
+    {
+        return FMath::Max(0.0f, CVarJusyncCurveDefaultRadius.GetValueOnAnyThread());
+    }
 
     FColor CurveColor(const float* Components, uint32 NumComponents)
     {
@@ -25,7 +48,7 @@ namespace
     // Expand one payload's polylines into side-facing tube triangles. Positions
     // and normals are already in UE space; winding follows the (x,z,-y) rotation
     // so the outward normal matches the ring direction.
-    void BuildTubes(const FJUSYNCRawGeoCurvePayload& Payload, FJUSYNCCompactMeshData& Out)
+    void BuildTubesInternal(const FJUSYNCRawGeoCurvePayload& Payload, FJUSYNCCompactMeshData& Out)
     {
         Out.ElementName = Payload.ElementName;
         Out.TypeName = TEXT("BasisCurves");
@@ -37,7 +60,9 @@ namespace
             return;
         }
 
-        const int32 Sides = GCurveSides;
+        const int32 Sides = FMath::Clamp(CVarJusyncCurveSides.GetValueOnAnyThread(), 3, 8);
+        const float DefaultRadius = CurveDefaultRadius();
+        const float RadiusScale = FMath::Max(0.0f, CVarJusyncCurveRadiusScale.GetValueOnAnyThread());
         const int32 TotalVerts = TotalNodes * Sides;
         Out.Points.SetNumUninitialized(TotalVerts);
         Out.Normals.SetNumUninitialized(TotalVerts);
@@ -98,8 +123,8 @@ namespace
                 }
 
                 const float Radius = Payload.Widths.Num() == Payload.Points.Num()
-                    ? FMath::Max(0.0f, Payload.Widths[PointIndex])
-                    : GCurveDefaultRadius;
+                    ? FMath::Max(0.0f, Payload.Widths[PointIndex]) * RadiusScale
+                    : DefaultRadius;
                 const FColor Color = Payload.Colors.Num() == Payload.Points.Num()
                     ? Payload.Colors[PointIndex]
                     : FColor::White;
@@ -153,6 +178,88 @@ namespace
             {
                 Normal = FVector3f(0.0f, 0.0f, 1.0f);
             }
+        }
+    }
+
+    // Uniform-stride node reduction that always keeps each curve's endpoints.
+    // Returns true (and fills Out) only when the payload is over budget.
+    bool DecimateCurvesToBudget(const FJUSYNCRawGeoCurvePayload& In, FJUSYNCRawGeoCurvePayload& Out)
+    {
+        static FThreadSafeCounter GCurveBudgetWarned;
+
+        const int32 Total = In.Points.Num();
+        const int32 MaxNodes = FMath::Max(2, CVarJusyncCurveMaxNodes.GetValueOnAnyThread());
+        if (Total <= MaxNodes)
+        {
+            GCurveBudgetWarned.Set(0);
+            return false;
+        }
+
+        // Reserve one node for each curve's mandatory last point, so the kept
+        // count (endpoints included) stays at or below the budget.
+        const int32 Stride = FMath::Max(1, FMath::DivideAndRoundUp(Total - 1, MaxNodes - 1));
+        if (GCurveBudgetWarned.GetValue() == 0)
+        {
+            GCurveBudgetWarned.Set(1);
+            UE_LOG(LogJUSYNC, Warning, TEXT("RawGeo curves: %d nodes exceed budget, stride %d"), Total, Stride);
+        }
+
+        Out = In;
+        Out.Points.Reset();
+        Out.Colors.Reset();
+        Out.Widths.Reset();
+        Out.CurveCounts.Reset();
+
+        int32 Start = 0;
+        for (const int32 Length : In.CurveCounts)
+        {
+            if (Length <= 0)
+            {
+                continue;
+            }
+            TArray<int32> Kept;
+            for (int32 i = 0; i < Length; i += Stride)
+            {
+                Kept.Add(i);
+            }
+            if (Kept.Num() == 0 || Kept.Last() != Length - 1)
+            {
+                Kept.Add(Length - 1);
+            }
+            if (Kept.Num() < 2 && Length >= 2)
+            {
+                Kept.Reset();
+                Kept.Add(0);
+                Kept.Add(Length - 1);
+            }
+            Out.CurveCounts.Add(Kept.Num());
+            for (const int32 Index : Kept)
+            {
+                Out.Points.Add(In.Points[Start + Index]);
+                if (In.bHasColors)
+                {
+                    Out.Colors.Add(In.Colors[Start + Index]);
+                }
+                if (In.bHasWidths)
+                {
+                    Out.Widths.Add(In.Widths[Start + Index]);
+                }
+            }
+            Start += Length;
+        }
+        return true;
+    }
+
+    void BuildTubes(const FJUSYNCRawGeoCurvePayload& Payload, FJUSYNCCompactMeshData& Out)
+    {
+        FJUSYNCRawGeoCurvePayload Decimated;
+        if (DecimateCurvesToBudget(Payload, Decimated))
+        {
+            BuildTubesInternal(Decimated, Out);
+        }
+        else
+        {
+            BuildTubesInternal(Payload, Out);
         }
     }
 
@@ -303,7 +410,7 @@ namespace
                 }
                 else
                 {
-                    DstWidths.Init(GCurveDefaultRadius, Length);
+                    DstWidths.Init(CurveDefaultRadius(), Length);
                 }
             }
             Start += Length;
@@ -495,6 +602,10 @@ namespace JUSYNCRawGeoCurves
             if (Subset == 0)
             {
                 EmitCurveTubes(Payload, OutMesh);
+                if (OutMesh.IsValid())
+                {
+                    OutMesh->bTransient = (Count > 1);
+                }
             }
             return true;
         }
@@ -536,6 +647,10 @@ namespace JUSYNCRawGeoCurves
                 if (Subset == 0)
                 {
                     EmitCurveTubes(Payload, OutMesh);
+                    if (OutMesh.IsValid())
+                    {
+                        OutMesh->bTransient = true;
+                    }
                 }
                 return true;
             }
@@ -573,6 +688,10 @@ namespace JUSYNCRawGeoCurves
             FJUSYNCRawGeoCurvePayload Merged;
             BuildMergedCurvePayload(*Merge, Merged);
             EmitCurveTubes(Merged, OutMesh);
+            if (OutMesh.IsValid())
+            {
+                OutMesh->bTransient = !bComplete;
+            }
         }
 
         if (bComplete)
