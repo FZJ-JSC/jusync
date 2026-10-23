@@ -32,6 +32,7 @@
 #include "Materials/MaterialExpressionScalarParameter.h"
 #include "JUSYNCPointCloudSpawner.h"
 #include "JUSYNCMeshMorpher.h"
+#include "JUSYNCRawGeoCurves.h"
 #ifdef WITH_ANARI_USD_MIDDLEWARE
 #include "LidarPointCloud.h"
 #include "LidarPointCloudComponent.h"
@@ -1644,7 +1645,9 @@ static bool JUSYNCMergeKeyFitsBudget(int64 FullN, FString& OutEvictNote)
     return GRawGeoMergeTotalPoints + FullN <= Budget;
 }
 
-static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, FJUSYNCPointCloudRef& OutCloud)
+static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& Filename,
+                                    FJUSYNCPointCloudRef& OutCloud,
+                                    TArray<FJUSYNCCompactMeshRef>& OutMeshes)
 {
     using namespace anari_usd_protocol;
 
@@ -1672,6 +1675,22 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, FJUSYNCPointClo
     }
     if (!Hdr.valid(Src, (size_t)Buffer.Num()))
         return false;
+
+    // v3 curves carry whole polylines instead of a point lattice; they render
+    // as meshes, so they branch off before the zero-point guard below.
+    if (Hdr.version == JUSYNC_RAWGEO_VERSION &&
+        Hdr.topology == JUSYNC_RAWGEO_TOPOLOGY_LINEAR_CURVES)
+    {
+        FJUSYNCCompactMeshRef CurveMesh;
+        if (!JUSYNCRawGeoCurves::IngestAndBuild(Buffer, Filename, Hdr, CurveMesh))
+            return false;
+        if (CurveMesh.IsValid())
+        {
+            OutMeshes.Add(MoveTemp(CurveMesh));
+        }
+        return true;
+    }
+
     if (Hdr.num_points == 0 || Hdr.num_points > (uint64)MAX_int32 || Hdr.num_attributes > 16)
         return false;
 
@@ -2015,6 +2034,30 @@ static TAutoConsoleVariable<int32> CVarJusyncMeshFlipWinding(
     TEXT("Swap the last two triangle indices on compact streamed meshes (backface fix knob, no rebuild needed)."),
     ECVF_Default);
 
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+// RawGeo curve meshes return before the USD finalize loop below, so apply the
+// same winding knob and normal cleanup here.
+static void JUSYNCFinalizeCurveMesh(FJUSYNCCompactMeshData& Mesh)
+{
+    if (CVarJusyncMeshFlipWinding.GetValueOnAnyThread() != 0)
+    {
+        for (int32 t = 0; t + 2 < Mesh.Triangles.Num(); t += 3)
+        {
+            Mesh.Triangles.Swap(t + 1, t + 2);
+        }
+    }
+    for (FVector3f& Normal : Mesh.Normals)
+    {
+        Normal = Normal.GetSafeNormal();
+        if (Normal.IsNearlyZero())
+        {
+            Normal = FVector3f(0.0f, 0.0f, 1.0f);
+        }
+    }
+    Mesh.bHasBakedColors = Mesh.VertexColors.Num() > 0;
+}
+#endif
+
 bool UJUSYNCSubsystem::LoadUSDFullCompactFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCCompactMeshRef>& OutMeshes, TArray<FJUSYNCPointCloudRef>& OutPointCloudData)
 {
 #ifdef WITH_ANARI_USD_MIDDLEWARE
@@ -2039,8 +2082,22 @@ bool UJUSYNCSubsystem::LoadUSDFullCompactFromBuffer(const TArray<uint8>& Buffer,
         if (MaybeMagic == anari_usd_protocol::JUSYNC_RAWGEO_MAGIC)
         {
             FJUSYNCPointCloudRef Cloud;
-            if (JUSYNCParseRawGeoBuffer(Buffer, Cloud))
+            TArray<FJUSYNCCompactMeshRef> CurveMeshes;
+            if (JUSYNCParseRawGeoBuffer(Buffer, Filename, Cloud, CurveMeshes))
             {
+                for (const FJUSYNCCompactMeshRef& CurveMesh : CurveMeshes)
+                {
+                    if (!CurveMesh.IsValid())
+                    {
+                        continue;
+                    }
+                    JUSYNCFinalizeCurveMesh(*CurveMesh);
+                    UE_LOG(LogTemp, Log,
+                        TEXT("JUSYNC: RawGeo curve mesh '%s': %d verts, %d tris from '%s'"),
+                        *CurveMesh->ElementName, CurveMesh->Points.Num(),
+                        CurveMesh->Triangles.Num() / 3, *Filename);
+                    OutMeshes.Add(CurveMesh);
+                }
                 // Progressive refinement: intermediate subsets parse successfully
                 // but deliberately emit no cloud (the merge is still filling in;
                 // the coarse base is already on screen and the completed cloud
