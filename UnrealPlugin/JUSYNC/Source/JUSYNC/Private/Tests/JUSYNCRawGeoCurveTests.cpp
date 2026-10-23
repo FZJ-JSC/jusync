@@ -1,7 +1,7 @@
 #include "Misc/AutomationTest.h"
 
 #include "HAL/IConsoleManager.h"
-#include "JUSYNCRawGeoCurves.h"
+#include "RawGeo/JUSYNCRawGeoCurves.h"
 #include "JUSYNCElementNames.h"
 
 #if WITH_DEV_AUTOMATION_TESTS

@@ -32,7 +32,7 @@
 #include "Materials/MaterialExpressionScalarParameter.h"
 #include "JUSYNCPointCloudSpawner.h"
 #include "JUSYNCMeshMorpher.h"
-#include "JUSYNCRawGeoCurves.h"
+#include "RawGeo/JUSYNCRawGeoCurves.h"
 #ifdef WITH_ANARI_USD_MIDDLEWARE
 #include "LidarPointCloud.h"
 #include "LidarPointCloudComponent.h"

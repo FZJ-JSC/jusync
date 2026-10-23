@@ -257,15 +257,15 @@ endif()
 # ------------------------------
 # Build as a shared library
 add_library(${PROJECT_NAME} SHARED
-    src/AnariUsdMiddleware.cpp
-    src/ZmqConnector.cpp
-    src/AnariUsdClient.cpp
-    src/HashVerifier.cpp
-    src/UsdProcessor.cpp
-    src/AnariUsdMiddleware_C.cpp
-    src/CollisionProcessor.cpp
-    src/GpuContext.cpp
-    src/GpuValidation.cpp
+    src/core/AnariUsdMiddleware.cpp
+    src/network/ZmqConnector.cpp
+    src/client/AnariUsdClient.cpp
+    src/util/HashVerifier.cpp
+    src/usd/UsdProcessor.cpp
+    src/api/AnariUsdMiddleware_C.cpp
+    src/collision/CollisionProcessor.cpp
+    src/gpu/GpuContext.cpp
+    src/gpu/GpuValidation.cpp
     external/xxhash/xxhash.c
 )
 
@@ -273,7 +273,7 @@ add_library(${PROJECT_NAME} SHARED
 if(ENABLE_CUDA AND CUDA_FOUND)
     # Add CUDA kernel implementation
     target_sources(${PROJECT_NAME} PRIVATE
-        src/GpuKernels.cu
+        src/gpu/GpuKernels.cu
     )
     
     # Add compile definition for CUDA support

@@ -8,7 +8,7 @@
 #include "JUSYNCFileSpawnerActor.h"
 #if WITH_EDITOR
 #include "Editor.h"
-#include "JUSYNCFileSpawnerCustomization.h"
+#include "Spawner/JUSYNCFileSpawnerCustomization.h"
 #include "Misc/CoreDelegates.h"
 #include "PropertyEditorModule.h"
 #endif
