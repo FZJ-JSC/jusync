@@ -535,6 +535,13 @@ if(BUILD_TESTS)
     # Enable CTest integration with granular tests
     enable_testing()
 
+    # RawGeo v3 wire-format test (header sizes, valid() rules, section math).
+    add_executable(test_rawgeo_v3 tests/rawgeo_v3/test_rawgeo_v3.cpp)
+    target_include_directories(test_rawgeo_v3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(test_rawgeo_v3 PRIVATE cxx_std_17)
+    add_test(NAME rawgeo_v3 COMMAND test_rawgeo_v3)
+    set_tests_properties(rawgeo_v3 PROPERTIES TIMEOUT 60 LABELS "protocol")
+
     # Test Categories - These are run as independent CI checks.
     add_test(NAME "build_verification"
               COMMAND ${CMAKE_COMMAND} -E echo "Build verification test"

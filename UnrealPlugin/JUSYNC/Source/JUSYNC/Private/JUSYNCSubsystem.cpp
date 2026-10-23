@@ -1654,7 +1654,7 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, FJUSYNCPointClo
     const uint8* Src = Buffer.GetData();
     uint32 MaybeVersion = 0;
     FMemory::Memcpy(&MaybeVersion, Src + offsetof(JusyncRawGeoHeader, version), sizeof(MaybeVersion));
-    if (MaybeVersion != 1 && MaybeVersion != JUSYNC_RAWGEO_VERSION)
+    if (MaybeVersion < 1 || MaybeVersion > JUSYNC_RAWGEO_VERSION)
         return false;
     const size_t HdrSize = JusyncRawGeoHeader::header_bytes(MaybeVersion);
     if ((size_t)Buffer.Num() < HdrSize)
@@ -1670,7 +1670,7 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, FJUSYNCPointClo
         Hdr.subset_count = 1;
         Hdr.full_num_points = Hdr.num_points;
     }
-    if (!Hdr.valid((size_t)Buffer.Num()))
+    if (!Hdr.valid(Src, (size_t)Buffer.Num()))
         return false;
     if (Hdr.num_points == 0 || Hdr.num_points > (uint64)MAX_int32 || Hdr.num_attributes > 16)
         return false;

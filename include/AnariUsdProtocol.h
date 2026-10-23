@@ -372,7 +372,11 @@ struct ZmqFileNotification
 // File layout (all little-endian, packed):
 
 inline constexpr uint32_t JUSYNC_RAWGEO_MAGIC   = 0x3147534A; // "JSG1"
-inline constexpr uint32_t JUSYNC_RAWGEO_VERSION = 2;
+inline constexpr uint32_t JUSYNC_RAWGEO_VERSION = 3;
+
+// v3 topology of the payload that follows the header.
+inline constexpr uint32_t JUSYNC_RAWGEO_TOPOLOGY_POINTS        = 0; // vertex set
+inline constexpr uint32_t JUSYNC_RAWGEO_TOPOLOGY_LINEAR_CURVES = 1; // polylines
 
 struct JusyncRawGeoAttrDesc
 {
@@ -403,52 +407,153 @@ struct JusyncRawGeoHeaderV1
 // payload, the source points whose index i satisfies (i % S) == subset_index;
 // subset 0 is the coarse base streamed first. Merged in lattice order the
 // subsets rebuild the frame point-for-point identical to a stride-1 stream.
-struct JusyncRawGeoHeader
+//
+// Frozen. v3 appends its curve fields after `full_num_points`, so this struct
+// is a byte-exact prefix of the current header.
+struct JusyncRawGeoHeaderV2
 {
     uint32_t magic;               // JUSYNC_RAWGEO_MAGIC
-    uint32_t version;             // 1 (JusyncRawGeoHeaderV1 layout) or 2
+    uint32_t version;             // == 2
     char     prim_name[64];       // element name, NUL-padded ("bigCloud")
     uint64_t num_points;          // points in THIS payload (subset or whole)
     double   time;                // timestep this payload samples
-    uint32_t position_components; // always 3 (float3) in v1
+    uint32_t position_components; // always 3 (float3)
     uint32_t color_components;    // 0 = absent, 3 = rgb, 4 = rgba (float)
     uint32_t num_attributes;      // descs following the header
     uint32_t attr_uniform_count;  // per-attribute element count (== num_points)
-    uint64_t payload_bytes;       // total bytes of the three data sections
-    // --- v2 fields (present when version == 2) ---
+    uint64_t payload_bytes;       // total bytes of the data sections
+    // --- v2 fields ---
     uint64_t subset_index;        // k in [0, subset_count)
     uint64_t subset_count;        // S; 1 = whole frame in one payload
     uint64_t full_num_points;     // source count the lattice was cut from
+};
+
+// v3 header (streamline curves): v2 plus curve topology. Points keep
+// `topology == 0` and v2 semantics; curves set `topology == 1` and replace the
+// point lattice with a whole-curve lattice (curve ordinals, not point indices).
+struct JusyncRawGeoHeader
+{
+    uint32_t magic;               // JUSYNC_RAWGEO_MAGIC
+    uint32_t version;             // 1 (V1 prefix), 2 (V2 prefix) or 3
+    char     prim_name[64];       // element name, NUL-padded ("Streamlines")
+    uint64_t num_points;          // points in THIS payload (subset or whole)
+    double   time;                // timestep this payload samples
+    uint32_t position_components; // always 3 (float3)
+    uint32_t color_components;    // 0 = absent, 3 = rgb, 4 = rgba (float)
+    uint32_t num_attributes;      // descs following the header
+    uint32_t attr_uniform_count;  // per-attribute element count (== num_points)
+    uint64_t payload_bytes;       // total bytes of the data sections
+    // --- v2 fields ---
+    uint64_t subset_index;        // k in [0, subset_count)
+    uint64_t subset_count;        // S; 1 = whole frame in one payload
+    uint64_t full_num_points;     // source count the lattice was cut from
+    // --- v3 fields (present when version == 3) ---
+    uint32_t topology;            // JUSYNC_RAWGEO_TOPOLOGY_*
+    uint32_t curve_count;         // curves in THIS payload
+    uint64_t full_curve_count;    // source curve count (C) the lattice was cut from
+    uint32_t width_components;    // 0 = absent, 1 = float width per point
+    uint32_t flags;               // must be 0
 
     // On-disk size of the header for a given version (the attribute
     // descriptor table and data sections follow it).
     static size_t header_bytes(uint32_t ver)
     {
-        return ver == 1 ? sizeof(JusyncRawGeoHeaderV1) : sizeof(JusyncRawGeoHeader);
+        switch (ver)
+        {
+        case 1:  return sizeof(JusyncRawGeoHeaderV1);
+        case 2:  return sizeof(JusyncRawGeoHeaderV2);
+        default: return sizeof(JusyncRawGeoHeader);
+        }
     }
 
-    bool valid(size_t totalBytes) const
+    // `data` must point at the start of the header; the attribute descriptors
+    // live right after it and their component counts complete the byte math.
+    bool valid(const void* data, size_t totalBytes) const
     {
         if (magic != JUSYNC_RAWGEO_MAGIC ||
-            (version != 1 && version != JUSYNC_RAWGEO_VERSION))
+            (version != 1 && version != 2 && version != JUSYNC_RAWGEO_VERSION))
             return false;
         if (position_components != 3 ||
             (color_components != 0 && color_components != 3 && color_components != 4))
             return false;
-        if (version == 2 &&
+        if (attr_uniform_count != num_points)
+            return false;
+        if (version >= 2 &&
             (subset_count == 0 || subset_index >= subset_count ||
              full_num_points < num_points))
             return false;
-        const size_t table = header_bytes(version) +
-            static_cast<size_t>(num_attributes) * sizeof(JusyncRawGeoAttrDesc);
-        return totalBytes >= table && totalBytes - table >= payload_bytes;
+        if (version == JUSYNC_RAWGEO_VERSION)
+        {
+            if (flags != 0 ||
+                (topology != JUSYNC_RAWGEO_TOPOLOGY_POINTS &&
+                 topology != JUSYNC_RAWGEO_TOPOLOGY_LINEAR_CURVES))
+                return false;
+            if (width_components > 1)
+                return false;
+            if (topology == JUSYNC_RAWGEO_TOPOLOGY_POINTS)
+            {
+                if (curve_count != 0 || full_curve_count != 0 || width_components != 0)
+                    return false;
+            }
+            else
+            {
+                if (curve_count > full_curve_count)
+                    return false;
+                // Every linear curve needs at least two nodes.
+                if (num_points < static_cast<uint64_t>(curve_count) * 2)
+                    return false;
+            }
+        }
+
+        const size_t hdrBytes = header_bytes(version);
+        if (totalBytes < hdrBytes)
+            return false;
+        const size_t descBytes = static_cast<size_t>(num_attributes) * sizeof(JusyncRawGeoAttrDesc);
+        if (num_attributes != 0 &&
+            descBytes / sizeof(JusyncRawGeoAttrDesc) != num_attributes)
+            return false; // multiplication overflow
+        if (totalBytes - hdrBytes < descBytes)
+            return false;
+        if (data == nullptr && descBytes != 0)
+            return false;
+
+        uint64_t attrBytes = 0;
+        if (descBytes != 0)
+        {
+            const JusyncRawGeoAttrDesc* descs =
+                reinterpret_cast<const JusyncRawGeoAttrDesc*>(static_cast<const uint8_t*>(data) + hdrBytes);
+            for (uint32_t i = 0; i < num_attributes; ++i)
+            {
+                if (descs[i].components < 1 || descs[i].components > 4)
+                    return false;
+                attrBytes += static_cast<uint64_t>(num_points) * descs[i].components * sizeof(float);
+            }
+        }
+
+        const uint64_t posBytes = num_points * 3 * sizeof(float);
+        const uint64_t colBytes = num_points * color_components * sizeof(float);
+        const uint64_t curvesBytes =
+            (version == JUSYNC_RAWGEO_VERSION && topology == JUSYNC_RAWGEO_TOPOLOGY_LINEAR_CURVES)
+                ? static_cast<uint64_t>(curve_count) * sizeof(uint32_t) : 0;
+        const uint64_t widthBytes =
+            (version == JUSYNC_RAWGEO_VERSION)
+                ? num_points * width_components * sizeof(float) : 0;
+        const uint64_t expected = posBytes + colBytes + attrBytes + curvesBytes + widthBytes;
+
+        return payload_bytes == expected &&
+               totalBytes - hdrBytes - descBytes >= payload_bytes;
     }
 };
 
-// The v2 header must be the v1 layout with the lattice fields appended, so a
-// version-1 buffer is a valid prefix of a version-2 struct.
-static_assert(offsetof(JusyncRawGeoHeader, subset_index) == sizeof(JusyncRawGeoHeaderV1),
+// Each version must be a byte-exact prefix of the next, so a lower-version
+// buffer can be read into the current struct after zero-initializing it.
+static_assert(sizeof(JusyncRawGeoHeaderV1) == 112, "v1 wire size");
+static_assert(sizeof(JusyncRawGeoHeaderV2) == 136, "v2 wire size");
+static_assert(sizeof(JusyncRawGeoHeader) == 160, "v3 wire size");
+static_assert(offsetof(JusyncRawGeoHeaderV2, subset_index) == sizeof(JusyncRawGeoHeaderV1),
     "v2 header must be the v1 layout plus appended fields");
+static_assert(offsetof(JusyncRawGeoHeader, topology) == sizeof(JusyncRawGeoHeaderV2),
+    "v3 header must be the v2 layout plus appended fields");
 
 struct ZmqWorkerReady
 {
