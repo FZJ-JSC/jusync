@@ -370,4 +370,84 @@ bool FJUSYNCPathlineBudgetTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJUSYNCPathlineMultiRankTest, "JUSYNC.Pathlines.MultiRankKeepsContinuity",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJUSYNCPathlineMultiRankTest::RunTest(const FString& Parameters)
+{
+    FJUSYNCPathlineManager Manager;
+    Manager.SetSettings(MakeSettings());
+    Manager.Reset();
+
+    // Ranks arrive as separate committed clouds for one logical element. Both
+    // ranks are part of the same sample, so neither rank's second sample may be
+    // turned into a break by the other rank's ingestion.
+    Manager.IngestSampleNow(TEXT("Merged"), MakeCloud({ 10 }, { FVector(0, 0, 0) }, { 0.0f }, 1, TEXT("Merged")),
+        0, 1, {});
+    Manager.IngestSampleNow(TEXT("Merged"), MakeCloud({ 20 }, { FVector(0, 1, 0) }, { 0.0f }, 1, TEXT("Merged")),
+        1, 1, {});
+    Manager.IngestSampleNow(TEXT("Merged"), MakeCloud({ 10 }, { FVector(1, 0, 0) }, { 0.0f }, 1, TEXT("Merged")),
+        0, 2, {});
+    Manager.IngestSampleNow(TEXT("Merged"), MakeCloud({ 20 }, { FVector(1, 1, 0) }, { 0.0f }, 1, TEXT("Merged")),
+        1, 2, {});
+    Manager.IngestSampleNow(TEXT("Merged"), MakeCloud({ 10 }, { FVector(2, 0, 0) }, { 0.0f }, 1, TEXT("Merged")),
+        0, 3, {});
+    Manager.IngestSampleNow(TEXT("Merged"), MakeCloud({ 20 }, { FVector(2, 1, 0) }, { 0.0f }, 1, TEXT("Merged")),
+        1, 3, {});
+
+    TestEqual(TEXT("rank 0 has two segments"), Manager.GetTrackNodeCount(TEXT("Merged"), 0, 10), 3);
+    TestEqual(TEXT("rank 1 has two segments"), Manager.GetTrackNodeCount(TEXT("Merged"), 1, 20), 3);
+
+    FJUSYNCCompactMeshData Mesh;
+    int32 Visible = 0;
+    TestTrue(TEXT("geometry builds"), Manager.BuildGeometry(TEXT("Merged"), MAX_uint64, Mesh, Visible));
+    TestEqual(TEXT("both ranks are visible"), Visible, 2);
+    TestEqual(TEXT("four tube bands, no false breaks"), Mesh.Triangles.Num() / 3, 32);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJUSYNCPathlineRedeliveryTest, "JUSYNC.Pathlines.RepeatedSampleReplacesNode",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJUSYNCPathlineRedeliveryTest::RunTest(const FString& Parameters)
+{
+    FJUSYNCPathlineManager Manager;
+    Manager.SetSettings(MakeSettings());
+    Manager.Reset();
+
+    Manager.IngestSampleNow(TEXT("LivePoints"), MakeCloud({ 1 }, { FVector(0, 0, 0) }, { 0.0f }),
+        0, 1, {});
+    Manager.IngestSampleNow(TEXT("LivePoints"), MakeCloud({ 1 }, { FVector(5, 0, 0) }, { 0.0f }),
+        0, 1, {});
+
+    TestEqual(TEXT("re-delivery keeps one node"), Manager.GetTrackNodeCount(TEXT("LivePoints"), 0, 1), 1);
+    FJUSYNCCompactMeshData Mesh;
+    int32 Visible = 0;
+    TestTrue(TEXT("geometry builds"), Build(Manager, MAX_uint64, Mesh, Visible));
+    TestEqual(TEXT("one node cannot draw a tube"), Mesh.Triangles.Num(), 0);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJUSYNCPathlineRemoveElementTest, "JUSYNC.Pathlines.RemoveElementDropsState",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJUSYNCPathlineRemoveElementTest::RunTest(const FString& Parameters)
+{
+    FJUSYNCPathlineManager Manager;
+    Manager.SetSettings(MakeSettings());
+    Manager.Reset();
+    Manager.IngestSampleNow(TEXT("A"), MakeCloud({ 1 }, { FVector::ZeroVector }, { 0.0f }, 1, TEXT("A")),
+        0, 1, {});
+    Manager.IngestSampleNow(TEXT("B"), MakeCloud({ 2 }, { FVector::ZeroVector }, { 0.0f }, 1, TEXT("B")),
+        0, 1, {});
+
+    Manager.RemoveElement(TEXT("A"));
+
+    TestFalse(TEXT("removed element is gone"), Manager.GetElementKeys().Contains(TEXT("A")));
+    TestEqual(TEXT("removed element has no nodes"), Manager.GetElementNodeCount(TEXT("A")), 0);
+    TestTrue(TEXT("other elements remain"), Manager.GetElementKeys().Contains(TEXT("B")));
+    TestEqual(TEXT("other element keeps its track"), Manager.GetTrackNodeCount(TEXT("B"), 0, 2), 1);
+    return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

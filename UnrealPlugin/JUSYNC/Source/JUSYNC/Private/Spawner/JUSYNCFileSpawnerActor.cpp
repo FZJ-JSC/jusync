@@ -207,6 +207,30 @@ static FString JUSYNCCanonicalPointCloudElement(const FString& ElementName)
     return JUSYNCElementNames::CanonicalActorIdentity(Base);
 }
 
+// Point-cloud actors are keyed "<canonical>_r<rank>"; recover the logical
+// element so pathline state can be retired when its last rank disappears.
+static FString JUSYNCCanonicalFromRankedElementKey(const FString& Key)
+{
+    const int32 RankMark = Key.Find(TEXT("_r"), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+    if (RankMark == INDEX_NONE)
+    {
+        return Key;
+    }
+    const FString RankText = Key.Mid(RankMark + 2);
+    if (RankText.IsEmpty())
+    {
+        return Key;
+    }
+    for (const TCHAR C : RankText)
+    {
+        if (!FChar::IsDigit(C))
+        {
+            return Key;
+        }
+    }
+    return Key.Left(RankMark);
+}
+
 // The sender packs the ANARI animation time (usd::time, seconds) into the
 // notification timestamp as milliseconds. Legacy senders used Unix
 // wall-clock milliseconds (>= 1e12), which is not a sample time.
@@ -392,6 +416,34 @@ AJUSYNCFileSpawnerActor::AJUSYNCFileSpawnerActor()
     bSpawnPointClouds = true;
     bUseGradientColors = true;
     GradientPngFilename = TEXT("");
+
+    bEnablePathlines = false;
+    PathlineMaxTracks = 4096;
+    PathlineHistorySamples = 128;
+    PathlineMaxNodes = 524288;
+    PathlineTrackExpirySamples = 64;
+    PathlineTubeSides = 4;
+    PathlineRadius = 0.5f;
+    PathlineRadiusScale = 1.0f;
+    bPathlineUsePointWidth = false;
+    PathlineIdAttribute = TEXT("particle_id");
+    PathlineScalarAttribute = TEXT("attribute0");
+    PathlineScalarComponent = 0;
+    bPathlineFilterEnabled = false;
+    PathlineFilterMin = 0.0f;
+    PathlineFilterMax = 1.0f;
+    bPathlineColorByScalar = true;
+    PathlineColorMin = 0.0f;
+    PathlineColorMax = 1.0f;
+    PathlineFlatColor = FLinearColor::White;
+    PathlineSelectionSeed = 1337;
+    PathlinePendingTimeoutSeconds = 2.0f;
+    PathlineMaterial = nullptr;
+    PathlineActiveTracks = 0;
+    PathlineNodeCount = 0;
+    PathlineVisibleTracks = 0;
+    PathlineDroppedSamples = 0;
+    PathlineIgnoredSamples = 0;
     PointCloudSize = 0.04f;
     PointShape = EJUSYNCPointShape::Square;
     PointOrientation = EJUSYNCPointOrientation::FacingCamera;
@@ -795,6 +847,11 @@ void AJUSYNCFileSpawnerActor::BeginPlay()
 {
     Super::BeginPlay();
 
+    if (!PathlineManager)
+    {
+        PathlineManager = MakeShared<FJUSYNCPathlineManager>();
+    }
+
     if (!bCollapseVariantsMigrated)
     {
         // Levels saved before protocol v2 serialized the old default (true).
@@ -856,12 +913,15 @@ void AJUSYNCFileSpawnerActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
     CancelSpawning();
     ClearSpawnedActors();
+    PathlineManager.Reset();
     Super::EndPlay(EndPlayReason);
 }
 
 void AJUSYNCFileSpawnerActor::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
+
+    SyncPathlineManager();
 
     if (bEnableLiveUpdates && LiveUpdatePollInterval > 0.0f &&
         bInitialSpawnDone && CurrentState == EJUSYNCSpawnerState::Complete)
@@ -913,6 +973,142 @@ void AJUSYNCFileSpawnerActor::Tick(float DeltaSeconds)
             CheckAllDownloadsComplete();
         }
     }
+}
+
+FJUSYNCPathlineSettings AJUSYNCFileSpawnerActor::BuildPathlineSettings() const
+{
+    FJUSYNCPathlineSettings Settings;
+    Settings.bEnabled = bEnablePathlines;
+    Settings.MaxTracks = FMath::Max(1, PathlineMaxTracks);
+    Settings.HistorySamples = FMath::Max(2, PathlineHistorySamples);
+    Settings.MaxNodes = FMath::Max(0, PathlineMaxNodes);
+    Settings.TrackExpirySamples = FMath::Max(0, PathlineTrackExpirySamples);
+    Settings.TubeSides = FMath::Clamp(PathlineTubeSides, 3, 16);
+    Settings.Radius = FMath::Max(0.001f, PathlineRadius);
+    Settings.RadiusScale = FMath::Max(0.001f, PathlineRadiusScale);
+    Settings.bUsePointWidth = bPathlineUsePointWidth;
+    Settings.IdAttribute = PathlineIdAttribute;
+    Settings.ScalarAttribute = PathlineScalarAttribute;
+    Settings.ScalarComponent = FMath::Clamp(PathlineScalarComponent, 0, 3);
+    Settings.bFilterEnabled = bPathlineFilterEnabled;
+    Settings.FilterMin = FMath::Min(PathlineFilterMin, PathlineFilterMax);
+    Settings.FilterMax = FMath::Max(PathlineFilterMin, PathlineFilterMax);
+    Settings.bColorByScalar = bPathlineColorByScalar;
+    Settings.ColorMin = FMath::Min(PathlineColorMin, PathlineColorMax);
+    Settings.ColorMax = FMath::Max(PathlineColorMin, PathlineColorMax);
+    Settings.FlatColor = PathlineFlatColor;
+    Settings.SelectionSeed = static_cast<uint64>(FMath::Max(0, PathlineSelectionSeed));
+    Settings.Material = PathlineMaterial;
+    return Settings;
+}
+
+void AJUSYNCFileSpawnerActor::SyncPathlineManager()
+{
+    if (!PathlineManager)
+    {
+        PathlineManager = MakeShared<FJUSYNCPathlineManager>();
+    }
+
+    PathlineManager->SetSettings(BuildPathlineSettings());
+    if (PathlineManager->ConsumeResampleRequest() && bEnablePathlines)
+    {
+        RebuildPathlinesFromSampleCache();
+    }
+
+    UJUSYNCSubsystem* Subsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
+    FJUSYNCPointCloudSpawner* PCSpawner = Subsystem ? Subsystem->GetPointCloudSpawner() : nullptr;
+    PathlineManager->PumpGameThread(GetWorld(), PCSpawner, PathlineMaterial);
+
+    const FJUSYNCPathlineStats Stats = PathlineManager->GetStats();
+    PathlineActiveTracks = Stats.ActiveTracks;
+    PathlineNodeCount = Stats.TotalNodes;
+    PathlineVisibleTracks = Stats.VisibleTracks;
+    PathlineDroppedSamples = static_cast<int32>(FMath::Min<int64>(Stats.DroppedSamples, MAX_int32));
+    PathlineIgnoredSamples = Stats.IgnoredSamples;
+}
+
+void AJUSYNCFileSpawnerActor::RebuildPathlinesFromSampleCache()
+{
+    if (!PathlineManager || !bEnablePathlines)
+    {
+        return;
+    }
+
+    const uint64 SavedCutoff = PathlineManager->GetDisplaySampleId();
+    PathlineManager->Reset();
+
+    UJUSYNCSubsystem* Subsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
+    FJUSYNCPointCloudSpawner* PCSpawner = Subsystem ? Subsystem->GetPointCloudSpawner() : nullptr;
+    const TArray<FColor> Lut = PCSpawner ? PCSpawner->GetGradientLUT() : TArray<FColor>();
+
+    struct FReplayEntry
+    {
+        uint64 SampleId = 0;
+        uint64 Serial = 0;
+        int32 Rank = 0;
+        FString Element;
+        FJUSYNCPointCloudRef Cloud;
+    };
+
+    TArray<FReplayEntry> Entries;
+    for (const TPair<FString, TArray<FJUSYNCSampleCacheEntry>>& Pair : SampleCache)
+    {
+        FString KeyElement;
+        Pair.Key.Split(TEXT("|"), &KeyElement, nullptr);
+        const FString CanonicalKeyElement = JUSYNCCanonicalPointCloudElement(KeyElement);
+
+        for (const FJUSYNCSampleCacheEntry& Cached : Pair.Value)
+        {
+            if (!Cached.PointCloud.IsValid() || !Cached.PointCloud->bFromRawGeo ||
+                !Cached.PointCloud->bComplete)
+            {
+                continue;
+            }
+
+            FString Element = JUSYNCCanonicalPointCloudElement(Cached.PointCloud->ElementName);
+            if (Element.IsEmpty())
+            {
+                Element = CanonicalKeyElement;
+            }
+            if (Element.IsEmpty() || (PCSpawner && PCSpawner->IsElementFiltered(Element)))
+            {
+                continue;
+            }
+
+            FReplayEntry Entry;
+            Entry.SampleId = Cached.SampleId;
+            Entry.Serial = Cached.Serial;
+            Entry.Rank = FMath::Max(Cached.Rank, 0);
+            Entry.Element = MoveTemp(Element);
+            Entry.Cloud = Cached.PointCloud;
+            Entries.Add(MoveTemp(Entry));
+        }
+    }
+
+    Entries.Sort([](const FReplayEntry& A, const FReplayEntry& B)
+    {
+        if (A.SampleId != B.SampleId)
+        {
+            return A.SampleId < B.SampleId;
+        }
+        if (A.Rank != B.Rank)
+        {
+            return A.Rank < B.Rank;
+        }
+        if (A.Element != B.Element)
+        {
+            return A.Element < B.Element;
+        }
+        return A.Serial < B.Serial;
+    });
+
+    for (const FReplayEntry& Entry : Entries)
+    {
+        PathlineManager->EnqueueSample(Entry.Element, Entry.Cloud, Entry.Rank,
+            Entry.SampleId, Lut);
+    }
+
+    PathlineManager->SetDisplaySampleId(SavedCutoff);
 }
 
 void AJUSYNCFileSpawnerActor::StartSpawning()
@@ -1038,6 +1234,17 @@ void AJUSYNCFileSpawnerActor::ClearSpawnedActors()
     bFitLocked = false;
     bFitUnionGrew = false;
     LastMeshLocalBounds.Empty();
+
+    if (PathlineManager)
+    {
+        PathlineManager->Reset();
+        PathlineManager->PumpGameThread(GetWorld(), nullptr, nullptr);
+        PathlineActiveTracks = 0;
+        PathlineNodeCount = 0;
+        PathlineVisibleTracks = 0;
+        PathlineDroppedSamples = 0;
+        PathlineIgnoredSamples = 0;
+    }
 }
 
 FVector AJUSYNCFileSpawnerActor::GetNextSpawnLocation() const
@@ -1887,8 +2094,14 @@ void AJUSYNCFileSpawnerActor::ApplyParsedFileData(FJUSYNCParsedFileResult&& Resu
 
     // Keep a small local ring of recent parsed payloads before the arrays are
     // consumed by the spawn/update path. This is what the Details scrub slider
-    // replays without a broker round-trip.
-    CacheParsedSample(Result, bIsInitial);
+    // replays without a broker round-trip. Pathlines ingest the same committed
+    // sample id even when the playback cache itself is disabled.
+    const uint64 EffectiveSampleId = CacheParsedSample(Result, bIsInitial);
+    IngestPathlineSample(Result, EffectiveSampleId);
+    if (PathlineManager && !bSamplePlaybackActive && !bApplyingCachedSample)
+    {
+        PathlineManager->SetDisplaySampleId(MAX_uint64);
+    }
 
     // While the user is scrubbing a cached sample, keep ingesting/caching live
     // samples but do not let them overwrite the actor being inspected. Returning
@@ -2271,6 +2484,10 @@ void AJUSYNCFileSpawnerActor::ClearSampleCache()
     {
         PCSpawner->SetPlaybackMode(false);
     }
+    if (PathlineManager)
+    {
+        PathlineManager->SetDisplaySampleId(MAX_uint64);
+    }
 }
 
 void AJUSYNCFileSpawnerActor::ClearCachedSamples()
@@ -2564,11 +2781,11 @@ void AJUSYNCFileSpawnerActor::AddSampleCacheEntry(const FString& Key, FJUSYNCSam
     TrimSampleCache();
 }
 
-void AJUSYNCFileSpawnerActor::CacheParsedSample(const FJUSYNCParsedFileResult& Result, bool bIsInitial)
+uint64 AJUSYNCFileSpawnerActor::CacheParsedSample(const FJUSYNCParsedFileResult& Result, bool bIsInitial)
 {
-    if (!bEnableSampleCache || !Result.bParsed)
+    if (!Result.bParsed)
     {
-        return;
+        return 0;
     }
 
     // The sender stamps every clip from one render frame with the same
@@ -2598,6 +2815,13 @@ void AJUSYNCFileSpawnerActor::CacheParsedSample(const FJUSYNCParsedFileResult& R
     else
     {
         NextPlaybackSampleId = FMath::Max(NextPlaybackSampleId, EffectiveSampleId);
+    }
+
+    // Pathlines still need the effective sample id when the playback cache is
+    // disabled; only the cache bookkeeping below depends on the cache.
+    if (!bEnableSampleCache)
+    {
+        return EffectiveSampleId;
     }
 
     // The dropdown should show the same animation time ParaView shows, not a
@@ -2652,9 +2876,9 @@ void AJUSYNCFileSpawnerActor::CacheParsedSample(const FJUSYNCParsedFileResult& R
         AddSampleCacheEntry(Key, MoveTemp(Entry));
     }
 
-    if (!bSpawnPointClouds)
+    if (!bSpawnPointClouds && !bEnablePathlines)
     {
-        return;
+        return EffectiveSampleId;
     }
 
     for (const FJUSYNCPointCloudRef& PointCloud : Result.CompactPointClouds)
@@ -2694,6 +2918,47 @@ void AJUSYNCFileSpawnerActor::CacheParsedSample(const FJUSYNCParsedFileResult& R
 
         const FString Key = FString::Printf(TEXT("%s|pc|r%d"), *Element, Rank);
         AddSampleCacheEntry(Key, MoveTemp(Entry));
+    }
+
+    return EffectiveSampleId;
+}
+
+void AJUSYNCFileSpawnerActor::IngestPathlineSample(
+    const FJUSYNCParsedFileResult& Result, uint64 EffectiveSampleId)
+{
+    if (!bEnablePathlines || !PathlineManager || !Result.bParsed)
+    {
+        return;
+    }
+
+    UJUSYNCSubsystem* Subsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
+    FJUSYNCPointCloudSpawner* PCSpawner = Subsystem ? Subsystem->GetPointCloudSpawner() : nullptr;
+    if (!PCSpawner)
+    {
+        return;
+    }
+
+    const TArray<FColor> Lut = PCSpawner->GetGradientLUT();
+    const int32 Rank = FMath::Max(Result.Rank, 0);
+    for (const FJUSYNCPointCloudRef& PointCloud : Result.CompactPointClouds)
+    {
+        if (!PointCloud.IsValid() || !PointCloud->IsValid() ||
+            !PointCloud->bFromRawGeo || !PointCloud->bComplete)
+        {
+            continue;
+        }
+
+        FString Element = JUSYNCCanonicalPointCloudElement(PointCloud->ElementName);
+        if (Element.IsEmpty())
+        {
+            Element = PointCloud->ElementName;
+        }
+        if (Element.IsEmpty() || PCSpawner->IsElementFiltered(Element))
+        {
+            continue;
+        }
+
+        PathlineManager->EnqueueSample(Element, PointCloud, Rank, EffectiveSampleId, Lut);
     }
 }
 
@@ -2735,6 +3000,10 @@ void AJUSYNCFileSpawnerActor::ApplyCachedSample(float NormalizedPosition)
         ? 0
         : FMath::Clamp(FMath::RoundToInt(Position * static_cast<float>(Timeline.Num() - 1)), 0, Timeline.Num() - 1);
     const uint64 SelectedSampleId = Timeline[TimelineIndex];
+    if (PathlineManager)
+    {
+        PathlineManager->SetDisplaySampleId(SelectedSampleId);
+    }
 
     UJUSYNCSubsystem* Subsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
     FJUSYNCPointCloudSpawner* PCSpawner = Subsystem ? Subsystem->GetPointCloudSpawner() : nullptr;
@@ -2999,6 +3268,10 @@ void AJUSYNCFileSpawnerActor::SetPlaybackPosition(float NewPosition)
     ApplyCachedSample(PlaybackPosition);
     if (!bSamplePlaybackActive)
     {
+        if (PathlineManager)
+        {
+            PathlineManager->SetDisplaySampleId(MAX_uint64);
+        }
         PlaybackSampleIndex = FMath::Max(0, CachedSampleCount - 1);
     }
 }
@@ -3040,6 +3313,10 @@ void AJUSYNCFileSpawnerActor::FollowLatestSample()
 
     FlushPendingLiveSamples();
     ApplyCachedSample(1.0f);
+    if (PathlineManager)
+    {
+        PathlineManager->SetDisplaySampleId(MAX_uint64);
+    }
     PlaybackSampleIndex = FMath::Max(0, CachedSampleCount - 1);
 }
 
@@ -3534,6 +3811,8 @@ void AJUSYNCFileSpawnerActor::DestroyUnreplacedPCActors(const FString& Filename,
     FJUSYNCPointCloudSpawner* PCSpawner = Subsystem ? Subsystem->GetPointCloudSpawner() : nullptr;
 
     TSet<AActor*> DestroySet;
+    TSet<FString> DestroyedElements;
+
     for (AActor* Actor : OldPCActors)
     {
         if (!Actor || !Actor->IsValidLowLevel())
@@ -3554,6 +3833,10 @@ void AJUSYNCFileSpawnerActor::DestroyUnreplacedPCActors(const FString& Filename,
             }
         }
         DestroySet.Add(Actor);
+        if (!Key.IsEmpty())
+        {
+            DestroyedElements.Add(JUSYNCCanonicalFromRankedElementKey(Key));
+        }
     }
 
     for (AActor* Actor : DestroySet)
@@ -3584,6 +3867,43 @@ void AJUSYNCFileSpawnerActor::DestroyUnreplacedPCActors(const FString& Filename,
         if (DestroySet.Contains(It.Value()))
         {
             It.RemoveCurrent();
+        }
+    }
+
+    // Retire pathline state only after the last rank actor for a canonical
+    // element is gone. Other ranks may still be alive in another file bucket.
+    if (PathlineManager && DestroyedElements.Num() > 0)
+    {
+        for (const FString& Element : DestroyedElements)
+        {
+            bool bRankRemains = false;
+            for (const TPair<FString, TArray<AActor*>>& Pair : FilenameToPCActors)
+            {
+                for (AActor* Remaining : Pair.Value)
+                {
+                    if (!Remaining || DestroySet.Contains(Remaining) || !Remaining->IsValidLowLevel())
+                    {
+                        continue;
+                    }
+                    const FString RemainingKey = PCSpawner
+                        ? PCSpawner->GetElementKeyForActor(Remaining) : FString();
+                    if (RemainingKey == Element ||
+                        RemainingKey.StartsWith(Element + TEXT("_r"), ESearchCase::CaseSensitive))
+                    {
+                        bRankRemains = true;
+                        break;
+                    }
+                }
+                if (bRankRemains)
+                {
+                    break;
+                }
+            }
+
+            if (!bRankRemains)
+            {
+                PathlineManager->RemoveElement(Element);
+            }
         }
     }
 }
@@ -5839,6 +6159,7 @@ int32 AJUSYNCFileSpawnerActor::DestroyFileActors(const FString& Filename)
     }
 
     TSet<AActor*> PCSet;
+    TSet<FString> FileElements;
     for (AActor* Actor : PCActors)
     {
         if (Actor && Actor->IsValidLowLevel())
@@ -5850,6 +6171,21 @@ int32 AJUSYNCFileSpawnerActor::DestroyFileActors(const FString& Filename)
     TSet<AActor*> Processed;
     UJUSYNCSubsystem* Subsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
     FJUSYNCPointCloudSpawner* PCSpawner = Subsystem ? Subsystem->GetPointCloudSpawner() : nullptr;
+    if (PCSpawner)
+    {
+        for (AActor* Actor : PCActors)
+        {
+            if (!Actor || !Actor->IsValidLowLevel())
+            {
+                continue;
+            }
+            const FString Key = PCSpawner->GetElementKeyForActor(Actor);
+            if (!Key.IsEmpty())
+            {
+                FileElements.Add(JUSYNCCanonicalFromRankedElementKey(Key));
+            }
+        }
+    }
     int32 Destroyed = 0;
 
     auto DestroyOne = [&](AActor* Actor)
@@ -5907,6 +6243,27 @@ int32 AJUSYNCFileSpawnerActor::DestroyFileActors(const FString& Filename)
         if (It.Value() == Filename)
         {
             It.RemoveCurrent();
+        }
+    }
+
+    if (PathlineManager && FileElements.Num() > 0)
+    {
+        for (const FString& Element : FileElements)
+        {
+            bool bRankRemains = false;
+            for (const TPair<FString, FString>& Pair : PCElementToFilename)
+            {
+                if (Pair.Key == Element ||
+                    Pair.Key.StartsWith(Element + TEXT("_r"), ESearchCase::CaseSensitive))
+                {
+                    bRankRemains = true;
+                    break;
+                }
+            }
+            if (!bRankRemains)
+            {
+                PathlineManager->RemoveElement(Element);
+            }
         }
     }
 

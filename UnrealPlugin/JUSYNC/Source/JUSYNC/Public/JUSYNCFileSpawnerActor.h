@@ -10,6 +10,7 @@
 #include "JUSYNCFileChangeTracker.h"
 #include "JUSYNCAnimationController.h"
 #include "JUSYNCUSDLoader.h"
+#include "JUSYNCPathlineManager.h"
 #include "JUSYNCFileSpawnerActor.generated.h"
 
 class UTexture2D;
@@ -249,6 +250,114 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|PointCloud", meta = (InlineEditConditionToggle))
     bool bUseGradientColors;
+
+    // Stable-ID pathlines are built from complete RawGeo sphere point clouds.
+    // They are an alternative rendering of those streams, not a replacement
+    // for the point-cloud actors themselves.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines")
+    bool bEnablePathlines;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines", EditConditionHides, ClampMin = "1", ClampMax = "1048576"))
+    int32 PathlineMaxTracks;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines", EditConditionHides, ClampMin = "2", ClampMax = "4096"))
+    int32 PathlineHistorySamples;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines", EditConditionHides, ClampMin = "16"))
+    int32 PathlineMaxNodes;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines", EditConditionHides, ClampMin = "1", ClampMax = "512"))
+    int32 PathlineTrackExpirySamples;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines", EditConditionHides, ClampMin = "3", ClampMax = "16"))
+    int32 PathlineTubeSides;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines", EditConditionHides, ClampMin = "0.001"))
+    float PathlineRadius;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines", EditConditionHides, ClampMin = "0.001"))
+    float PathlineRadiusScale;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines", EditConditionHides))
+    bool bPathlineUsePointWidth;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines", EditConditionHides))
+    FString PathlineIdAttribute;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines", EditConditionHides))
+    FString PathlineScalarAttribute;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines", EditConditionHides, ClampMin = "0", ClampMax = "3"))
+    int32 PathlineScalarComponent;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines", EditConditionHides))
+    bool bPathlineFilterEnabled;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines && bPathlineFilterEnabled", EditConditionHides))
+    float PathlineFilterMin;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines && bPathlineFilterEnabled", EditConditionHides))
+    float PathlineFilterMax;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines", EditConditionHides))
+    bool bPathlineColorByScalar;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines && bPathlineColorByScalar", EditConditionHides))
+    float PathlineColorMin;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines && bPathlineColorByScalar", EditConditionHides))
+    float PathlineColorMax;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines && !bPathlineColorByScalar", EditConditionHides))
+    FLinearColor PathlineFlatColor;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines", EditConditionHides, ClampMin = "0"))
+    int32 PathlineSelectionSeed;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines", EditConditionHides, ClampMin = "0.0"))
+    // Reserved for deferred incomplete-sample grace. This release ingests
+    // only complete RawGeo clouds as soon as they arrive, so the timeout is
+    // not consumed yet.
+    float PathlinePendingTimeoutSeconds;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Pathlines",
+        meta = (EditCondition = "bEnablePathlines", EditConditionHides))
+    UMaterialInterface* PathlineMaterial;
+
+    UPROPERTY(BlueprintReadOnly, VisibleAnywhere, Category = "JUSYNC|Spawner|Pathlines")
+    int32 PathlineActiveTracks;
+
+    UPROPERTY(BlueprintReadOnly, VisibleAnywhere, Category = "JUSYNC|Spawner|Pathlines")
+    int64 PathlineNodeCount;
+
+    UPROPERTY(BlueprintReadOnly, VisibleAnywhere, Category = "JUSYNC|Spawner|Pathlines")
+    int32 PathlineVisibleTracks;
+
+    UPROPERTY(BlueprintReadOnly, VisibleAnywhere, Category = "JUSYNC|Spawner|Pathlines")
+    int32 PathlineDroppedSamples;
+
+    UPROPERTY(BlueprintReadOnly, VisibleAnywhere, Category = "JUSYNC|Spawner|Pathlines")
+    int64 PathlineIgnoredSamples;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Spawner|Cache")
     bool bEnableMeshCache;
@@ -683,6 +792,10 @@ private:
     // dropdown can show the same 0.700 that ParaView shows instead of a
     // synthetic 1/2/3 counter.
     TMap<uint64, double> SampleTimeById;
+
+    // Game-thread owner of the pathline state/worker and its actor uploads.
+    TSharedPtr<FJUSYNCPathlineManager> PathlineManager;
+
     // Live sample identity is assigned per commit/frame, not per notification:
     // all files that arrive between two CommitComplete messages share one id,
     // even if the sender timestamp differs by a few milliseconds.
@@ -695,7 +808,11 @@ private:
     bool bApplyingCachedSample = false;
 
     uint64 ResolveLiveSampleId(uint64 SenderTimestamp);
-    void CacheParsedSample(const FJUSYNCParsedFileResult& Result, bool bIsInitial);
+    uint64 CacheParsedSample(const FJUSYNCParsedFileResult& Result, bool bIsInitial);
+    void IngestPathlineSample(const FJUSYNCParsedFileResult& Result, uint64 EffectiveSampleId);
+    void RebuildPathlinesFromSampleCache();
+    FJUSYNCPathlineSettings BuildPathlineSettings() const;
+    void SyncPathlineManager();
     void AddSampleCacheEntry(const FString& Key, FJUSYNCSampleCacheEntry&& Entry);
     void TrimSampleCache();
     void ClearSampleCache();

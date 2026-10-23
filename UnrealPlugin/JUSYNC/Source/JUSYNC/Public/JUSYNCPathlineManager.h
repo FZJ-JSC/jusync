@@ -85,6 +85,11 @@ public:
 
 	void Reset();
 
+	// Drops all retained state for one canonical element. Called when the last
+	// point-cloud rank for that element is retired; PumpGameThread removes the
+	// matching actor on its next pass.
+	void RemoveElement(const FString& ElementName);
+
 	void EnqueueSample(const FString& ElementName, const FJUSYNCPointCloudRef& Cloud,
 		int32 Rank, uint64 SampleId, const TArray<FColor>& Lut);
 	void IngestSampleNow(const FString& ElementName, const FJUSYNCPointCloudRef& Cloud,

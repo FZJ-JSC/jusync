@@ -53,9 +53,14 @@ namespace
 	struct FElementState
 	{
 		TMap<FPathlineKey, FPathlineTrack> Tracks;
-		TSet<FPathlineKey> PreviousKeys;
+		// One previous-sample key set per source rank. Ranks arrive as separate
+		// clouds for the same logical sample, so a global set would mark the
+		// other ranks' tracks as gaps.
+		TMap<int32, TSet<FPathlineKey>> PreviousKeysByRank;
 		TArray<FColor> Lut;
 		uint64 SampleCounter = 0;
+		uint64 LastSampleId = 0;
+		bool bHasSample = false;
 		bool bPendingBreak = false;
 	};
 
@@ -223,6 +228,18 @@ struct FJUSYNCPathlineManager::FImpl
 		}
 
 		FElementState& Element = Elements.FindOrAdd(ElementName);
+		// A logical sample can span multiple rank clouds. Advance the absence
+		// clock and retain the last sample id only when the sample id changes.
+		if (!Element.bHasSample)
+		{
+			Element.bHasSample = true;
+			Element.LastSampleId = SampleId;
+		}
+		else if (Element.LastSampleId != SampleId)
+		{
+			++Element.SampleCounter;
+			Element.LastSampleId = SampleId;
+		}
 		const uint64 ThisCounter = Element.SampleCounter;
 		Element.Lut = Lut;
 
@@ -256,11 +273,13 @@ struct FJUSYNCPathlineManager::FImpl
 		Stats.DuplicateIds += Duplicates;
 
 		// Expire tracks before selection so vacant slots can be reused this
-		// sample. Tracks present in this sample are never expired.
+		// sample. Only the rank that just emitted can prove an id is absent;
+		// a rank cloud that has not arrived yet must not age its tracks.
 		const int32 ExpirySamples = FMath::Max(0, Settings.TrackExpirySamples);
 		for (auto It = Element.Tracks.CreateIterator(); It; ++It)
 		{
-			if (!Current.Contains(It.Key()) &&
+			if (It.Key().Rank == Rank &&
+				!Current.Contains(It.Key()) &&
 				ThisCounter - It.Value().LastSeenCounter > static_cast<uint64>(ExpirySamples))
 			{
 				It.RemoveCurrent();
@@ -318,15 +337,34 @@ struct FJUSYNCPathlineManager::FImpl
 
 			if (const FSamplePoint* Point = Current.Find(Key))
 			{
-				FPathlineNode Node;
-				Node.Position = Point->Position;
-				Node.Scalar = Point->Scalar;
-				Node.Width = Point->Width;
-				Node.bHasScalar = Point->bHasScalar;
-				Node.SampleId = SampleId;
-				Node.bBreak = Element.bPendingBreak ||
-					(Track.Nodes.Num() > 0 && !Element.PreviousKeys.Contains(Key));
-				Track.Nodes.Add(Node);
+				const bool bWasPrevious = Element.PreviousKeysByRank.Contains(Rank) &&
+					Element.PreviousKeysByRank[Rank].Contains(Key);
+				const bool bBreak = Element.bPendingBreak ||
+					(Track.Nodes.Num() > 0 && !bWasPrevious);
+				const bool bSameSample = Track.Nodes.Num() > 0 &&
+					Track.Nodes.Last().SampleId == SampleId;
+				if (bSameSample)
+				{
+					// A delayed re-delivery of the same committed sample must
+					// replace the node instead of appending a zero-length step.
+					FPathlineNode& Last = Track.Nodes.Last();
+					Last.Position = Point->Position;
+					Last.Scalar = Point->Scalar;
+					Last.Width = Point->Width;
+					Last.bHasScalar = Point->bHasScalar;
+					Last.bBreak = Last.bBreak || bBreak;
+				}
+				else
+				{
+					FPathlineNode Node;
+					Node.Position = Point->Position;
+					Node.Scalar = Point->Scalar;
+					Node.Width = Point->Width;
+					Node.bHasScalar = Point->bHasScalar;
+					Node.SampleId = SampleId;
+					Node.bBreak = bBreak;
+					Track.Nodes.Add(Node);
+				}
 				Track.LastSeenCounter = ThisCounter;
 			}
 
@@ -377,13 +415,13 @@ struct FJUSYNCPathlineManager::FImpl
 			}
 		}
 
-		Element.PreviousKeys.Reset();
+		TSet<FPathlineKey>& RankPreviousKeys = Element.PreviousKeysByRank.FindOrAdd(Rank);
+		RankPreviousKeys.Reset();
 		for (const TPair<FPathlineKey, FSamplePoint>& Pair : Current)
 		{
-			Element.PreviousKeys.Add(Pair.Key);
+			RankPreviousKeys.Add(Pair.Key);
 		}
 		Element.bPendingBreak = false;
-		++Element.SampleCounter;
 
 		RefreshTotalsLocked();
 		Stats.LastIngestMs = (FPlatformTime::Seconds() - StartSeconds) * 1000.0;
@@ -788,6 +826,25 @@ void FJUSYNCPathlineManager::Reset()
 	{
 		FScopeLock Lock(&Impl->PendingLock);
 		Impl->PendingMeshes.Reset();
+	}
+}
+
+void FJUSYNCPathlineManager::RemoveElement(const FString& ElementName)
+{
+	bool bRemoved = false;
+	{
+		FScopeLock Lock(&Impl->StateLock);
+		bRemoved = Impl->Elements.Remove(ElementName) > 0;
+		if (bRemoved)
+		{
+			Impl->RefreshTotalsLocked();
+			// Invalidate queued work/pending meshes for the retired element.
+			Impl->Generation.fetch_add(1);
+		}
+	}
+	if (bRemoved)
+	{
+		Impl->QueueRebuildAll();
 	}
 }
 
