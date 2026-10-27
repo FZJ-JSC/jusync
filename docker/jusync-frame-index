@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Index the geometry of every timestep in a ParaView dataset.
+
+    jusync-frame-index <dataset.pvd> <out.idx>
+
+Writes one line per frame:
+
+    <time> <npoints> <fnv1a64 of the raw Float32 points>
+
+The FNV-1a hash is the same one the ANARI device already computes over the
+points it receives, so a payload can be recognised without trusting any clock:
+the sample is stamped with the dataset's own time no matter in which order
+ParaView renders, how many frames playback skips, or where the user scrubs to.
+That is what makes Unreal's t identical to ParaView's Time field.
+
+Only raw-appended, little-endian VTP/VTU files are indexed (the format the
+preset data uses). Anything else is skipped and the device falls back to its
+internal clock.
+"""
+
+import os
+import re
+import struct
+import sys
+
+_DS_TAG = re.compile(rb"<DataSet\b[^>]*>")
+_FIRSTAFTER = re.compile(rb"(\w+)\s*=\s*\"([^\"]*)\"")
+_POINTS_OFFSET = re.compile(rb'<DataArray[^>]*Name="Points"[^>]*offset="(\d+)"')
+_NUM_POINTS = re.compile(rb'NumberOfPoints="(\d+)"')
+_HEADER_TYPE = re.compile(rb'header_type="(\w+)"')
+
+_FNV_OFFSET = 0xCBF29CE484222325
+_FNV_PRIME = 0x100000001B3
+_MASK = (1 << 64) - 1
+
+
+def fnv1a(data):
+    h = _FNV_OFFSET
+    for b in data:
+        h = ((h ^ b) * _FNV_PRIME) & _MASK
+    return h
+
+
+def points_bytes(path):
+    """Return (npoints, raw float32 bytes) for an appended raw VTK file."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return None
+    tag = data.find(b"<AppendedData")
+    if tag < 0:
+        return None
+    head = data[:tag]
+    m = _POINTS_OFFSET.search(head)
+    npts_m = _NUM_POINTS.search(head)
+    if not m or not npts_m:
+        return None
+    ht = _HEADER_TYPE.search(head)
+    hsize, hfmt = (8, "<Q") if ht and ht.group(1) == b"UInt64" else (4, "<I")
+    enc_m = re.search(rb'<AppendedData[^>]*encoding="(\w+)"', data[tag:tag + 200])
+    if enc_m and enc_m.group(1) != b"raw":
+        return None
+    # raw appended data starts right after the '_' marker of <AppendedData>
+    base = data.find(b"_", tag)
+    if base < 0:
+        return None
+    pos = base + 1 + int(m.group(1))
+    if pos + hsize > len(data):
+        return None
+    usize = int(npts_m.group(1))
+    (nbytes,) = struct.unpack(hfmt, data[pos:pos + hsize])
+    body = data[pos + hsize:pos + hsize + nbytes]
+    if len(body) < nbytes or nbytes % 12 or nbytes // 12 != usize:
+        return None
+    return usize, body
+
+
+def frames(pvd):
+    try:
+        with open(pvd, "r", errors="ignore") as f:
+            text = f.read()
+    except OSError:
+        return []
+    out = []
+    for tag in _DS_TAG.findall(text.encode("utf-8", "ignore")):
+        a = {k.decode(): v.decode() for k, v in _FIRSTAFTER.findall(tag)}
+        if "timestep" not in a or "file" not in a:
+            continue
+        out.append((float(a["timestep"]), a["file"]))
+    return out
+
+
+def main(argv):
+    if len(argv) < 2:
+        sys.stderr.write("usage: jusync-frame-index <dataset.pvd> <out.idx>\n")
+        return 2
+    pvd, out = argv[0], argv[1]
+    root = os.path.dirname(os.path.abspath(pvd))
+    lines = []
+    skipped = 0
+    for t, rel in frames(pvd):
+        path = rel if os.path.isabs(rel) else os.path.join(root, rel)
+        pts = points_bytes(path)
+        if not pts:
+            skipped += 1
+            continue
+        npts, body = pts
+        lines.append("%.9g %d %016x" % (t, npts, fnv1a(body)))
+    if not lines:
+        sys.stderr.write("jusync-frame-index: no indexable frames in %s\n" % pvd)
+        return 1
+    tmp = out + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("# time npoints fnv1a64(points)\n")
+        f.write("\n".join(lines))
+        f.write("\n")
+    os.replace(tmp, out)
+    sys.stderr.write("indexed %d frames (%d skipped) -> %s\n" % (len(lines), skipped, out))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

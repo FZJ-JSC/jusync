@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Print "<dt> <count> <t0> <t1>" for the animation clock of a ParaView dataset.
+
+Used by start-paraview-anari.sh / jusync-preset so the device's time samples
+follow the data that is actually being opened instead of a hard-coded
+JUSYNC_ANIM_DT. The ParaView build in this image has no Python, so this runs
+outside ParaView (at launch) and only reads the dataset's index file.
+
+Supported: .pvd (VTK collection, timestep="..."), .vtk.series / .vtk.series
+files ("time": ...), and plain .vtk/.vti/.vtu/... (single step -> no output).
+Exit code 1 (no output) means "cannot tell, keep the caller's default".
+"""
+
+import os
+import re
+import sys
+
+_PVD_RE = re.compile(r'timestep\s*=\s*"([0-9eE+\-.]+)"')
+_SERIES_RE = re.compile(r'"time"\s*:\s*([0-9eE+\-.]+)')
+
+
+def _read(path):
+    try:
+        with open(path, "r", errors="ignore") as f:
+            return f.read(4 * 1024 * 1024)  # index files are small
+    except OSError:
+        return ""
+
+
+def times_of(path):
+    ext = os.path.splitext(path)[1].lower()
+    text = _read(path)
+    if not text:
+        return []
+    if ext == ".pvd":
+        raw = _PVD_RE.findall(text)
+    elif ext == ".series":
+        raw = _SERIES_RE.findall(text)
+    else:
+        return []
+    out = []
+    for v in raw:
+        try:
+            out.append(float(v))
+        except ValueError:
+            pass
+    return sorted(set(out))
+
+
+def main(argv):
+    for path in argv:
+        if not path or path.startswith("-") or not os.path.isfile(path):
+            continue
+        ts = times_of(path)
+        if len(ts) < 2:
+            continue
+        deltas = [round(b - a, 9) for a, b in zip(ts, ts[1:]) if b > a]
+        if not deltas:
+            continue
+        # Most common step wins; that keeps a stray duplicate or a gap from
+        # skewing the clock.
+        dt = max(set(deltas), key=deltas.count)
+        print("%.9g %d %.9g %.9g" % (dt, len(ts), ts[0], ts[-1]))
+        return 0
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

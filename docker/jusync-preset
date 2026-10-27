@@ -1,0 +1,153 @@
+#!/bin/sh
+# jusync-preset - list or load one of the packaged ParaView sample presets.
+#
+#   jusync-preset                 list the presets
+#   jusync-preset streamlines     kill ParaView, load that preset on :1
+#   jusync-preset --current       which preset the desktop is showing
+#   jusync-preset --env <name>    print the env a preset needs (debug)
+#
+# The presets are .pvsm state files (this ParaView has no Python support, so a
+# preset cannot be a script). Each one is a reader + representation + camera
+# baked at image-build time, so loading one needs no Apply click and no data
+# path typing - it opens showing data.
+set -eu
+
+PRESET_ROOT=/opt/jusync/presets
+CURRENT=/opt/jusync/current
+
+usage() {
+    cat <<'EOF'
+usage: jusync-preset [name]
+
+  (no args)        list installed presets
+  <name>           load a preset in the VNC desktop (X display :1)
+  --current        show the preset currently loaded
+  --env <name>     print the environment the preset expects
+  -h, --help       this text
+EOF
+}
+
+list_presets() {
+    found=0
+    for dir in "$PRESET_ROOT"/*/; do
+        [ -d "$dir" ] || continue
+        name=$(basename "$dir")
+        [ -f "$dir/$name.pvsm" ] || continue
+        found=1
+        marker=" "
+        [ "$(cat "$CURRENT" 2>/dev/null || true)" = "$name" ] && marker="*"
+        size=$(du -sh "$dir" 2>/dev/null | cut -f1)
+        printf '%s %-14s %6s  %s\n' "$marker" "$name" "${size:-?}" \
+            "$(head -n 1 "$dir/preset.meta" 2>/dev/null)"
+    done
+    if [ "$found" = 0 ]; then
+        echo "no presets installed under $PRESET_ROOT" >&2
+        return 1
+    fi
+    echo
+    echo "* = loaded.  Load one with: jusync-preset <name>"
+}
+
+print_env() {
+    name="$1"
+    [ -f "$PRESET_ROOT/$name/preset.env" ] || {
+        echo "preset '$name' has no preset.env" >&2
+        return 1
+    }
+    cat "$PRESET_ROOT/$name/preset.env"
+}
+
+launch() {
+    name="$1"
+    state="$PRESET_ROOT/$name/$name.pvsm"
+    [ -f "$state" ] || {
+        echo "jusync-preset: unknown preset '$name'" >&2
+        list_presets >&2 || true
+        return 1
+    }
+
+    # Open the DATA, not the saved state. A .pvsm restores the pipeline
+    # proxies but not the reader's timestep list (these states carry no
+    # animation scene), so ParaView ends up with a single time value and the
+    # animation never advances - the stream just repeats t=0. Opening the
+    # dataset itself gives ParaView the full time range, which is what the
+    # device needs to walk the timeline. The launch clock (JUSYNC_ANIM_DT) is
+    # then derived from that same file by start-paraview-anari.sh.
+    data=""
+    if [ -f "$PRESET_ROOT/$name/preset.meta" ]; then
+        data=$(sed -n 's/^data=//p' "$PRESET_ROOT/$name/preset.meta" | head -n 1)
+    fi
+    if [ -z "$data" ] || [ ! -f "$data" ]; then
+        data=$(ls "$PRESET_ROOT/$name"/*.pvd 2>/dev/null | head -n 1)
+    fi
+    [ -n "$data" ] && [ -f "$data" ] || data=""
+    target="$data"
+    if [ -z "$target" ]; then
+        target="$state"
+    fi
+
+    # The launcher sources anari-env.sh itself, but the preset's own streaming
+    # settings have to be in its environment (they are read by the device, not
+    # by ParaView's CLI). start-paraview-anari.sh re-derives the clock from the
+    # dataset, so a stale JUSYNC_ANIM_DT here cannot desynchronise the stream.
+    set -a
+    # shellcheck disable=SC1091
+    . "$PRESET_ROOT/$name/preset.env"
+    set +a
+    export JUSYNC_PRESET="$name"
+
+    # One broker (port 5556) means one ParaView at a time. Tell the desktop
+    # supervisor first, otherwise it respawns the preset we are replacing the
+    # moment this pkill lands.
+    touch /tmp/jusync-pv-handover
+    pkill -f "${PVDIR:-/opt/pv61}/bin/paraview" 2>/dev/null || true
+    pkill -f 'bin/paraview --state=' 2>/dev/null || true
+    i=0
+    while pgrep -f 'bin/paraview' >/dev/null 2>&1 && [ "$i" -lt 20 ]; do
+        sleep 0.5
+        i=$(( i + 1 ))
+    done
+    if pgrep -f 'bin/paraview' >/dev/null 2>&1; then
+        pkill -9 -f 'bin/paraview' 2>/dev/null || true
+        sleep 1
+    fi
+    # The flag is deliberately left for the supervisor to consume and clear; if
+    # no supervisor is running it is harmless and the next xstartup removes it.
+
+    printf '%s\n' "$name" > "$CURRENT"
+    echo "loading preset '$name' ($target) on display ${DISPLAY:-:1}"
+    DISPLAY="${DISPLAY:-:1}" nohup "${PVDIR:-/opt/pv61}/start-paraview-anari.sh" \
+        "$target" >/tmp/paraview-session.log 2>&1 &
+    echo "ParaView pid $! - log: /tmp/paraview-session.log"
+}
+
+current() {
+    if [ -f "$CURRENT" ]; then
+        cat "$CURRENT"
+    else
+        echo "<none>"
+    fi
+}
+
+case "${1:-}" in
+    ""|-l|--list|list)
+        list_presets
+        ;;
+    -h|--help|help)
+        usage
+        ;;
+    --current)
+        current
+        ;;
+    --env)
+        [ $# -ge 2 ] || { usage >&2; exit 2; }
+        print_env "$2"
+        ;;
+    -*)
+        usage >&2
+        exit 2
+        ;;
+    *)
+        launch "$1"
+        ;;
+esac

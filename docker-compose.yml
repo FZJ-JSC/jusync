@@ -5,6 +5,9 @@ services:
       dockerfile: Dockerfile
     container_name: jusync-middleware
     ports:
+      # Host 5556 is now published by pv-desktop's broker mapping, so this test
+      # broker will fail to bind while the desktop is running. Bring the two up
+      # one at a time (or remap this port) when testing the middleware alone.
       - "5556:5556"
     volumes:
       - ./tests/data:/workspace/tests/data:ro
@@ -15,6 +18,47 @@ services:
       - OPENSSL_ROOT_DIR=/usr
     networks:
       - jusync-network
+
+  # ParaView/ANARI desktop (VNC + noVNC). The JUSYNC broker runs *inside* this
+  # container: the paraview process binds 0.0.0.0:5556 and serves the UE
+  # middleware (a DEALER client), so 5556 must be published to the host or UE
+  # cannot reach it. It also sits on jusync-network so it can reach
+  # jusync-middleware:5556 by name when that test broker is used instead.
+  # Only noVNC is published for the desktop itself: the image binds Xtigervnc to
+  # 127.0.0.1:5901 inside the container, so a host mapping for 5901 would be
+  # refused by Docker's proxy. noVNC (0.0.0.0:6080) already proxies to it.
+  pv-desktop:
+    # Built from the sibling ANARI-USD checkout (docker/pv-anari-usd.Dockerfile):
+    # same base image, with libanari_library_usd.so rebuilt from source so the
+    # JUSYNC device fixes are baked in instead of patched into a live container.
+    image: pv-anari-usd:6.0.6-jusync
+    build:
+      context: ../ANARI-USD
+      dockerfile: ../jusync/docker/pv-anari-usd.Dockerfile
+      additional_contexts:
+        # Launcher / preset / clock-probe scripts that live in this repo and
+        # must be baked into the image (the .pvsm presets never animated, see
+        # docker/jusync-preset).
+        scripts: ./docker
+    container_name: pv-desktop
+    ports:
+      - "127.0.0.1:6080:6080" # open http://localhost:6080/vnc.html
+      - "127.0.0.1:5556:5556" # JUSYNC broker inside paraview (UE connects here)
+    volumes:
+      - ./:/work
+    environment:
+      - JUSYNC_VNC_PASSWORD=jusync
+      # Desktop only: do not autostart ParaView, and never respawn it. A crash
+      # loop otherwise respawns every ~15s and hides the real error.
+      - JUSYNC_AUTOSTART_PV=0
+      - JUSYNC_PV_AUTORESTART=0
+      # Do NOT set JUSYNC_VNC_RESOLUTION: the entrypoint then also passes
+      # -geometry WxHxD to tigervncserver, which rejects the depth suffix.
+      # Leave it unset to inherit the image default (1600x900x24).
+    restart: "no"
+    networks:
+      - jusync-network
+
 networks:
   jusync-network:
     driver: bridge
