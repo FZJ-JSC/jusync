@@ -80,3 +80,6 @@ build_docker/
 .superpowers/
 
 graphify-out/
+
+# Local planning docs / specs (kept on disk, not published)
+docs/
