@@ -98,6 +98,23 @@ if [ -z "${PVDIR:-}" ] || [ ! -x "${PVDIR}/bin/paraview" ]; then
 fi
 export PVDIR
 
+# The ANARI mapper node asks VTK for vtkDataObject::DATA_TIME_STEP() on the
+# actor's property keys, a key nothing in VTK or ParaView ever fills, so the
+# device had to guess the dataset time from the payload. libpvtime feeds the
+# animation time (vtkPVView::SetViewTime) into exactly that read, so each
+# geometry reaches the device stamped with the time ParaView is showing.
+_pvtime="${PVDIR}/lib/libpvtime.so"
+if [ -f "$_pvtime" ]; then
+    export LD_PRELOAD="$_pvtime${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
+
+# A ParaView that is SIGKILLed (jusync-preset switching datasets, or a crash)
+# leaves Position/Size/Splitters in ParaView.ini. The next start restores that
+# degenerate main window and never applies or shows the source: the view stays
+# empty and the device receives no geometry at all. Presets pass their dataset
+# on the command line, so the saved window state is not worth keeping.
+rm -f "${HOME}/.config/ParaView/ParaView.ini"
+
 # Auto-driver: when present it builds the pipeline, scrubs all timesteps
 # (visibility-forced commits) and keeps rendering for the ZMQ pump. This
 # ParaView is built without Python support, so the hook only fires when the

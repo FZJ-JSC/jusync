@@ -29,6 +29,12 @@ RUN cmake -S /src -B /build -G Ninja \
       -DUSD_DEVICE_BUILD_VERSION_EXPLICIT=1 \
  && cmake --build /build -j"$(nproc)" --target anari_library_usd
 
+# LD_PRELOAD bridge that hands ParaView's animation time to the ANARI mapper
+# node (see docker/pvtime.cpp). Built here because the runtime image has no
+# compiler, against the same glibc as the runtime.
+COPY --from=scripts pvtime.cpp /pvtime/pvtime.cpp
+RUN g++ -O2 -shared -fPIC -o /build/libpvtime.so /pvtime/pvtime.cpp -ldl
+
 FROM ${BASE_IMAGE}
 
 # JUSYNC fix: UsdBridge::SetNoClipRefs() interpreted an empty-but-present
@@ -38,6 +44,12 @@ FROM ${BASE_IMAGE}
 # with only the root layer, camera and lights - no geometry for the broker, and
 # hence nothing for the UE client to spawn.
 COPY --from=device-build /build/libanari_library_usd.so /usr/local/lib/libanari_library_usd.so
+
+# ParaView-side half of the same fix: the ANARI mapper node reads
+# vtkDataObject::DATA_TIME_STEP() from the actor's property keys, which nothing
+# ever fills. libpvtime (LD_PRELOADed by start-paraview-anari.sh) answers that
+# read with vtkPVView::SetViewTime(), i.e. the time in ParaView's Time field.
+COPY --from=device-build /build/libpvtime.so /opt/pv61/lib/libpvtime.so
 
 # JUSYNC fix: a preset used to load its .pvsm state, and those states carry no
 # animation scene, so ParaView kept a single time value and the stream repeated
