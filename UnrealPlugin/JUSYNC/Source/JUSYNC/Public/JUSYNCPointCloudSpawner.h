@@ -29,6 +29,23 @@ struct FPointCloudReadyEntry
     // Cached-playback selection: keep the live smooth-morph path instead of
     // snapping to the selected cloud, so clicking through samples animates.
     bool bPlaybackMorph;
+    // Identity of the sample-cache payload this entry was converted from
+    // (playback only; null for live). Once the built cloud swaps in, the
+    // spawner remembers payload -> cloud so revisiting the sample displays
+    // instantly instead of rebuilding it (log: "CloudReplay: instant revisit").
+    FJUSYNCPointCloudRef SourcePayload;
+
+    // Broker file this payload was fetched from plus its content hash, set on
+    // the live-stream enqueue. The spawner's V2 dedup consults AppliedFileHashes
+    // so a notification is only dropped when this exact content already built
+    // a cloud (hash-tracked-but-never-applied would otherwise freeze updates).
+    FString SourceFile;
+    uint64 SourceHashLo = 0;
+    uint64 SourceHashHi = 0;
+
+    // Set once ApplyPointCloudBuild finishes spawning/swapping the cloud for
+    // this entry; only then is the entry's SourceFile/Hash pair trustworthy.
+    bool bCloudApplied = false;
 
     TArray<FVector> Positions;
     TArray<float> Widths;
@@ -56,6 +73,11 @@ public:
 
     bool IsElementFiltered(const FString& ElementName) const;
 
+    /** True only if this exact (file, hash) pair was actually swapped into a cloud.
+     *  Distinct from FileHashLo/Hi on the file spawner, which only record what the
+     *  broker told us: a hash can be tracked there without ever being applied. */
+    bool HasAppliedFileHash(const FString& Filename, uint64 HashLo, uint64 HashHi) const;
+
     // Cached-sample scrubbing wants the selected frame on screen now, not a
     // 200 ms morph from the live frame. Playback mode also lets the spawner
     // discard live builds that were already in flight when the user scrubbed.
@@ -70,6 +92,16 @@ public:
 
     void SetMaxPoolSize(int32 InMax) { MaxPoolSize = InMax; }
     void SetBudgetMs(float InBudget) { BudgetMs = InBudget; }
+
+    // Byte budget for the warm replay-cloud pool (dynamic cache budget
+    // feature; the spawner drives this from a DXGI process video-memory
+    // budget poll). 0 = legacy fixed pool of MaxPlaybackCloudReuse clouds.
+    void SetWarmCloudBudgetBytes(int64 InBytes);
+
+    // Pool size implied by the byte budget: clamp(budget/avg cloud bytes,
+    // MinWarmClouds, MaxWarmCloudsHardCap); legacy constant when either
+    // input is 0. Pure so tests can pin it.
+    static int32 WarmCloudCountForBudget(int64 BudgetBytes, int64 AvgCloudBytes);
     void SetSpawnLocation(const FVector& In);
     void SetSpawnScale(float In) { SpawnScale = In; }
     const FVector& GetSpawnLocation() const { return SpawnLocation; }
@@ -106,6 +138,21 @@ public:
 
     void ClearAllActors();
     void WaitForCompletion(float TimeoutSeconds = 5.0f);
+
+    /** Drops every cloud recorded for instant sample revisits. The file
+     *  spawner calls this when it clears its sample cache so built clouds
+     *  cannot outlive the samples they belong to. */
+    void ClearPlaybackCloudReuse();
+
+    /** POINTS panel: hide/show every LiDAR cloud. Clouds swapped in later
+     *  (live frames, replays) inherit the current state. */
+    void SetPointCloudsHidden(bool bHidden) { bPointCloudsHidden = bHidden; ApplyPointCloudsHiddenToActors(); }
+    bool ArePointCloudsHidden() const { return bPointCloudsHidden; }
+
+    /** POINTS panel: hue filter over each point's baked colour. Non-matching
+     *  points are dimmed to near-black in place; originals are restored when
+     *  the filter is cleared. Re-applied automatically on every cloud swap. */
+    void SetPointHueFilter(bool bEnabled, float HueDeg, float ToleranceDeg);
 
     void DestroyTrackedActor(AActor* Actor);
 
@@ -148,6 +195,21 @@ private:
     float GapFillingStrength = 0.0f;
     bool bPerfLogging = false;
     bool bPlaybackMode = false;
+    // POINTS panel state (see SetPointCloudsHidden / SetPointHueFilter).
+    bool bPointCloudsHidden = false;
+    bool bPointHueFilter = false;
+    float PointHue = 0.0f;
+    float PointHueTolerance = 30.0f;
+    void ApplyPointCloudsHiddenToActors();
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    /** In-place colour pass for one cloud: captures originals on first use,
+     *  then shows them (filter match) or a dim grey (no match). Also used to
+     *  restore by SetPointHueFilter(false,...) and after every swap. */
+    void ApplyPointHueFilterToCloud(ULidarPointCloud* Cloud);
+    void PrunePointColorOriginals();
+    /** cloud -> untouched build-time colours; only populated while filtering. */
+    TMap<TWeakObjectPtr<UObject>, TArray<FColor>> PointColorOriginals;
+#endif
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     ELidarPointCloudSpriteShape PointShape = ELidarPointCloudSpriteShape::Circle;
     ELidarPointCloudSpriteOrientation PointOrientation = ELidarPointCloudSpriteOrientation::PreferFacingCamera;
@@ -180,6 +242,11 @@ private:
     TMap<FString, AActor*> ElementToActor;
     TMap<AActor*, FString> ActorToElement;
 
+    /** (hashLo, hashHi) last actually applied per source broker file. Empty until
+     *  the enqueue path starts carrying SourceFile/SourceHashLo/HashHi: queries then
+     *  conservatively report "not applied" so a refresh is always queued. */
+    TMap<FString, TPair<uint64, uint64>> AppliedFileHashes;
+
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     struct FInFlightCloudBuild
     {
@@ -189,6 +256,9 @@ private:
         TUniquePtr<TStrongObjectPtr<UObject>> CloudRef;
         TWeakObjectPtr<AActor> Actor;
         FPointCloudReadyEntry PendingReplacement;
+        // Playback reuse: the sample-cache payload this build was started
+        // for (null for live builds). Stored into the reuse cache on swap.
+        FJUSYNCPointCloudRef SourcePayload;
         double BuildStarted = 0.0;
         bool bEverSwapped = false;
         bool bHasPending = false;
@@ -252,7 +322,34 @@ private:
     void KickRampStep(const FString& Key, FCloudRampChain& Chain);
     void AbortDeferredSwap(const FString& Key);
     void TickCloudRamps(double NowSeconds);
-# endif
+
+    // Instant revisits during cached scrubbing (game-thread only). Keyed by
+    // the sample-cache payload's identity: ApplyCachedSample hands the same
+    // shared payload back for the same sample, so pointer equality is the
+    // sample identity. Bounded LRU of built clouds; a cloud only stays in
+    // the cache while GC would otherwise drop it, and the frame currently
+    // on screen is never evicted.
+    struct FPlaybackCloudReuse
+    {
+        double LastUsedSeconds = 0.0;
+        FString Key;
+        FJUSYNCPointCloudRef Payload;
+        TStrongObjectPtr<UObject> Cloud;
+    };
+    TArray<FPlaybackCloudReuse> PlaybackCloudReuse;
+    static constexpr int32 MaxPlaybackCloudReuse = 24; // legacy pool size
+    int64 WarmCloudBudgetBytes = 0; // 0 = legacy fixed-size pool
+    int64 WarmCloudAvgBytes = 0;    // EMA of stored payload sizes
+    static constexpr int32 MinWarmClouds = 8;
+    static constexpr int32 MaxWarmCloudsHardCap = 128;
+    int32 FindEvictableReuseIndex();
+    static int64 EstimatePayloadBytes(const FJUSYNCPointCloudRef& Payload);
+
+    int32 FindPlaybackReuseIndex(const FJUSYNCPointCloudRef& Payload) const;
+    bool TryDisplayCachedPlaybackCloud(const FJUSYNCPointCloudRef& Payload, const FString& Key);
+    void StorePlaybackCloud(const FString& Key, FJUSYNCPointCloudRef&& Payload, UObject* Cloud);
+    bool IsPlaybackCachedCloud(const UObject* Cloud) const;
+#endif
 
     struct FPendingNoColorCloud
     {
@@ -273,5 +370,9 @@ private:
     ULidarPointCloud* GetOrCreateCloudForComponent(ULidarPointCloudComponent* Comp);
     void ApplyVisualSettings(ULidarPointCloudComponent* Comp);
     void ApplyVisualSettingsToActor(AActor* Actor);
+    /** Re-asserts jusync.Spawner.CloudEmissiveFloor on every live cloud MID.
+     *  Scrubbing swaps in clouds whose MID is rebuilt from the material default,
+     *  so a one-shot push on CVar change loses the panel value. */
+    void EnsureCloudEmissiveFloor();
 #endif
 };

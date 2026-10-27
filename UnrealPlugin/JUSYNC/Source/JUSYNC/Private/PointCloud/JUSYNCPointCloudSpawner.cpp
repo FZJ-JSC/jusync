@@ -61,7 +61,7 @@ static TAutoConsoleVariable<float> CVarJusyncCloudEmissiveFloor(
     ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarJusyncCloudScreenSize(
-    TEXT("jusync.Morph.CloudScreenSize"), 0.25f,
+    TEXT("jusync.Morph.CloudScreenSize"), 2.7f,
     TEXT("Point size (screen-fraction units) used while jusync.Morph.CloudFixedSize is on."),
     ECVF_Default);
 
@@ -241,6 +241,25 @@ bool FJUSYNCPointCloudSpawner::EnqueuePointCloudForPlayback(FJUSYNCPointCloudRef
         return false;
     }
 
+#ifdef WITH_ANARI_USD_MIDDLEWARE
+    // Instant revisit: the sample cache hands back the SAME payload shared ref
+    // for the same sample, so if we already built and displayed this exact
+    // payload once, swap that cloud straight in - no conversion, no async
+    // build, no morph. A->B->A scrubs must not rebuild A.
+    {
+        const JUSYNCElementNames::FVariant ReplayVariant =
+            JUSYNCElementNames::ParseElement(PCRef->ElementName);
+        const FString CanonicalElement = !ReplayVariant.Element.IsEmpty()
+            ? JUSYNCElementNames::CanonicalActorIdentity(ReplayVariant.Element)
+            : PCRef->ElementName;
+        if (TryDisplayCachedPlaybackCloud(PCRef,
+            JUSYNCElementNames::MakeRankedElementKey(CanonicalElement, InRank)))
+        {
+            return true;
+        }
+    }
+#endif
+
     FJUSYNCPointCloudData PCData = PCRef.IsUnique() ? MoveTemp(*PCRef) : *PCRef;
 
     const JUSYNCElementNames::FVariant ElementVariant =
@@ -263,7 +282,14 @@ bool FJUSYNCPointCloudSpawner::EnqueuePointCloudForPlayback(FJUSYNCPointCloudRef
     Entry.PointSize = PointSize;
     Entry.bSpawned = false;
     Entry.bNeedsRecolor = false;
-    Entry.bPlaybackMorph = true;
+    // No morph on scrub: the smooth-morph path always lost correspondence
+    // against the just-swapped replay cloud (300/300 unmatched), fell into
+    // the ramp chain and rebuilt intermediate clouds that the next scrub
+    // step superseded -> visible despawn/respawn flicker lagging the
+    // streamlines. Scrub must show EXACTLY the selected sample: build and
+    // swap in place. (Live streaming keeps its own morph path.)
+    Entry.bPlaybackMorph = false;
+    Entry.SourcePayload = PCRef;
 
     if (PCData.HasLidarPoints())
     {
@@ -376,6 +402,16 @@ bool FJUSYNCPointCloudSpawner::IsElementFiltered(const FString& ElementName) con
         }
     }
     return false;
+}
+
+bool FJUSYNCPointCloudSpawner::HasAppliedFileHash(const FString& Filename, uint64 HashLo, uint64 HashHi) const
+{
+    if (Filename.IsEmpty())
+    {
+        return false;
+    }
+    const TPair<uint64, uint64>* Entry = AppliedFileHashes.Find(Filename);
+    return Entry && Entry->Key == HashLo && Entry->Value == HashHi;
 }
 
 bool FJUSYNCPointCloudSpawner::EnqueuePointCloud(FJUSYNCPointCloudData&& PCData, int32 InRank, bool bAllowNoGradient)
@@ -702,6 +738,7 @@ void FJUSYNCPointCloudSpawner::StartAsyncCloudBuild(const FString& Key, FPointCl
 
     F->Actor = Actor;
     F->Points = new TArray64<FLidarPointCloudPoint>(MoveTemp(Entry.Points));
+    F->SourcePayload = MoveTemp(Entry.SourcePayload);
     F->Generation = ++NextCloudBuildGeneration;
     F->bBuilding = true;
     F->BuildStarted = FPlatformTime::Seconds();
@@ -779,7 +816,12 @@ void FJUSYNCPointCloudSpawner::OnAsyncCloudBuildFinished(const FString& Key, uin
             if (ULidarPointCloud* Stale = F.CloudRef.IsValid()
                 ? Cast<ULidarPointCloud>(F.CloudRef->Get()) : nullptr)
             {
-                Stale->MarkAsGarbage();
+                // A cloud the reuse cache holds may still be re-displayed by a
+                // scrub; only kill it if nothing is going to show it again.
+                if (!IsPlaybackCachedCloud(Stale))
+                {
+                    Stale->MarkAsGarbage();
+                }
             }
             F.CloudRef.Reset();
             F.bBuilding = false;
@@ -861,7 +903,10 @@ void FJUSYNCPointCloudSpawner::OnAsyncCloudBuildFinished(const FString& Key, uin
 
                     Comp->SetPointCloud(Cloud);
                     ApplyVisualSettings(Comp);
-                    Actor->SetActorHiddenInGame(false);
+                    // POINTS panel state (hue filter, hidden) must survive
+                    // every fresh frame that swaps in.
+                    ApplyPointHueFilterToCloud(Cloud);
+                    Actor->SetActorHiddenInGame(bPointCloudsHidden);
                     F.bEverSwapped = true;
                     bSwapped = true;
 
@@ -873,6 +918,13 @@ void FJUSYNCPointCloudSpawner::OnAsyncCloudBuildFinished(const FString& Key, uin
                     if (F.RampPos.Num() > 0)
                     {
                         CloudDisplayPos.Add(Key, MoveTemp(F.RampPos));
+                    }
+
+                    // Playback reuse: remember exactly which built cloud this
+                    // sample's payload produced, so revisiting swaps instantly.
+                    if (F.SourcePayload.IsValid())
+                    {
+                        StorePlaybackCloud(Key, MoveTemp(F.SourcePayload), Cloud);
                     }
 
                     SmoothMorphs.Remove(Key);
@@ -913,7 +965,12 @@ void FJUSYNCPointCloudSpawner::OnAsyncCloudBuildFinished(const FString& Key, uin
         }
         else if (bSwapped && IsValid(ReplacedCloud) && ReplacedCloud != Cloud)
         {
-            ReplacedCloud->MarkAsGarbage();
+            // Never garbage a cloud the reuse cache still owns: the scrub path
+            // would hand back a dead object on the next revisit of that sample.
+            if (!IsPlaybackCachedCloud(ReplacedCloud))
+            {
+                ReplacedCloud->MarkAsGarbage();
+            }
             // (gc.TimeBetweenPurgingPendingKillObjects) without user-visible hitches.
 
         }
@@ -1143,13 +1200,25 @@ void FJUSYNCPointCloudSpawner::PreparePointCloudForPlayback(const FString& Key)
 
 void FJUSYNCPointCloudSpawner::TickCloudRamps(double NowSeconds)
 {
-    for (TPair<FString, TSharedRef<FInFlightCloudBuild>>& Pair : InFlightBuilds)
+    // Snapshot first: OnAsyncCloudBuildFinished can Remove the key it was
+    // called for (failed/dropped builds release their actor and the slot) or
+    // Add a replacement (a stashed newer sample restarts the build). Ranged-
+    // for over the live map ensured ("Container has changed during ranged-for
+    // iteration") when a deferred chain step failed inside this loop.
+    TArray<TPair<FString, uint64>> DeferredLandings;
+    for (const TPair<FString, TSharedRef<FInFlightCloudBuild>>& Pair : InFlightBuilds)
     {
-        FInFlightCloudBuild& F = *Pair.Value;
+        const FInFlightCloudBuild& F = *Pair.Value;
         if (F.bDeferred && NowSeconds >= F.EarliestApply)
         {
-            OnAsyncCloudBuildFinished(Pair.Key, F.Generation, true);
+            DeferredLandings.Add(TPair<FString, uint64>(Pair.Key, F.Generation));
         }
+    }
+    for (const TPair<FString, uint64>& Landing : DeferredLandings)
+    {
+        // By generation: if the slot was removed or restarted between the
+        // snapshot and now, this call is a no-op inside the handler.
+        OnAsyncCloudBuildFinished(Landing.Key, Landing.Value, true);
     }
 
     for (auto It = RampChains.CreateIterator(); It; ++It)
@@ -1163,6 +1232,391 @@ void FJUSYNCPointCloudSpawner::TickCloudRamps(double NowSeconds)
         }
 
         KickRampStep(It.Key(), Chain);
+    }
+}
+
+int32 FJUSYNCPointCloudSpawner::FindPlaybackReuseIndex(const FJUSYNCPointCloudRef& Payload) const
+{
+    if (!Payload.IsValid())
+    {
+        return INDEX_NONE;
+    }
+    for (int32 i = 0; i < PlaybackCloudReuse.Num(); ++i)
+    {
+        if (PlaybackCloudReuse[i].Payload == Payload)
+        {
+            return i;
+        }
+    }
+    return INDEX_NONE;
+}
+
+bool FJUSYNCPointCloudSpawner::TryDisplayCachedPlaybackCloud(
+    const FJUSYNCPointCloudRef& Payload, const FString& Key)
+{
+    const int32 HitIdx = FindPlaybackReuseIndex(Payload);
+    if (HitIdx == INDEX_NONE)
+    {
+        return false;
+    }
+
+    ULidarPointCloud* Built = PlaybackCloudReuse[HitIdx].Cloud.IsValid()
+        ? Cast<ULidarPointCloud>(PlaybackCloudReuse[HitIdx].Cloud.Get()) : nullptr;
+    if (!Built || Built->HasAnyFlags(RF_BeginDestroyed))
+    {
+        PlaybackCloudReuse.RemoveAt(HitIdx);
+        return false;
+    }
+
+    AActor* Actor = FindActorByElementKey(Key);
+    ALidarPointCloudActor* LidarActor = IsValid(Actor) ? Cast<ALidarPointCloudActor>(Actor) : nullptr;
+    ULidarPointCloudComponent* Comp = LidarActor ? LidarActor->GetPointCloudComponent() : nullptr;
+    if (!Comp)
+    {
+        // No actor to swap into (released to the pool meanwhile); the normal
+        // enqueue path will allocate one and rebuild this sample.
+        return false;
+    }
+
+    // Scrub contract: kill any live morph/deferred swap first so the selected
+    // frame replaces the display immediately and nothing lands on top later.
+    PreparePointCloudForPlayback(Key);
+
+    if (Comp->GetPointCloud() != Built)
+    {
+        Built->SetOptimizedForDynamicData(true);
+        Comp->SetPointCloud(Built);
+        ApplyVisualSettings(Comp);
+        ApplyPointHueFilterToCloud(Built);
+    }
+    LidarActor->SetActorHiddenInGame(bPointCloudsHidden);
+
+    // Re-anchor the live morph state on the frame we now show, so resuming the
+    // live stream glides from here instead of snapping from an older sample.
+    TArray<FVector3f> Displayed;
+    Displayed.Reserve(Built->GetNumPoints());
+    Built->ExecuteActionOnAllPoints(
+        [&](FLidarPointCloudPoint* P) { Displayed.Add(P->Location); },
+        /*bVisibleOnly*/false);
+    if (Displayed.Num() > 0)
+    {
+        CloudDisplayPos.Add(Key, MoveTemp(Displayed));
+    }
+
+    PlaybackCloudReuse[HitIdx].LastUsedSeconds = FPlatformTime::Seconds();
+    UE_LOG(LogTemp, Log, TEXT("JUSYNC CloudReplay: instant revisit '%s' (%d pts, no rebuild)"),
+        *Key, Built->GetNumPoints());
+    OnPointCloudSpawned.Broadcast(Key, Actor);
+    return true;
+}
+
+int32 FJUSYNCPointCloudSpawner::FindEvictableReuseIndex()
+{
+    // Oldest entry that is NOT on screen: the reuse cache is often the only
+    // strong reference keeping a built cloud alive, so the displayed one must
+    // never be dropped here.
+    int32 EvictIdx = INDEX_NONE;
+    double Oldest = TNumericLimits<double>::Max();
+    for (int32 i = 0; i < PlaybackCloudReuse.Num(); ++i)
+    {
+        const FPlaybackCloudReuse& Cand = PlaybackCloudReuse[i];
+        if (EvictIdx != INDEX_NONE && Cand.LastUsedSeconds >= Oldest)
+        {
+            continue;
+        }
+        AActor* CandActor = FindActorByElementKey(Cand.Key);
+        ALidarPointCloudActor* CandLidar = IsValid(CandActor)
+            ? Cast<ALidarPointCloudActor>(CandActor) : nullptr;
+        ULidarPointCloudComponent* CandComp = CandLidar ? CandLidar->GetPointCloudComponent() : nullptr;
+        if (CandComp && Cand.Cloud.IsValid() && CandComp->GetPointCloud() == Cand.Cloud.Get())
+        {
+            continue; // displayed now - never drop its only strong ref
+        }
+        Oldest = Cand.LastUsedSeconds;
+        EvictIdx = i;
+    }
+    return EvictIdx;
+}
+
+int64 FJUSYNCPointCloudSpawner::EstimatePayloadBytes(const FJUSYNCPointCloudRef& Payload)
+{
+    if (!Payload.IsValid())
+    {
+        return 0;
+    }
+    // Same accounting the sample cache uses (JUSYNCFileSpawnerActor): the
+    // built cloud roughly duplicates the payload's CPU size as GPU vertex
+    // bytes, so this is the payload's share of the VRAM warm pool.
+    int64 Bytes = 128;
+    if (Payload->HasLidarPoints())
+    {
+        Bytes += static_cast<int64>(Payload->LidarPoints.Num()) * sizeof(FLidarPointCloudPoint);
+    }
+    else
+    {
+        Bytes += static_cast<int64>(Payload->Positions.Num()) * sizeof(FVector);
+        Bytes += static_cast<int64>(Payload->Colors.Num()) * sizeof(FColor);
+    }
+    Bytes += static_cast<int64>(Payload->Widths.Num()) * sizeof(float);
+    return Bytes;
+}
+
+int32 FJUSYNCPointCloudSpawner::WarmCloudCountForBudget(int64 BudgetBytes, int64 AvgCloudBytes)
+{
+    if (BudgetBytes <= 0 || AvgCloudBytes <= 0)
+    {
+        return MaxPlaybackCloudReuse; // legacy fixed pool until a budget exists
+    }
+    const int64 ByBudget = BudgetBytes / AvgCloudBytes;
+    return static_cast<int32>(FMath::Clamp<int64>(ByBudget, MinWarmClouds, MaxWarmCloudsHardCap));
+}
+
+void FJUSYNCPointCloudSpawner::SetWarmCloudBudgetBytes(int64 InBytes)
+{
+    const int64 NewBudget = FMath::Max<int64>(0, InBytes);
+    if (NewBudget == WarmCloudBudgetBytes)
+    {
+        return;
+    }
+    WarmCloudBudgetBytes = NewBudget;
+
+    // Shrink immediately on a smaller budget; growth just raises the cap the
+    // next StorePlaybackCloud enforces.
+    const int32 PoolCap = WarmCloudCountForBudget(WarmCloudBudgetBytes, WarmCloudAvgBytes);
+    while (PlaybackCloudReuse.Num() > PoolCap)
+    {
+        const int32 EvictIdx = FindEvictableReuseIndex();
+        if (EvictIdx == INDEX_NONE)
+        {
+            return; // everything left is on screen
+        }
+        PlaybackCloudReuse.RemoveAt(EvictIdx);
+    }
+}
+
+void FJUSYNCPointCloudSpawner::StorePlaybackCloud(
+    const FString& Key, FJUSYNCPointCloudRef&& Payload, UObject* Cloud)
+{
+    if (!Payload.IsValid() || !IsValid(Cloud))
+    {
+        return;
+    }
+
+    const int32 ExistingIdx = FindPlaybackReuseIndex(Payload);
+    if (ExistingIdx != INDEX_NONE)
+    {
+        FPlaybackCloudReuse& Existing = PlaybackCloudReuse[ExistingIdx];
+        Existing.Cloud.Reset(Cloud);
+        Existing.Key = Key;
+        Existing.LastUsedSeconds = FPlatformTime::Seconds();
+        return;
+    }
+
+    // Evict the least recently used entry, but never one still on screen: the
+    // reuse cache is often the only strong reference keeping it alive.
+    const int64 NewBytes = FMath::Max<int64>(1, EstimatePayloadBytes(Payload));
+    WarmCloudAvgBytes = WarmCloudAvgBytes > 0
+        ? (WarmCloudAvgBytes * 3 + NewBytes) / 4
+        : NewBytes;
+    const int32 PoolCap = WarmCloudCountForBudget(WarmCloudBudgetBytes, WarmCloudAvgBytes);
+    while (PlaybackCloudReuse.Num() >= PoolCap)
+    {
+        const int32 EvictIdx = FindEvictableReuseIndex();
+        if (EvictIdx == INDEX_NONE)
+        {
+            return; // everything is on screen; skip caching this one
+        }
+        PlaybackCloudReuse.RemoveAt(EvictIdx);
+    }
+
+    FPlaybackCloudReuse& Fresh = PlaybackCloudReuse.AddDefaulted_GetRef();
+    Fresh.LastUsedSeconds = FPlatformTime::Seconds();
+    Fresh.Key = Key;
+    Fresh.Payload = MoveTemp(Payload);
+    Fresh.Cloud.Reset(Cloud);
+}
+
+bool FJUSYNCPointCloudSpawner::IsPlaybackCachedCloud(const UObject* Cloud) const
+{
+    if (!Cloud)
+    {
+        return false;
+    }
+    for (const FPlaybackCloudReuse& Reuse : PlaybackCloudReuse)
+    {
+        if (Reuse.Cloud.IsValid() && Reuse.Cloud.Get() == Cloud)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void FJUSYNCPointCloudSpawner::ClearPlaybackCloudReuse()
+{
+    // TStrongObjectPtr must be released on the game thread; every caller of
+    // this (sample-cache clearing, shutdown) runs there.
+    PlaybackCloudReuse.Reset();
+}
+
+void FJUSYNCPointCloudSpawner::ApplyPointCloudsHiddenToActors()
+{
+    for (AActor* Actor : ActiveActors)
+    {
+        if (ALidarPointCloudActor* LidarActor = Cast<ALidarPointCloudActor>(Actor))
+        {
+            LidarActor->SetActorHiddenInGame(bPointCloudsHidden);
+        }
+    }
+}
+
+void FJUSYNCPointCloudSpawner::SetPointHueFilter(bool bEnabled, float HueDeg, float ToleranceDeg)
+{
+    bPointHueFilter = bEnabled;
+    PointHue = FMath::Clamp(HueDeg, 0.0f, 360.0f);
+    PointHueTolerance = FMath::Clamp(ToleranceDeg, 0.0f, 180.0f);
+
+    // Apply (or restore) on every cloud currently displayed. Clouds swapped
+    // in later pick the same state up at their swap site.
+    for (AActor* Actor : ActiveActors)
+    {
+        ALidarPointCloudActor* LidarActor = Cast<ALidarPointCloudActor>(Actor);
+        ULidarPointCloudComponent* Comp = LidarActor ? LidarActor->GetPointCloudComponent() : nullptr;
+        ApplyPointHueFilterToCloud(Comp ? Comp->GetPointCloud() : nullptr);
+    }
+
+    if (!bPointHueFilter)
+    {
+        PointColorOriginals.Empty();
+    }
+    PrunePointColorOriginals();
+}
+
+void FJUSYNCPointCloudSpawner::ApplyPointHueFilterToCloud(ULidarPointCloud* Cloud)
+{
+    if (!IsValid(Cloud) || Cloud->HasAnyFlags(RF_BeginDestroyed))
+    {
+        return;
+    }
+
+    const TWeakObjectPtr<UObject> CloudKey(Cloud);
+    if (!bPointHueFilter)
+    {
+        // Restore the build-time colours if this cloud was dimmed before.
+        if (TArray<FColor>* Originals = PointColorOriginals.Find(CloudKey))
+        {
+            const TArray<FColor>& Restore = *Originals;
+            int32 Index = 0;
+            Cloud->ExecuteActionOnAllPoints([&Restore, &Index](FLidarPointCloudPoint* P)
+            {
+                if (Restore.IsValidIndex(Index))
+                {
+                    P->Color = Restore[Index];
+                }
+                ++Index;
+            }, /*bVisibleOnly*/false);
+            PointColorOriginals.Remove(CloudKey);
+            Cloud->RefreshRendering();
+        }
+        return;
+    }
+
+    const int32 NumPts = static_cast<int32>(Cloud->GetNumPoints());
+    TArray<FColor>& Originals = PointColorOriginals.FindOrAdd(CloudKey);
+    if (Originals.Num() != NumPts)
+    {
+        // First sight of this cloud (or a different point count): capture the
+        // untouched colours BEFORE dimming, so clearing the filter can undo.
+        Originals.Init(FColor::White, NumPts);
+        int32 Capture = 0;
+        Cloud->ExecuteActionOnAllPoints([&Originals, &Capture](FLidarPointCloudPoint* P)
+        {
+            if (Originals.IsValidIndex(Capture))
+            {
+                Originals[Capture] = P->Color;
+            }
+            ++Capture;
+        }, /*bVisibleOnly*/false);
+
+        // Live frames replace clouds constantly; keep the map tight to the
+        // clouds that are actually displayed or reusable.
+        if (PointColorOriginals.Num() > WarmCloudCountForBudget(WarmCloudBudgetBytes, WarmCloudAvgBytes) + 8)
+        {
+            PrunePointColorOriginals();
+        }
+    }
+
+    const float SelectedHue = PointHue;
+    const float Tolerance = PointHueTolerance;
+    int32 Index = 0;
+    Cloud->ExecuteActionOnAllPoints(
+        [&Originals, &Index, SelectedHue, Tolerance](FLidarPointCloudPoint* P)
+        {
+            const FColor Base = Originals.IsValidIndex(Index) ? Originals[Index] : P->Color;
+            // Same hue maths as JUSYNCPathlineManager::RgbToHS, so a chip
+            // selects the same colours for points as it does for trails.
+            const FLinearColor RGB(Base);
+            const float Max = FMath::Max3(RGB.R, RGB.G, RGB.B);
+            const float Min = FMath::Min3(RGB.R, RGB.G, RGB.B);
+            const float Delta = Max - Min;
+            float HueDeg = 0.0f;
+            if (Delta > KINDA_SMALL_NUMBER)
+            {
+                if (Max == RGB.R)
+                {
+                    HueDeg = 60.0f * FMath::Fmod((RGB.G - RGB.B) / Delta, 6.0f);
+                }
+                else if (Max == RGB.G)
+                {
+                    HueDeg = 60.0f * ((RGB.B - RGB.R) / Delta + 2.0f);
+                }
+                else
+                {
+                    HueDeg = 60.0f * ((RGB.R - RGB.G) / Delta + 4.0f);
+                }
+                if (HueDeg < 0.0f)
+                {
+                    HueDeg += 360.0f;
+                }
+            }
+            const float Dist = FMath::Abs(HueDeg - SelectedHue);
+            const bool bMatch = FMath::Min(Dist, 360.0f - Dist) <= Tolerance;
+            P->Color = bMatch ? Base : FColor(6, 6, 6);
+            ++Index;
+        },
+        /*bVisibleOnly*/false);
+    Cloud->RefreshRendering();
+}
+
+void FJUSYNCPointCloudSpawner::PrunePointColorOriginals()
+{
+    for (auto It = PointColorOriginals.CreateIterator(); It; ++It)
+    {
+        UObject* Cloud = It.Key().Get();
+        if (!Cloud)
+        {
+            It.RemoveCurrent();
+            continue;
+        }
+        if (IsPlaybackCachedCloud(Cloud))
+        {
+            continue;
+        }
+        bool bDisplayed = false;
+        for (AActor* Actor : ActiveActors)
+        {
+            ALidarPointCloudActor* LidarActor = Cast<ALidarPointCloudActor>(Actor);
+            ULidarPointCloudComponent* Comp = LidarActor ? LidarActor->GetPointCloudComponent() : nullptr;
+            if (Comp && Comp->GetPointCloud() == Cloud)
+            {
+                bDisplayed = true;
+                break;
+            }
+        }
+        if (!bDisplayed)
+        {
+            It.RemoveCurrent();
+        }
     }
 }
 
@@ -1489,6 +1943,34 @@ void FJUSYNCPointCloudSpawner::ApplySizingToActiveActors()
     }
 }
 
+void FJUSYNCPointCloudSpawner::EnsureCloudEmissiveFloor()
+{
+    // Scrubbing swaps clouds whose material instance is rebuilt from the
+    // material default (0.004). ApplyVisualSettings pushes the CVar only when
+    // the CVar itself changed, so a cloud created after the last slider move
+    // started dark and stayed dark. Re-assert here every tick; the value
+    // compare keeps it free once the MID already matches.
+    const float Floor = CVarJusyncCloudEmissiveFloor.GetValueOnGameThread();
+    for (AActor* Actor : ActiveActors)
+    {
+        ALidarPointCloudActor* LidarActor = Cast<ALidarPointCloudActor>(Actor);
+        ULidarPointCloudComponent* Comp = LidarActor ? LidarActor->GetPointCloudComponent() : nullptr;
+        if (!Comp)
+        {
+            continue;
+        }
+        if (UMaterialInstanceDynamic* Dyn = Cast<UMaterialInstanceDynamic>(Comp->GetMaterial(0)))
+        {
+            float Current = -1.f;
+            if (!Dyn->GetScalarParameterValue(FName("EmissiveFloor"), Current) ||
+                !FMath::IsNearlyEqual(Current, Floor))
+            {
+                Dyn->SetScalarParameterValue(FName("EmissiveFloor"), Floor);
+            }
+        }
+    }
+}
+
 void FJUSYNCPointCloudSpawner::ApplyPointShapeToActiveActors(ELidarPointCloudSpriteShape InShape)
 {
     PointShape = InShape;
@@ -1788,6 +2270,10 @@ void FJUSYNCPointCloudSpawner::Tick(float DeltaTime)
         LastCloudEmissiveFloor = CloudFloorNow;
         ApplySizingToActiveActors();
     }
+
+    // New clouds (every scrubbed frame) rebuild their material instance, so the
+    // floor has to be re-asserted rather than pushed once on CVar change.
+    EnsureCloudEmissiveFloor();
 #endif
 }
 
@@ -2001,7 +2487,7 @@ void FJUSYNCPointCloudSpawner::DrainReadyQueueLocked()
             continue;
         }
 
-        Actor->SetActorHiddenInGame(false);
+        Actor->SetActorHiddenInGame(bPointCloudsHidden);
         Actor->SetActorEnableCollision(false);
 
         if (!bInPlaceUpdate)
@@ -2133,6 +2619,7 @@ void FJUSYNCPointCloudSpawner::RecolorGradientPendingActors()
         JUSYNCPadDegenerateBounds(NewPoints);
         if (Cloud && Cloud->SetData(NewPoints))
         {
+            ApplyPointHueFilterToCloud(Cloud);
             MaybeCalculateNormals(Cloud, Actor, static_cast<int32>(NewPoints.Num()));
             Recolored++;
         }
