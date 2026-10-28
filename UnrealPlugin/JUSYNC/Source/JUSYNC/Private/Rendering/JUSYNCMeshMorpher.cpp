@@ -30,11 +30,6 @@ static TAutoConsoleVariable<int32> CVarJUSyncMorphMaxBlendMs(
     TEXT("Cap in ms for the auto mesh blend window."),
     ECVF_Default);
 
-// Auto mode follows the measured sample gap so a slow stream still gets a
-// full-length blend. At interactive rates that gap is the *update* interval
-// (often 0.5 s because the scene diff polls), which leaves the mesh one whole
-// update behind on screen. Keep auto snappy by default; raise this if you want
-// slow samples to blend for their whole gap.
 static TAutoConsoleVariable<int32> CVarJUSyncMorphAutoMaxMs(
     TEXT("jusync.Morph.MeshAutoMaxMs"), 200,
     TEXT("Cap in ms for the auto mesh blend when MeshBlendMs is 0 (default 200)."),
@@ -65,7 +60,7 @@ namespace JUSyncMorph
     static float EaseSaturated(double u)
     {
         const float t = FMath::Clamp(static_cast<float>(u), 0.f, 1.f);
-        return t * t * (3.f - 2.f * t); // smoothstep: zero velocity at both keys
+        return t * t * (3.f - 2.f * t);  // smoothstep: zero velocity at both keys
     }
 
     static void WriteDisplayedPrev(
@@ -84,10 +79,6 @@ namespace JUSyncMorph
         }
     }
 
-    // Cross-topology correspondence: matches every vertex of the new sample to the nearest
-    // vertex of the previous sample. Uniform grid stored as a sorted (cellKey, vertexIndex)
-    // array; key computation and queries are parallel, queries binary-search the
-    // 27-cell neighborhood.
     class FVertMatcher
     {
     public:
@@ -101,8 +92,6 @@ namespace JUSyncMorph
                 Max = FVector3f::Max(Max, P);
             }
             const FVector3f Extent = Max - Min;
-            // Cell ~= local point spacing so a 3x3x3 probe reaches the nearest old vertex
-            // for mesh drift well under one spacing.
             const float Volume = FMath::Max(Extent.X, 1e-3f)
                                * FMath::Max(Extent.Y, 1e-3f)
                                * FMath::Max(Extent.Z, 1e-3f);
@@ -121,7 +110,6 @@ namespace JUSyncMorph
             });
         }
 
-        // Returns old-vertex index or INDEX_NONE.
         int32 FindNearest(const FVector3f& P) const
         {
             const FIntVector C(
@@ -140,7 +128,7 @@ namespace JUSyncMorph
                         const uint64 Key = Mix(C.X + dx, C.Y + dy, C.Z + dz);
 
                         int32 Lo = 0;
-                        int32 Hi = Keyed.Num(); // lower bound: first entry with Key >= Key
+                        int32 Hi = Keyed.Num();  // lower bound: first entry with Key >= Key
                         while (Lo < Hi)
                         {
                             const int32 Mid = (Lo + Hi) / 2;
@@ -155,7 +143,7 @@ namespace JUSyncMorph
                         }
                         const int32 Begin = Lo;
 
-                        Hi = Keyed.Num(); // upper bound: first entry with Key > Key
+                        Hi = Keyed.Num();  // upper bound: first entry with Key > Key
                         while (Lo < Hi)
                         {
                             const int32 Mid = (Lo + Hi) / 2;
@@ -168,7 +156,6 @@ namespace JUSyncMorph
                                 Hi = Mid;
                             }
                         }
-                        // Cap the scan at MaxBucket entries per cell.
                         const int32 End = FMath::Min(Lo, Begin + MaxBucket);
 
                         for (int32 k = Begin; k < End; ++k)
@@ -211,8 +198,6 @@ namespace JUSyncMorph
         TArray<TPair<uint64, int32>> Keyed;
     };
 
-    // Out[i] = matched previous position for new vertex i (own position when unmatched,
-    // so the vertex simply does not travel). Returns matched fraction of new vertices.
     static float BuildMatchedPrev(const TArray<FVector3f>& Old, const TArray<FVector3f>& New,
                                   TArray<FVector3f>& Out, int32& OutMatched)
     {
@@ -293,8 +278,6 @@ UMaterialInstanceDynamic* FJUSYNCMeshMorpher::ResolveMorphMID(URealtimeMeshCompo
         return nullptr;
     }
 
-    // Static material that has the parameters -> create our own MID.
-
     if (IsMaterialMorphCapable(Current))
     {
         UMaterialInstanceDynamic* NewMID = UMaterialInstanceDynamic::Create(Current, Comp);
@@ -327,7 +310,7 @@ FJUSYNCMeshMorpher::EApplyMode FJUSYNCMeshMorpher::BeginUpdate(
     FEntry* Entry = Entries.Find(Comp);
     if (!Entry || !Entry->bHasTriHash || Entry->CurrPoints.Num() == 0)
     {
-        Entries.FindOrAdd(Comp); // first sight of this component: Commit records baseline
+        Entries.FindOrAdd(Comp);
         return EApplyMode::Normal;
     }
 
@@ -347,8 +330,6 @@ FJUSYNCMeshMorpher::EApplyMode FJUSYNCMeshMorpher::BeginUpdate(
 
     if (!bIndexAligned)
     {
-        // The ANARI-USD sender writes points AND face indices as time-varying attributes,
-        // so a re-meshed timestep changes topology. Fall back to nearest-vertex matching.
         if (!CVarJUSyncMorphTopologyMatch.GetValueOnGameThread())
         {
             return EApplyMode::Normal;
@@ -373,9 +354,6 @@ FJUSYNCMeshMorpher::EApplyMode FJUSYNCMeshMorpher::BeginUpdate(
             return EApplyMode::Normal;
         }
 
-        // NOTE: a mid-blend arrival restarts the morph from the previous SAMPLE's matched
-        // positions instead of the in-flight displayed ones; at streaming rates the visible
-        // error is sub-frame.
         Entry->bBlendByMatch = true;
 
         static double LastMatchLogTime = 0.0;
@@ -397,10 +375,6 @@ FJUSYNCMeshMorpher::EApplyMode FJUSYNCMeshMorpher::BeginUpdate(
     }
     else
     {
-        // No blend in flight: the displayed pose is exactly the previous sample. Start the
-        // new blend from Entry->CurrPoints. (Passing an empty FromA here made the overlap
-        // zero and filled Out with the NEW points instead, producing a zero delta and an
-        // instant snap for every sample that arrived after the previous ramp had finished.)
         JUSyncMorph::WriteDisplayedPrev(Entry->CurrPoints, Entry->CurrPoints, 0.f,
                                         MeshData.Points.Num(), MeshData.Points, OutPrevPoints);
     }
@@ -423,7 +397,7 @@ void FJUSYNCMeshMorpher::Commit(
 
     Entry.TriHash = ComputeTriHash(MeshData.Triangles);
     Entry.bHasTriHash = true;
-    Entry.CurrPoints = MeshData.Points; // one copy per sample; source of next blend's prev
+    Entry.CurrPoints = MeshData.Points;
     Entry.LastArrival = NowSeconds;
 
     UMaterialInstanceDynamic* MID = ResolveMorphMID(Comp, Entry);
@@ -443,7 +417,7 @@ void FJUSYNCMeshMorpher::Commit(
         Entry.bBlending = true;
 
         MID->SetScalarParameterValue(MorphActiveParameter, 1.f);
-        MID->SetScalarParameterValue(MorphTParameter, 0.f); // hold at prev while the ramp starts
+        MID->SetScalarParameterValue(MorphTParameter, 0.f);  // hold at prev while the ramp starts
     }
     else
     {
@@ -459,7 +433,7 @@ void FJUSYNCMeshMorpher::Commit(
 
 void FJUSYNCMeshMorpher::Seed(URealtimeMeshComponent* Comp, const FJUSYNCCompactMeshData& MeshData, double NowSeconds)
 {
-    Commit(Comp, MeshData, NowSeconds, /*bBlended*/false, TArray<FVector3f>{});
+    Commit(Comp, MeshData, NowSeconds,  false, TArray<FVector3f>{});  // bBlended
 }
 
 void FJUSYNCMeshMorpher::Forget(URealtimeMeshComponent* Comp)
@@ -488,14 +462,14 @@ void FJUSYNCMeshMorpher::Tick(float DeltaTime)
         UMaterialInstanceDynamic* MID = Entry.MorphMID.Get();
         if (!MID)
         {
-            Entry.bBlending = false; // material was replaced with a non-MID; stop driving
+            Entry.bBlending = false;
             continue;
         }
 
         const double u = (Now - Entry.BlendStart) / Entry.Duration;
         if (u >= 1.0)
         {
-            MID->SetScalarParameterValue(MorphTParameter, 1.f); // exact on the new key
+            MID->SetScalarParameterValue(MorphTParameter, 1.f);  // exact on the new key
             Entry.bBlending = false;
         }
         else

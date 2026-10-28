@@ -164,7 +164,6 @@ struct JUSYNC_API FJUSYNCPointAttribute
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
 	int32 Components = 0;
 
-	// Point-major: Values[Index * Components + Component].
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
 	TArray<float> Values;
 };
@@ -198,8 +197,6 @@ struct JUSYNC_API FJUSYNCPointCloudData
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
 	int32 PointCount = 0;
 
-	// Sender animation time for this payload (ANARI usd::time), in seconds.
-	// -1 means the payload did not carry a time (older sender / non-RawGeo).
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
 	double Time = -1.0;
 
@@ -209,18 +206,12 @@ struct JUSYNC_API FJUSYNCPointCloudData
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
 	bool bHasNormals = false;
 
-	// RawGeo point attributes are point-major and survive progressive merges.
-	// USD point clouds leave this empty.
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
 	TArray<FJUSYNCPointAttribute> Attributes;
 
-	// False for coarse/intermediate RawGeo subsets. Consumers that need stable
-	// identities (pathlines) must ignore incomplete clouds.
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
 	bool bComplete = true;
 
-	// Lattice size a progressive merge was cut from (PointCount for whole
-	// frames). Zero for clouds that did not come from RawGeo.
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC")
 	int32 FullPointCount = 0;
 
@@ -313,8 +304,6 @@ struct JUSYNC_API FJUSYNCCompactMeshData
 	TArray<int32> Triangles;
 	uint64 LUTVersion = 0;
 	bool bHasBakedColors = false;
-	// Coarse RawGeo curve preview: on screen immediately, but must not be
-	// written to the sample cache (the completed frame replaces it).
 	bool bTransient = false;
 
 	FJUSYNCCompactMeshData() = default;
@@ -330,7 +319,6 @@ struct JUSYNC_API FJUSYNCCompactMeshData
 	int32 GetVertexCount() const { return Points.Num(); }
 	int32 GetTriangleCount() const { return Triangles.Num() / 3; }
 
-	/** Local-space AABB of the vertex cloud (invalid when empty). */
 	FBox GetLocalBounds() const
 	{
 		FBox Box(ForceInit);
@@ -413,7 +401,7 @@ struct JUSYNC_API FJUSYNCWorkerStatus
 	FString GpuInfo;
 
 	UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Worker")
-	int64 LastHeartbeat;  // Unix timestamp
+	int64 LastHeartbeat;
 
 	FJUSYNCWorkerStatus()
 	{
@@ -490,19 +478,19 @@ struct JUSYNC_API FJUSYNCNotification
     int64 Timestamp;
 
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Hash")
-    int64 HashLo;           // hash128[0] of new data
+    int64 HashLo;  // hash128[0] of new data
 
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Hash")
-    int64 HashHi;           // hash128[1] of new data
+    int64 HashHi;  // hash128[1] of new data
 
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Hash")
-    int64 HashPrevLo;       // hashPrev128[0] of old data (0 if first time)
+    int64 HashPrevLo;  // hashPrev128[0] of old data (0 if first time)
 
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Hash")
-    int64 HashPrevHi;       // hashPrev128[1] of old data (0 if first time)
+    int64 HashPrevHi;  // hashPrev128[1] of old data (0 if first time)
 
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|Hash")
-    bool bHasOldData;       // true if HashPrev128 is valid
+    bool bHasOldData;  // true if HashPrev128 is valid
 
     FJUSYNCNotification()
         : Type(EJUSYNCNotificationType::FileUpdate), SourceRank(-1), FileSize(0), Timestamp(0),
@@ -510,8 +498,6 @@ struct JUSYNC_API FJUSYNCNotification
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCNotificationReceived, const FJUSYNCNotification&, Notification);
-
-// Typed scene / property update protocol events (NOTIFY_SCENE_UPDATE=303, NOTIFY_PROPERTY_UPDATE=304)
 
 UENUM(BlueprintType)
 enum class EJUSYNCSceneChangeType : uint8
@@ -548,7 +534,7 @@ struct JUSYNC_API FJUSYNCSceneUpdate
     GENERATED_BODY()
 
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|SceneUpdate")
-    int32 MessageType; // 303 = scene update, 304 = property update
+    int32 MessageType;  // 303 = scene update, 304 = property update
 
     UPROPERTY(BlueprintReadOnly, Category = "JUSYNC|SceneUpdate")
     int32 SourceRank;
@@ -618,7 +604,6 @@ struct JUSYNC_API FJUSYNCProtocolDiagnostics
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FJUSYNCProtocolDiagnosticsReceived, const FJUSYNCProtocolDiagnostics&, Diagnostics);
-
 
 USTRUCT(BlueprintType)
 struct JUSYNC_API FJUSYNCBenchmarkResult
@@ -890,12 +875,11 @@ struct JUSYNC_API FJUSYNCBenchmarkConfig
 		bEnableBenchmarking = false;
 		OutputDirectory = TEXT("");
 		bAppendTimestamp = true;
-		OutputFormat = 0; // Default to CSV for backward compatibility
+		OutputFormat = 0;
 		InteractiveWindowSeconds = 5.0f;
 		bColdStart = false;
 	}
 };
-
 
 USTRUCT(BlueprintType)
 struct JUSYNC_API FJUSYNCMetricsData
@@ -1175,7 +1159,7 @@ struct JUSYNC_API FJUSYNCMetricsConfig
 	float CollectionInterval_Seconds = 1.0f;
 
 	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
-	int32 MaxHistorySize = 3600; // 1 hour at 1-second intervals
+	int32 MaxHistorySize = 3600;  // 1 hour at 1-second intervals
 
 	UPROPERTY(BlueprintReadWrite, Category = "JUSYNC|Metrics")
 	bool bEnableDisplay = true;

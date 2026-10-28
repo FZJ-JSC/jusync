@@ -30,34 +30,29 @@ public class JUSYNC : ModuleRules
             "GameplayTasks",
             "LidarPointCloudRuntime",
             "ImageWrapper",
-            "Json"
+            "Json",
+            "Niagara",
+            "NiagaraCore"
         });
 
-        // The sample scrubber is a real Slate slider in the actor's Details
-        // panel, so the editor-only customization needs PropertyEditor.
         if (Target.bBuildEditor)
         {
             PrivateDependencyModuleNames.AddRange(new string[]
             {
                 "UnrealEd",
                 "PropertyEditor",
-                // Provides the Sequencer-style timeline scrubber used by the
-                // DaySequence time-of-day preview details panel.
                 "ToolWidgets"
             });
         }
 
-        // Setup third-party includes
         string ThirdPartyPath = Path.Combine(ModuleDirectory, "..", "ThirdParty");
         string AnariUsdPath = Path.Combine(ThirdPartyPath, "AnariUsdMiddleware");
 
         // Add GLM headers (points to your glm/glm/ directory)
         PublicIncludePaths.Add(Path.Combine(ThirdPartyPath, "glm"));
 
-        // Add middleware headers  
         PublicIncludePaths.Add(Path.Combine(AnariUsdPath, "Include"));
 
-        // Platform configuration
         if (Target.Platform == UnrealTargetPlatform.Win64)
         {
             ConfigureWindows(AnariUsdPath);
@@ -75,14 +70,13 @@ public class JUSYNC : ModuleRules
 
     private void ConfigureWindows(string AnariUsdPath)
     {
-        // Windows system libraries
         PublicSystemLibraries.AddRange(new string[]
         {
             "kernel32.lib",
             "ws2_32.lib",
             "iphlpapi.lib",
             "userenv.lib",
-            "DXGI.lib"  // Added for GPU memory queries
+            "DXGI.lib"
         });
 
         string LibDir = Path.Combine(AnariUsdPath, "Lib", "Win64");
@@ -92,7 +86,6 @@ public class JUSYNC : ModuleRules
         {
             PublicAdditionalLibraries.Add(LibFile);
 
-            // Stage required DLLs with enhanced multi-location staging
             string[] RequiredDlls = new string[]
             {
                 "anari_usd_middleware.dll",
@@ -112,7 +105,6 @@ public class JUSYNC : ModuleRules
 
     private void ConfigureLinux(string AnariUsdPath)
     {
-        // Linux system libraries
         PublicSystemLibraries.AddRange(new string[]
         {
             "pthread",
@@ -139,7 +131,6 @@ public class JUSYNC : ModuleRules
         }
     }
 
-    // ✅ ENHANCED: Multi-location DLL staging for comprehensive coverage
     private void StageDllsEnhanced(string LibDir, string[] RequiredDlls)
     {
         Console.WriteLine("JUSYNC: Starting enhanced DLL staging...");
@@ -150,7 +141,6 @@ public class JUSYNC : ModuleRules
 
             if (File.Exists(sourceDll))
             {
-                // Stage to multiple locations for comprehensive coverage
 
                 // 1. Binary output directory (for packaged builds)
                 RuntimeDependencies.Add(

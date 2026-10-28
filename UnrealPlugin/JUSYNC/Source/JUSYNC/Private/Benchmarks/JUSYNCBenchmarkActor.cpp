@@ -27,7 +27,7 @@ AJUSYNCBenchmarkActor::AJUSYNCBenchmarkActor()
 
     BrokerEndpoint = TEXT("tcp://localhost:5556");
     RequestTimeoutMs = 5000;
-    BandwidthBytesPerSecond = 10737418240.0f; // 10GB/s
+    BandwidthBytesPerSecond = 10737418240.0f;  // 10GB/s
     MinimumFileSizeBytes = 1000;
     bFilterUSDOnly = true;
     bClipsOnly = true;
@@ -36,7 +36,7 @@ AJUSYNCBenchmarkActor::AJUSYNCBenchmarkActor()
     WarmupRuns = 1;
     MeasuredRuns = 5;
     OutputDirectory = TEXT("");
-    OutputFormat = 2; // Both CSV and JSON
+    OutputFormat = 2;  // Both CSV and JSON
     bAutoStart = true;
     bGarbageCollectBetweenRuns = true;
 
@@ -90,7 +90,6 @@ void AJUSYNCBenchmarkActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
     Super::EndPlay(EndPlayReason);
 }
 
-
 void AJUSYNCBenchmarkActor::SnapshotRAMAndVRAM(int64& OutRAM, int64& OutVRAM)
 {
     UJUSYNCSubsystem* Subsystem = UJUSYNCBlueprintLibrary::GetJUSYNCSubsystem();
@@ -116,7 +115,6 @@ void AJUSYNCBenchmarkActor::EndStage(double& OutMs)
     const double Now = FPlatformTime::Seconds();
     OutMs = (Now - StageStartTime) * 1000.0;
 }
-
 
 void AJUSYNCBenchmarkActor::StartBenchmarkRun()
 {
@@ -843,7 +841,6 @@ void AJUSYNCBenchmarkActor::BeginNextRun()
         GWorld->GetTimerManager().SetTimer(CompleteWaitTimerHandle, NextDelay, 0.5f, false);
     }
 }
-
 
 int32 AJUSYNCBenchmarkActor::CalculateDynamicTimeout(int64 FileSizeBytes) const
 {

@@ -5,7 +5,6 @@
 #include "HAL/CriticalSection.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
-#include "JUSYNCPathlineActor.h"
 #include "JUSYNCPointCloudSpawner.h"
 #include "Misc/ScopeLock.h"
 
@@ -39,6 +38,8 @@ namespace
 		float Scalar = 0.0f;
 		float Width = 1.0f;
 		bool bHasScalar = false;
+		FColor Color = FColor::White;
+		bool bHasColor = false;
 		bool bBreak = false;
 		uint64 SampleId = 0;
 	};
@@ -53,9 +54,6 @@ namespace
 	struct FElementState
 	{
 		TMap<FPathlineKey, FPathlineTrack> Tracks;
-		// One previous-sample key set per source rank. Ranks arrive as separate
-		// clouds for the same logical sample, so a global set would mark the
-		// other ranks' tracks as gaps.
 		TMap<int32, TSet<FPathlineKey>> PreviousKeysByRank;
 		TArray<FColor> Lut;
 		uint64 SampleCounter = 0;
@@ -70,6 +68,8 @@ namespace
 		float Scalar = 0.0f;
 		float Width = 1.0f;
 		bool bHasScalar = false;
+		FColor Color = FColor::White;
+		bool bHasColor = false;
 	};
 
 	struct FCandidate
@@ -95,10 +95,10 @@ namespace
 		uint64 Generation = 0;
 	};
 
-	struct FPendingMesh
+	struct FPendingArrays
 	{
 		FString ElementName;
-		FJUSYNCCompactMeshRef Mesh;
+		TSharedPtr<FJUSYNCPathlineArrays, ESPMode::ThreadSafe> Arrays;
 		uint64 Generation = 0;
 	};
 
@@ -149,24 +149,109 @@ namespace
 		return static_cast<uint64>(static_cast<uint32>(Index));
 	}
 
+	const TArray<FColor>& DefaultScalarLut()
+	{
+		static const TArray<FColor> Ramp = []
+		{
+			const FLinearColor Stops[] = {
+				FLinearColor(0.267f, 0.005f, 0.329f),
+				FLinearColor(0.283f, 0.141f, 0.458f),
+				FLinearColor(0.254f, 0.265f, 0.530f),
+				FLinearColor(0.207f, 0.372f, 0.553f),
+				FLinearColor(0.164f, 0.471f, 0.558f),
+				FLinearColor(0.128f, 0.567f, 0.551f),
+				FLinearColor(0.135f, 0.659f, 0.518f),
+				FLinearColor(0.267f, 0.749f, 0.441f),
+				FLinearColor(0.478f, 0.821f, 0.318f),
+				FLinearColor(0.741f, 0.873f, 0.150f),
+				FLinearColor(0.993f, 0.906f, 0.144f)
+			};
+			TArray<FColor> Out;
+			Out.Reserve(UE_ARRAY_COUNT(Stops));
+			for (const FLinearColor& Stop : Stops)
+			{
+				Out.Add(Stop.ToFColor(true));
+			}
+			return Out;
+		}();
+		return Ramp;
+	}
+
+	float HueDistance(float HueA, float HueB)
+	{
+		const float Delta = FMath::Abs(HueA - HueB);
+		return FMath::Min(Delta, 360.0f - Delta);
+	}
+
+	void RgbToHS(const FLinearColor& Color, float& OutHue, float& OutSaturation)
+	{
+		const float Max = FMath::Max3(Color.R, Color.G, Color.B);
+		const float Min = FMath::Min3(Color.R, Color.G, Color.B);
+		const float Delta = Max - Min;
+
+		OutSaturation = Max > KINDA_SMALL_NUMBER ? Delta / Max : 0.0f;
+
+		if (Delta <= KINDA_SMALL_NUMBER)
+		{
+			OutHue = 0.0f;
+			return;
+		}
+		if (Max == Color.R)
+		{
+			OutHue = 60.0f * FMath::Fmod((Color.G - Color.B) / Delta, 6.0f);
+		}
+		else if (Max == Color.G)
+		{
+			OutHue = 60.0f * ((Color.B - Color.R) / Delta + 2.0f);
+		}
+		else
+		{
+			OutHue = 60.0f * ((Color.R - Color.G) / Delta + 4.0f);
+		}
+		if (OutHue < 0.0f)
+		{
+			OutHue += 360.0f;
+		}
+	}
+
 	FColor ResolveColor(const FElementState& Element, const FJUSYNCPathlineSettings& Settings,
-		const FPathlineNode& Latest)
+		const FPathlineNode& Node)
 	{
 		FColor Flat = Settings.FlatColor.ToFColor(true);
-		if (!Settings.bColorByScalar || !Latest.bHasScalar || Element.Lut.Num() == 0)
+		if (!Settings.bColorByScalar)
+		{
+			return Flat;
+		}
+		if (Node.bHasColor)
+		{
+			return Node.Color;
+		}
+		if (!Node.bHasScalar)
 		{
 			return Flat;
 		}
 
+		const TArray<FColor>& Lut = Element.Lut.Num() > 0 ? Element.Lut : DefaultScalarLut();
 		const float Range = Settings.ColorMax - Settings.ColorMin;
 		const float Alpha = FMath::IsNearlyZero(Range)
 			? 0.0f
-			: FMath::Clamp((Latest.Scalar - Settings.ColorMin) / Range, 0.0f, 1.0f);
+			: FMath::Clamp((Node.Scalar - Settings.ColorMin) / Range, 0.0f, 1.0f);
 		const int32 Index = FMath::Clamp(
-			FMath::RoundToInt(Alpha * static_cast<float>(Element.Lut.Num() - 1)),
-			0, Element.Lut.Num() - 1);
-		return Element.Lut[Index];
+			FMath::RoundToInt(Alpha * static_cast<float>(Lut.Num() - 1)),
+			0, Lut.Num() - 1);
+		return Lut[Index];
 	}
+}
+
+FString FJUSYNCPathlineManager::ResolveAttributeName(const FJUSYNCPointCloudData& Cloud,
+	const FString& Name)
+{
+	if (Name.IsEmpty() || Cloud.FindAttribute(Name))
+	{
+		return Name;
+	}
+	const FString Prefixed = FString(TEXT("vtk_")) + Name;
+	return Cloud.FindAttribute(Prefixed) ? Prefixed : Name;
 }
 
 struct FJUSYNCPathlineManager::FImpl
@@ -180,10 +265,7 @@ struct FJUSYNCPathlineManager::FImpl
 
 	TMap<FString, FElementState> Elements;
 	TArray<TSharedPtr<FWorkItem>> Queue;
-	TArray<FPendingMesh> PendingMeshes;
-
-	// Game-thread only. Never touched by the worker.
-	TMap<FString, TWeakObjectPtr<AJUSYNCPathlineActor>> PathlineActors;
+	TArray<FPendingArrays> PendingArrays;
 
 	std::atomic<bool> bWorkerRunning{ false };
 	std::atomic<bool> bShuttingDown{ false };
@@ -191,12 +273,20 @@ struct FJUSYNCPathlineManager::FImpl
 
 	uint64 DisplaySampleId = TNumericLimits<uint64>::Max();
 	bool bResampleRequested = false;
+	bool bRebuildQueued = false;
+
+	float TipBlendSeconds = 0.0f;
+	float TipBlendAlpha = 0.0f;
+	double TipBlendStartSeconds = 0.0;
+	bool bTipBlendActive = false;
 
 	void ClearLocked()
 	{
 		Elements.Reset();
 		Stats = FJUSYNCPathlineStats();
 		DisplaySampleId = TNumericLimits<uint64>::Max();
+		bTipBlendActive = false;
+		TipBlendAlpha = 0.0f;
 		Generation.fetch_add(1);
 	}
 
@@ -228,8 +318,6 @@ struct FJUSYNCPathlineManager::FImpl
 		}
 
 		FElementState& Element = Elements.FindOrAdd(ElementName);
-		// A logical sample can span multiple rank clouds. Advance the absence
-		// clock and retain the last sample id only when the sample id changes.
 		if (!Element.bHasSample)
 		{
 			Element.bHasSample = true;
@@ -246,11 +334,16 @@ struct FJUSYNCPathlineManager::FImpl
 		TMap<FPathlineKey, FSamplePoint> Current;
 		Current.Reserve(Cloud->PointCount);
 
+		const FString IdAttribute =
+			FJUSYNCPathlineManager::ResolveAttributeName(*Cloud, Settings.IdAttribute);
+		const FString ScalarAttribute =
+			FJUSYNCPathlineManager::ResolveAttributeName(*Cloud, Settings.ScalarAttribute);
+
 		int32 Duplicates = 0;
 		for (int32 PointIndex = 0; PointIndex < Cloud->PointCount; ++PointIndex)
 		{
 			bool bFromAttribute = false;
-			const uint64 Id = DecodeParticleId(*Cloud, PointIndex, Settings.IdAttribute, bFromAttribute);
+			const uint64 Id = DecodeParticleId(*Cloud, PointIndex, IdAttribute, bFromAttribute);
 			const FPathlineKey Key{ Rank, Id };
 			if (Current.Contains(Key))
 			{
@@ -261,8 +354,14 @@ struct FJUSYNCPathlineManager::FImpl
 			FSamplePoint Point;
 			Point.Position = Cloud->GetPosition(PointIndex);
 			Point.Width = Cloud->GetWidth(PointIndex);
+			Point.bHasColor = false;
+			if (Cloud->bHasColors && Cloud->Colors.IsValidIndex(PointIndex))
+			{
+				Point.Color = Cloud->Colors[PointIndex];
+				Point.bHasColor = true;
+			}
 			Point.bHasScalar = Cloud->GetAttributeScalar(
-				PointIndex, Settings.ScalarAttribute, Settings.ScalarComponent, Point.Scalar);
+				PointIndex, ScalarAttribute, Settings.ScalarComponent, Point.Scalar);
 			if (!FMath::IsFinite(Point.Scalar))
 			{
 				Point.bHasScalar = false;
@@ -272,9 +371,46 @@ struct FJUSYNCPathlineManager::FImpl
 		}
 		Stats.DuplicateIds += Duplicates;
 
-		// Expire tracks before selection so vacant slots can be reused this
-		// sample. Only the rank that just emitted can prove an id is absent;
-		// a rank cloud that has not arrived yet must not age its tracks.
+		static std::atomic<bool> bScalarDiagLogged{ false };
+		if (!bScalarDiagLogged.exchange(true))
+		{
+			bool bAnyScalar = false;
+			float SampleValue = 0.0f;
+			bool bAnyPointColor = false;
+			FColor PointColor = FColor::Black;
+			for (const TPair<FPathlineKey, FSamplePoint>& Pair : Current)
+			{
+				if (Pair.Value.bHasScalar)
+				{
+					bAnyScalar = true;
+					SampleValue = Pair.Value.Scalar;
+				}
+				if (Pair.Value.bHasColor)
+				{
+					bAnyPointColor = true;
+					PointColor = Pair.Value.Color;
+				}
+				if (bAnyScalar && bAnyPointColor)
+				{
+					break;
+				}
+			}
+			const FString LutFirst = Element.Lut.Num() > 0
+				? Element.Lut[0].ToString() : FString(TEXT("-"));
+			const FString LutMid = Element.Lut.Num() > 1
+				? Element.Lut[Element.Lut.Num() / 2].ToString() : FString(TEXT("-"));
+			const TCHAR* Verdict = !Settings.bColorByScalar ? TEXT("flat")
+				: (bAnyPointColor ? TEXT("POINT-COLOURED")
+					: (!bAnyScalar ? TEXT("FLAT WHITE: no scalar, no point colours")
+								   : TEXT("scalar-coloured")));
+			UE_LOG(LogTemp, Display,
+				TEXT("[Pathlines] color diag: pointColor=%d point=%s scalar='%s' present=%d "
+					 "value=%.4f lut=%d first=%s mid=%s (trails will be %s)"),
+				bAnyPointColor ? 1 : 0, *PointColor.ToString(),
+				*ScalarAttribute, bAnyScalar ? 1 : 0, SampleValue, Element.Lut.Num(),
+				*LutFirst, *LutMid, Verdict);
+		}
+
 		const int32 ExpirySamples = FMath::Max(0, Settings.TrackExpirySamples);
 		for (auto It = Element.Tracks.CreateIterator(); It; ++It)
 		{
@@ -318,7 +454,6 @@ struct FJUSYNCPathlineManager::FImpl
 		int32 SelectCount = FMath::Min(FMath::Max(0, Settings.MaxTracks), Candidates.Num());
 		if (Settings.MaxNodes > 0)
 		{
-			// A drawable track needs at least two nodes.
 			const int32 BudgetTracks = Settings.MaxNodes / 2;
 			SelectCount = FMath::Min(SelectCount, BudgetTracks);
 		}
@@ -345,13 +480,13 @@ struct FJUSYNCPathlineManager::FImpl
 					Track.Nodes.Last().SampleId == SampleId;
 				if (bSameSample)
 				{
-					// A delayed re-delivery of the same committed sample must
-					// replace the node instead of appending a zero-length step.
 					FPathlineNode& Last = Track.Nodes.Last();
 					Last.Position = Point->Position;
 					Last.Scalar = Point->Scalar;
 					Last.Width = Point->Width;
 					Last.bHasScalar = Point->bHasScalar;
+					Last.Color = Point->Color;
+					Last.bHasColor = Point->bHasColor;
 					Last.bBreak = Last.bBreak || bBreak;
 				}
 				else
@@ -361,6 +496,8 @@ struct FJUSYNCPathlineManager::FImpl
 					Node.Scalar = Point->Scalar;
 					Node.Width = Point->Width;
 					Node.bHasScalar = Point->bHasScalar;
+					Node.Color = Point->Color;
+					Node.bHasColor = Point->bHasColor;
 					Node.SampleId = SampleId;
 					Node.bBreak = bBreak;
 					Track.Nodes.Add(Node);
@@ -372,7 +509,7 @@ struct FJUSYNCPathlineManager::FImpl
 		}
 		Element.Tracks = MoveTemp(NextTracks);
 
-		int32 EffectiveHistory = FMath::Max(2, Settings.HistorySamples);
+		int32 EffectiveHistory = FMath::Max(2, FMath::Max(Settings.HistorySamples, Settings.RetentionSamples));
 		if (Settings.MaxNodes > 0 && Element.Tracks.Num() > 0)
 		{
 			EffectiveHistory = FMath::Clamp(
@@ -387,8 +524,6 @@ struct FJUSYNCPathlineManager::FImpl
 			}
 		}
 
-		// Defensive global cap. With MaxNodes smaller than twice the track
-		// count the per-track clamp cannot satisfy the budget on its own.
 		if (Settings.MaxNodes > 0)
 		{
 			int64 TotalNodes = 0;
@@ -427,13 +562,11 @@ struct FJUSYNCPathlineManager::FImpl
 		Stats.LastIngestMs = (FPlatformTime::Seconds() - StartSeconds) * 1000.0;
 	}
 
-	bool BuildLocked(const FString& ElementName, uint64 CutoffSampleId,
-		FJUSYNCCompactMeshData& OutMesh, int32& OutVisibleTracks)
+	bool BuildArraysLocked(const FString& ElementName, uint64 CutoffSampleId,
+		FJUSYNCPathlineArrays& OutArrays, int32& OutVisibleTracks)
 	{
 		const double StartSeconds = FPlatformTime::Seconds();
-		OutMesh = FJUSYNCCompactMeshData();
-		OutMesh.ElementName = ElementName;
-		OutMesh.TypeName = TEXT("Pathlines");
+		OutArrays.Reset();
 		OutVisibleTracks = 0;
 
 		const FElementState* Element = Elements.Find(ElementName);
@@ -443,20 +576,116 @@ struct FJUSYNCPathlineManager::FImpl
 			return false;
 		}
 
-		const int32 Sides = FMath::Clamp(Settings.TubeSides, 3, 16);
 		const float BaseRadius = FMath::Max(0.001f, Settings.Radius * Settings.RadiusScale);
+		const float ColorRange = Settings.ColorMax - Settings.ColorMin;
+		const float TipBlend = FMath::Clamp(TipBlendAlpha, 0.0f, 1.0f);
+
+		TArray<const FPathlineNode*> Visible;
+		Visible.Reserve(Settings.HistorySamples + 4);
+
+		float Order = 0.0f;
+		bool bHasPreviousRun = false;
+		FVector PreviousPosition = FVector::ZeroVector;
+		FLinearColor PreviousColor = FLinearColor::White;
+
+		auto ResolvePoint = [&](const FPathlineNode& Node, float& OutWidth,
+			FLinearColor& OutColor, float& OutScalar)
+		{
+			float WidthScale = 1.0f;
+			if (Settings.bUsePointWidth && Node.Width > 0.0f)
+			{
+				WidthScale = FMath::Clamp(Node.Width, 0.1f, 8.0f);
+			}
+			OutWidth = FMath::Max(BaseRadius * 2.0f * WidthScale, 0.01f);
+
+			OutScalar = 0.0f;
+			if (Node.bHasScalar && !FMath::IsNearlyZero(ColorRange))
+			{
+				OutScalar = FMath::Clamp(
+					(Node.Scalar - Settings.ColorMin) / ColorRange, 0.0f, 1.0f);
+			}
+
+			OutColor = FLinearColor(ResolveColor(*Element, Settings, Node));
+		};
+
+		auto EmitPoint = [&](const FVector& Position, float Width,
+			const FLinearColor& Color, float Scalar)
+		{
+			OutArrays.Positions.Add(Position);
+			OutArrays.LinkOrders.Add(Order);
+			OutArrays.Widths.Add(Width);
+			OutArrays.Colors.Add(Color);
+			OutArrays.Scalars.Add(Scalar);
+			Order += 1.0f;
+		};
+
+		auto EmitRun = [&](int32 StartIndex, int32 EndIndex,
+			const FPathlineNode* TipNext, float TipBlendAmount)
+		{
+			if (EndIndex <= StartIndex)
+			{
+				return;
+			}
+
+			float FirstWidth = 0.0f;
+			float FirstScalar = 0.0f;
+			FLinearColor FirstColor = FLinearColor::White;
+			ResolvePoint(*Visible[StartIndex], FirstWidth, FirstColor, FirstScalar);
+
+			if (bHasPreviousRun)
+			{
+				EmitPoint(PreviousPosition, 0.0f, PreviousColor, 0.0f);
+				EmitPoint(Visible[StartIndex]->Position, 0.0f, FirstColor, 0.0f);
+			}
+
+			for (int32 NodeIndex = StartIndex; NodeIndex <= EndIndex; ++NodeIndex)
+			{
+				const FPathlineNode& Node = *Visible[NodeIndex];
+				float Width = 0.0f;
+				float Scalar = 0.0f;
+				FLinearColor Color = FLinearColor::White;
+				ResolvePoint(Node, Width, Color, Scalar);
+
+				FVector Position = Node.Position;
+				if (TipNext && TipBlendAmount > 0.0f && !TipNext->bBreak &&
+					NodeIndex == Visible.Num() - 1)
+				{
+					Position = FMath::Lerp(Node.Position, TipNext->Position, TipBlendAmount);
+				}
+				EmitPoint(Position, Width, Color, Scalar);
+			}
+
+			PreviousPosition = Visible[EndIndex]->Position;
+			if (TipNext && TipBlendAmount > 0.0f && EndIndex == Visible.Num() - 1)
+			{
+				PreviousPosition = FMath::Lerp(Visible[EndIndex]->Position, TipNext->Position, TipBlendAmount);
+			}
+			float UnusedWidth = 0.0f;
+			float UnusedScalar = 0.0f;
+			ResolvePoint(*Visible[EndIndex], UnusedWidth, PreviousColor, UnusedScalar);
+			bHasPreviousRun = true;
+		};
 
 		for (const TPair<FPathlineKey, FPathlineTrack>& TrackPair : Element->Tracks)
 		{
 			const FPathlineTrack& Track = TrackPair.Value;
-			TArray<const FPathlineNode*> Visible;
-			Visible.Reserve(Track.Nodes.Num());
+			Visible.Reset();
+			const FPathlineNode* TipNext = nullptr;
 			for (const FPathlineNode& Node : Track.Nodes)
 			{
 				if (Node.SampleId <= CutoffSampleId)
 				{
 					Visible.Add(&Node);
 				}
+				else if (!TipNext)
+				{
+					TipNext = &Node;
+					break;
+				}
+			}
+			if (Visible.Num() > Settings.HistorySamples)
+			{
+				Visible.RemoveAt(0, Visible.Num() - Settings.HistorySamples);
 			}
 			if (Visible.Num() == 0)
 			{
@@ -473,6 +702,16 @@ struct FJUSYNCPathlineManager::FImpl
 					continue;
 				}
 			}
+			if (Settings.bFilterByHue)
+			{
+				float Hue = 0.0f;
+				float Saturation = 0.0f;
+				RgbToHS(FLinearColor(ResolveColor(*Element, Settings, Latest)), Hue, Saturation);
+				if (HueDistance(Hue, Settings.FilterHue) > Settings.FilterHueTolerance)
+				{
+					continue;
+				}
+			}
 
 			++OutVisibleTracks;
 			if (Visible.Num() < 2)
@@ -480,136 +719,65 @@ struct FJUSYNCPathlineManager::FImpl
 				continue;
 			}
 
-			const FColor Color = ResolveColor(*Element, Settings, Latest);
-			auto AddRun = [&](int32 StartIndex, int32 EndIndex)
-			{
-				for (int32 NodeIndex = StartIndex + 1; NodeIndex <= EndIndex; ++NodeIndex)
-				{
-					const FPathlineNode& A = *Visible[NodeIndex - 1];
-					const FPathlineNode& B = *Visible[NodeIndex];
-					const FVector Delta = B.Position - A.Position;
-					if (Delta.SizeSquared() <= SMALL_NUMBER)
-					{
-						continue;
-					}
-
-					const FVector Direction = Delta.GetSafeNormal();
-					const FVector Reference = FMath::Abs(Direction.Z) < 0.9
-						? FVector::UpVector : FVector::RightVector;
-					const FVector Side = FVector::CrossProduct(Direction, Reference).GetSafeNormal();
-					const FVector Up = FVector::CrossProduct(Side, Direction).GetSafeNormal();
-
-					float Radius = BaseRadius;
-					if (Settings.bUsePointWidth)
-					{
-						const float Width = 0.5f * (A.Width + B.Width);
-						if (Width > 0.0f)
-						{
-							Radius *= Width;
-						}
-					}
-					Radius = FMath::Max(Radius, 0.001f);
-
-					const int32 BaseIndex = OutMesh.Points.Num();
-					for (int32 Ring = 0; Ring < 2; ++Ring)
-					{
-						const FVector Center = Ring == 0 ? A.Position : B.Position;
-						for (int32 SideIndex = 0; SideIndex < Sides; ++SideIndex)
-						{
-							const float Angle = 2.0f * PI * static_cast<float>(SideIndex) /
-								static_cast<float>(Sides);
-							const FVector Offset = (FMath::Cos(Angle) * Side + FMath::Sin(Angle) * Up) * Radius;
-							const FVector Position = Center + Offset;
-							OutMesh.Points.Add(FVector3f(
-								static_cast<float>(Position.X),
-								static_cast<float>(Position.Y),
-								static_cast<float>(Position.Z)));
-							const FVector Normal = Offset.GetSafeNormal();
-							OutMesh.Normals.Add(FVector3f(
-								static_cast<float>(Normal.X),
-								static_cast<float>(Normal.Y),
-								static_cast<float>(Normal.Z)));
-							OutMesh.UVs.Add(FVector2f(
-								static_cast<float>(SideIndex) / static_cast<float>(Sides),
-								static_cast<float>(Ring)));
-							OutMesh.VertexColors.Add(Color);
-						}
-					}
-
-					const int32 Ring0 = BaseIndex;
-					const int32 Ring1 = BaseIndex + Sides;
-					for (int32 SideIndex = 0; SideIndex < Sides; ++SideIndex)
-					{
-						const int32 Next = (SideIndex + 1) % Sides;
-						OutMesh.Triangles.Add(Ring0 + SideIndex);
-						OutMesh.Triangles.Add(Ring1 + SideIndex);
-						OutMesh.Triangles.Add(Ring0 + Next);
-
-						OutMesh.Triangles.Add(Ring0 + Next);
-						OutMesh.Triangles.Add(Ring1 + SideIndex);
-						OutMesh.Triangles.Add(Ring1 + Next);
-					}
-				}
-			};
-
 			int32 RunStart = 0;
 			for (int32 VisibleIndex = 1; VisibleIndex < Visible.Num(); ++VisibleIndex)
 			{
 				if (Visible[VisibleIndex]->bBreak)
 				{
-					AddRun(RunStart, VisibleIndex - 1);
+					EmitRun(RunStart, VisibleIndex - 1, nullptr, 0.0f);
 					RunStart = VisibleIndex;
 				}
 			}
-			AddRun(RunStart, Visible.Num() - 1);
+			EmitRun(RunStart, Visible.Num() - 1, TipNext, TipBlend);
 		}
 
-		OutMesh.bHasBakedColors = OutMesh.VertexColors.Num() > 0;
 		Stats.VisibleTracks = OutVisibleTracks;
 		Stats.LastBuildMs = (FPlatformTime::Seconds() - StartSeconds) * 1000.0;
 		return true;
 	}
 
-	void PostMesh(const FString& ElementName, FJUSYNCCompactMeshData&& Mesh, uint64 ItemGeneration)
+	void PostArrays(const FString& ElementName, FJUSYNCPathlineArrays&& Arrays,
+		uint64 ItemGeneration)
 	{
 		if (ItemGeneration != Generation.load())
 		{
 			return;
 		}
 
-		FJUSYNCCompactMeshRef MeshRef = MakeShared<FJUSYNCCompactMeshData, ESPMode::ThreadSafe>();
-		*MeshRef = MoveTemp(Mesh);
+		TSharedPtr<FJUSYNCPathlineArrays, ESPMode::ThreadSafe> Shared =
+			MakeShared<FJUSYNCPathlineArrays, ESPMode::ThreadSafe>();
+		*Shared = MoveTemp(Arrays);
 
 		FScopeLock Lock(&PendingLock);
 		if (ItemGeneration != Generation.load())
 		{
 			return;
 		}
-		FPendingMesh Pending;
+		FPendingArrays Pending;
 		Pending.ElementName = ElementName;
-		Pending.Mesh = MeshRef;
+		Pending.Arrays = Shared;
 		Pending.Generation = ItemGeneration;
-		PendingMeshes.Add(MoveTemp(Pending));
+		PendingArrays.Add(MoveTemp(Pending));
 	}
 
 	void BuildElementAndPost(const FString& ElementName, uint64 ItemGeneration)
 	{
-		FJUSYNCCompactMeshData Mesh;
+		FJUSYNCPathlineArrays Arrays;
 		int32 VisibleTracks = 0;
 		bool bFound = false;
 		{
 			FScopeLock Lock(&StateLock);
-			bFound = BuildLocked(ElementName, DisplaySampleId, Mesh, VisibleTracks);
+			bFound = BuildArraysLocked(ElementName, DisplaySampleId, Arrays, VisibleTracks);
 		}
 		if (bFound)
 		{
-			PostMesh(ElementName, MoveTemp(Mesh), ItemGeneration);
+			PostArrays(ElementName, MoveTemp(Arrays), ItemGeneration);
 		}
 	}
 
 	void RebuildAllAndPost(uint64 ItemGeneration)
 	{
-		TArray<TPair<FString, FJUSYNCCompactMeshData>> LocalMeshes;
+		TArray<TPair<FString, FJUSYNCPathlineArrays>> LocalArrays;
 		{
 			FScopeLock Lock(&StateLock);
 			if (!Settings.bEnabled)
@@ -618,18 +786,18 @@ struct FJUSYNCPathlineManager::FImpl
 			}
 			for (const TPair<FString, FElementState>& Pair : Elements)
 			{
-				FJUSYNCCompactMeshData Mesh;
+				FJUSYNCPathlineArrays Arrays;
 				int32 VisibleTracks = 0;
-				if (BuildLocked(Pair.Key, DisplaySampleId, Mesh, VisibleTracks))
+				if (BuildArraysLocked(Pair.Key, DisplaySampleId, Arrays, VisibleTracks))
 				{
-					LocalMeshes.Emplace(Pair.Key, MoveTemp(Mesh));
+					LocalArrays.Emplace(Pair.Key, MoveTemp(Arrays));
 				}
 			}
 		}
 
-		for (TPair<FString, FJUSYNCCompactMeshData>& Pair : LocalMeshes)
+		for (TPair<FString, FJUSYNCPathlineArrays>& Pair : LocalArrays)
 		{
-			PostMesh(Pair.Key, MoveTemp(Pair.Value), ItemGeneration);
+			PostArrays(Pair.Key, MoveTemp(Pair.Value), ItemGeneration);
 		}
 	}
 
@@ -642,6 +810,7 @@ struct FJUSYNCPathlineManager::FImpl
 
 		if (Item->Type == FWorkItem::EType::RebuildAll)
 		{
+			bRebuildQueued = false;
 			RebuildAllAndPost(Item->Generation);
 			return;
 		}
@@ -697,6 +866,12 @@ struct FJUSYNCPathlineManager::FImpl
 		{
 			return;
 		}
+
+		if (bRebuildQueued)
+		{
+			return;
+		}
+		bRebuildQueued = true;
 
 		TSharedPtr<FWorkItem> Item = MakeShared<FWorkItem>();
 		Item->Type = FWorkItem::EType::RebuildAll;
@@ -758,13 +933,16 @@ void FJUSYNCPathlineManager::SetSettings(const FJUSYNCPathlineSettings& NewSetti
 			NewSettings.TrackExpirySamples != Impl->Settings.TrackExpirySamples ||
 			NewSettings.SelectionSeed != Impl->Settings.SelectionSeed;
 		const bool bVisual =
-			NewSettings.TubeSides != Impl->Settings.TubeSides ||
+			NewSettings.NiagaraSystem != Impl->Settings.NiagaraSystem ||
 			NewSettings.Radius != Impl->Settings.Radius ||
 			NewSettings.RadiusScale != Impl->Settings.RadiusScale ||
 			NewSettings.bUsePointWidth != Impl->Settings.bUsePointWidth ||
 			NewSettings.bFilterEnabled != Impl->Settings.bFilterEnabled ||
 			NewSettings.FilterMin != Impl->Settings.FilterMin ||
 			NewSettings.FilterMax != Impl->Settings.FilterMax ||
+			NewSettings.bFilterByHue != Impl->Settings.bFilterByHue ||
+			NewSettings.FilterHue != Impl->Settings.FilterHue ||
+			NewSettings.FilterHueTolerance != Impl->Settings.FilterHueTolerance ||
 			NewSettings.bColorByScalar != Impl->Settings.bColorByScalar ||
 			NewSettings.ColorMin != Impl->Settings.ColorMin ||
 			NewSettings.ColorMax != Impl->Settings.ColorMax ||
@@ -825,7 +1003,7 @@ void FJUSYNCPathlineManager::Reset()
 	}
 	{
 		FScopeLock Lock(&Impl->PendingLock);
-		Impl->PendingMeshes.Reset();
+		Impl->PendingArrays.Reset();
 	}
 }
 
@@ -838,7 +1016,6 @@ void FJUSYNCPathlineManager::RemoveElement(const FString& ElementName)
 		if (bRemoved)
 		{
 			Impl->RefreshTotalsLocked();
-			// Invalidate queued work/pending meshes for the retired element.
 			Impl->Generation.fetch_add(1);
 		}
 	}
@@ -919,11 +1096,11 @@ void FJUSYNCPathlineManager::IngestSampleNow(const FString& ElementName,
 		Impl->Generation.load());
 }
 
-bool FJUSYNCPathlineManager::BuildGeometry(const FString& ElementName,
-	uint64 CutoffSampleId, FJUSYNCCompactMeshData& OutMesh, int32& OutVisibleTracks)
+bool FJUSYNCPathlineManager::BuildArrays(const FString& ElementName,
+	uint64 CutoffSampleId, FJUSYNCPathlineArrays& OutArrays, int32& OutVisibleTracks)
 {
 	FScopeLock Lock(&Impl->StateLock);
-	return Impl->BuildLocked(ElementName, CutoffSampleId, OutMesh, OutVisibleTracks);
+	return Impl->BuildArraysLocked(ElementName, CutoffSampleId, OutArrays, OutVisibleTracks);
 }
 
 void FJUSYNCPathlineManager::SetDisplaySampleId(uint64 SampleId)
@@ -934,6 +1111,10 @@ void FJUSYNCPathlineManager::SetDisplaySampleId(uint64 SampleId)
 		if (Impl->DisplaySampleId != SampleId)
 		{
 			Impl->DisplaySampleId = SampleId;
+			Impl->TipBlendAlpha = 0.0f;
+			Impl->bTipBlendActive =
+				Impl->TipBlendSeconds > 0.0f && SampleId != TNumericLimits<uint64>::Max();
+			Impl->TipBlendStartSeconds = FPlatformTime::Seconds();
 			bChanged = true;
 		}
 	}
@@ -949,116 +1130,70 @@ uint64 FJUSYNCPathlineManager::GetDisplaySampleId() const
 	return Impl->DisplaySampleId;
 }
 
+void FJUSYNCPathlineManager::SetDisplayTipBlendSeconds(float Seconds)
+{
+	FScopeLock Lock(&Impl->StateLock);
+	Impl->TipBlendSeconds = FMath::Clamp(Seconds, 0.0f, 4.0f);
+	if (Impl->TipBlendSeconds <= 0.0f)
+	{
+		Impl->bTipBlendActive = false;
+		Impl->TipBlendAlpha = 0.0f;
+	}
+}
+
+void FJUSYNCPathlineManager::TickDisplayBlend()
+{
+	bool bNeedsRebuild = false;
+	{
+		FScopeLock Lock(&Impl->StateLock);
+		if (Impl->bTipBlendActive)
+		{
+			const float Elapsed = static_cast<float>(FPlatformTime::Seconds() - Impl->TipBlendStartSeconds);
+			const float U = FMath::Clamp(Elapsed / FMath::Max(Impl->TipBlendSeconds, 0.001f), 0.0f, 1.0f);
+			const float Alpha = U * U * (3.0f - 2.0f * U);
+			if (Alpha >= 1.0f)
+			{
+				Impl->TipBlendAlpha = 1.0f;
+				Impl->bTipBlendActive = false;
+				bNeedsRebuild = true;
+			}
+			else if (!FMath::IsNearlyEqual(Alpha, Impl->TipBlendAlpha, 0.004f))
+			{
+				Impl->TipBlendAlpha = Alpha;
+				bNeedsRebuild = true;
+			}
+		}
+	}
+	if (bNeedsRebuild)
+	{
+		Impl->QueueRebuildAll();
+	}
+}
+
 void FJUSYNCPathlineManager::RequestRebuild()
 {
 	Impl->QueueRebuildAll();
 }
 
-void FJUSYNCPathlineManager::PumpGameThread(UWorld* World,
-	FJUSYNCPointCloudSpawner* Spawner, UMaterialInterface* Material)
+void FJUSYNCPathlineManager::DrainArrays(TArray<FCompletedArrays>& OutArrays)
 {
-	if (!IsInGameThread())
-	{
-		return;
-	}
+	FScopeLock Lock(&Impl->PendingLock);
+	OutArrays.Reset();
+	OutArrays.Reserve(Impl->PendingArrays.Num());
 
-	TArray<FPendingMesh> Pending;
+	const uint64 CurrentGeneration = Impl->Generation.load();
+	for (FPendingArrays& Pending : Impl->PendingArrays)
 	{
-		FScopeLock Lock(&Impl->PendingLock);
-		Pending = MoveTemp(Impl->PendingMeshes);
-	}
-
-	bool bEnabled = false;
-	UMaterialInterface* SettingsMaterial = nullptr;
-	TSet<FString> LiveElements;
-	{
-		FScopeLock Lock(&Impl->StateLock);
-		bEnabled = Impl->Settings.bEnabled;
-		SettingsMaterial = Impl->Settings.Material;
-		for (const TPair<FString, FElementState>& Pair : Impl->Elements)
-		{
-			LiveElements.Add(Pair.Key);
-		}
-	}
-
-	UMaterialInterface* UseMaterial = Material ? Material : SettingsMaterial;
-	const FVector SpawnLocation = Spawner
-		? Spawner->GetSpawnLocation() : FVector::ZeroVector;
-	const float SpawnScale = Spawner ? Spawner->GetSpawnScale() : 1.0f;
-	const FVector SpawnScale3D(SpawnScale);
-
-	if (!bEnabled)
-	{
-		for (auto It = Impl->PathlineActors.CreateIterator(); It; ++It)
-		{
-			if (AJUSYNCPathlineActor* Actor = It.Value().Get())
-			{
-				Actor->ClearMesh();
-				Actor->Destroy();
-			}
-			It.RemoveCurrent();
-		}
-		return;
-	}
-
-	// Remove actors for elements that no longer exist. This also handles Reset
-	// and structural re-sampling: the map is pruned before new actors arrive.
-	for (auto It = Impl->PathlineActors.CreateIterator(); It; ++It)
-	{
-		AJUSYNCPathlineActor* Actor = It.Value().Get();
-		if (!Actor || !LiveElements.Contains(It.Key()))
-		{
-			if (Actor)
-			{
-				Actor->ClearMesh();
-				Actor->Destroy();
-			}
-			It.RemoveCurrent();
-		}
-		else
-		{
-			Actor->SetActorLocation(SpawnLocation);
-			Actor->SetActorScale3D(SpawnScale3D);
-		}
-	}
-
-	for (FPendingMesh& Result : Pending)
-	{
-		if (Result.Generation != Impl->Generation.load() ||
-			!LiveElements.Contains(Result.ElementName) ||
-			!Result.Mesh.IsValid())
+		if (Pending.Generation != CurrentGeneration || !Pending.Arrays.IsValid())
 		{
 			continue;
 		}
-
-		AJUSYNCPathlineActor* Actor = nullptr;
-		if (TWeakObjectPtr<AJUSYNCPathlineActor>* Existing =
-			Impl->PathlineActors.Find(Result.ElementName))
-		{
-			Actor = Existing->Get();
-		}
-
-		if (!Actor && World)
-		{
-			FActorSpawnParameters SpawnParameters;
-			SpawnParameters.SpawnCollisionHandlingOverride =
-				ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-			SpawnParameters.ObjectFlags |= RF_Transient;
-			Actor = World->SpawnActor<AJUSYNCPathlineActor>(
-				AJUSYNCPathlineActor::StaticClass(), FTransform::Identity, SpawnParameters);
-			if (Actor)
-			{
-				Impl->PathlineActors.Add(Result.ElementName, Actor);
-			}
-		}
-
-		if (Actor)
-		{
-			Actor->SetActorLocation(SpawnLocation);
-			Actor->SetActorScale3D(SpawnScale3D);
-			Actor->ApplyMesh(*Result.Mesh, UseMaterial);
-		}
+		FCompletedArrays Completed;
+		Completed.ElementName = MoveTemp(Pending.ElementName);
+		Completed.Arrays = MoveTemp(Pending.Arrays);
+		OutArrays.Add(MoveTemp(Completed));
 	}
+	Impl->PendingArrays.Reset();
 }
 
 FJUSYNCPathlineStats FJUSYNCPathlineManager::GetStats() const

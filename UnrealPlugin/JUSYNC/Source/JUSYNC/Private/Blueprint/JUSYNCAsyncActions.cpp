@@ -215,8 +215,6 @@ void UJUSYNCAsyncLoadUSD::Activate()
                 bSuccess = UJUSYNCBlueprintLibrary::LoadUSDFromBuffer(BufferDataCopy, FilenameDataCopy, MeshData, Preview);
             }
 
-            // Return to game thread for Blueprint callback (check if object still exists)
-
             AsyncTask(ENamedThreads::GameThread, [WeakThis, bSuccess, MeshData]()
                 {
                     if (UJUSYNCAsyncLoadUSD* StrongThis = WeakThis.Get())
@@ -319,7 +317,6 @@ UWorld* UJUSYNCAsyncReceiveFiles::GetWorld() const
     return nullptr;
 }
 
-
 void UJUSYNCAsyncReceiveFiles::Activate()
 {
     UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Async: Activate() called"));
@@ -350,7 +347,6 @@ void UJUSYNCAsyncReceiveFiles::Activate()
 
     UE_LOG(LogJUSYNC, Log, TEXT("JUSYNC Async: Timer setup complete"));
 }
-
 
 void UJUSYNCAsyncReceiveFiles::CheckForFiles()
 {

@@ -19,7 +19,7 @@ FJUSYNCRealtimeMeshData FJUSYNCRealtimeMeshData::FromStandardMesh(const FJUSYNCM
         }
         else
         {
-            Vertex.Normal = FVector::UpVector; // Default normal
+            Vertex.Normal = FVector::UpVector;
         }
 
         if (i < StandardMesh.UVs.Num())
@@ -28,7 +28,7 @@ FJUSYNCRealtimeMeshData FJUSYNCRealtimeMeshData::FromStandardMesh(const FJUSYNCM
         }
         else
         {
-            Vertex.UV = FVector2D::ZeroVector; // Default UV
+            Vertex.UV = FVector2D::ZeroVector;  // Default UV
         }
 
         if (i < StandardMesh.VertexColors.Num())
@@ -37,7 +37,7 @@ FJUSYNCRealtimeMeshData FJUSYNCRealtimeMeshData::FromStandardMesh(const FJUSYNCM
         }
         else
         {
-            Vertex.Color = FColor::White; // Default color
+            Vertex.Color = FColor::White;
         }
 
         RealtimeMesh.Vertices.Add(Vertex);
@@ -46,7 +46,6 @@ FJUSYNCRealtimeMeshData FJUSYNCRealtimeMeshData::FromStandardMesh(const FJUSYNCM
     RealtimeMesh.Triangles = StandardMesh.Triangles;
     return RealtimeMesh;
 }
-
 
 FJUSYNCMeshData FJUSYNCRealtimeMeshData::ToStandardMesh() const
 {

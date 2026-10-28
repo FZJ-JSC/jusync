@@ -3,13 +3,11 @@
 #include "CoreMinimal.h"
 #include "Modules/ModuleManager.h"
 
-
 DECLARE_LOG_CATEGORY_EXTERN(LogJUSYNC, Log, All)
 
 #define JUSYNC_VERBOSE_LOGGING 0
 
 #define JUSYNC_ENABLE_USD_PREVIEW 0
-
 
 class FJUSYNCModule : public IModuleInterface {
 public:

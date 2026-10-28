@@ -44,7 +44,6 @@ public:
 
     void ApplyCachedGradientToSpawner();
 
-
     UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "JUSYNC|LiDAR", meta = (ClampMin = "0"))
     int32 LidarPointBudget = 2500000;
 
@@ -59,7 +58,6 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|LiDAR")
     void ApplyLidarPerformanceCvars() const;
-
 
     UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "JUSYNC|Mesh")
     bool bEnableSpawnedMeshCollision = true;
@@ -169,7 +167,6 @@ public:
         URealtimeMeshComponent* RealtimeMeshComponent,
         RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams = nullptr
     );
-
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Mesh|Legacy", DisplayName = "Batch Create Realtime Meshes From JUSYNC (Legacy)")
     bool BatchCreateRealtimeMeshesFromJUSYNC(const TArray<FJUSYNCMeshData>& MeshDataArray, const TArray<URealtimeMeshComponent*>& MeshComponents);
@@ -315,7 +312,6 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC Broker", DisplayName = "Request Worker Count Excluding Rank0 (Sync)")
     bool RequestWorkerCountExcludingRank0(int32 TimeoutMs, int32& OutWorkerCount);
 
-
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Metrics")
     void ConfigureMetrics(const FJUSYNCMetricsConfig& NewConfig);
 
@@ -405,14 +401,11 @@ private:
 
     mutable FCriticalSection MiddlewareMutex;
 
-    // Serializes USD parsing. tinyusdz is NOT thread-safe, so parses must run one-at-a-time.
-
     mutable FCriticalSection ParseMutex;
     std::atomic<bool> bIsInitialized{ false };
 
     TMap<FString, TSoftObjectPtr<UMaterialInterface>> MaterialCache;
     mutable FCriticalSection MaterialCacheMutex;
-
 
     FJUSYNCMetricsConfig MetricsConfig;
     FJUSYNCMetricsData CurrentMetrics;

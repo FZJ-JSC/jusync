@@ -119,8 +119,6 @@ bool JUSYNCBuildRealtimeMeshStreams(const FJUSYNCCompactMeshData& MeshData, Real
         return false;
     }
 
-    // Same UV layout as the morph (PrevPositions) variant: 3 float UV sets, UV1/UV2 zeroed
-    // so the morph material's WPO delta reads exactly 0 when not blending.
     auto Builder = RealtimeMesh::TRealtimeMeshBuilderLocal<uint32, FPackedNormal, FVector2f, 3>(OutStreams);
     Builder.EnableTangents();
     Builder.EnableTexCoords();
@@ -310,10 +308,6 @@ bool JUSYNCBuildRealtimeMeshStreams(const FJUSYNCCompactMeshData& MeshData, Real
             ? FVector2f(MeshData.UVs[i])
             : FVector2f::ZeroVector);
 
-        // Delta (prev - current) in component space, split across UV1/UV2: the morph
-        // material's WPO branch reads UV1 as (dX,dY) and UV2 as (dZ,~) and offsets the
-        // vertex by (dX,dY,dZ) * (1 - JusyncMorphT) * JusyncMorphActive. Deltas are small
-        // (inter-sample drift), which also keeps float32 UV precision comfortable.
         const FVector3f PrevPos = Prev.IsValidIndex(i) ? Prev[i] : MeshData.Points[i];
         const FVector3f Delta = PrevPos - MeshData.Points[i];
         Builder.SetTexCoord(i, 1, FVector2f(Delta.X, Delta.Y));

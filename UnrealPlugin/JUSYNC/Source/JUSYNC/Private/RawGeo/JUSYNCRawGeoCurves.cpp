@@ -45,9 +45,6 @@ namespace
             NumComponents == 4 ? Quantize(Components[3]) : 255);
     }
 
-    // Expand one payload's polylines into side-facing tube triangles. Positions
-    // and normals are already in UE space; winding follows the (x,z,-y) rotation
-    // so the outward normal matches the ring direction.
     void BuildTubesInternal(const FJUSYNCRawGeoCurvePayload& Payload, FJUSYNCCompactMeshData& Out)
     {
         Out.ElementName = Payload.ElementName;
@@ -181,8 +178,6 @@ namespace
         }
     }
 
-    // Uniform-stride node reduction that always keeps each curve's endpoints.
-    // Returns true (and fills Out) only when the payload is over budget.
     bool DecimateCurvesToBudget(const FJUSYNCRawGeoCurvePayload& In, FJUSYNCRawGeoCurvePayload& Out)
     {
         static FThreadSafeCounter GCurveBudgetWarned;
@@ -195,8 +190,6 @@ namespace
             return false;
         }
 
-        // Reserve one node for each curve's mandatory last point, so the kept
-        // count (endpoints included) stays at or below the budget.
         const int32 Stride = FMath::Max(1, FMath::DivideAndRoundUp(Total - 1, MaxNodes - 1));
         if (GCurveBudgetWarned.GetValue() == 0)
         {
@@ -274,8 +267,6 @@ namespace
     constexpr int64 GCurveMergeDefaultBudgetKPoints = 16384;
     constexpr int32 GCurveMaxSubsets = 8;
 
-    // `full_curve_count` is wire metadata, not payload-sized. Cap it before
-    // allocating one TArray per curve from a malformed or hostile header.
     constexpr uint64 GCurveMaxFullCurves = 4ull * 1024ull * 1024ull;
 
     TAutoConsoleVariable<int32> CVarJusyncCurveProgressive(
@@ -283,9 +274,6 @@ namespace
         TEXT("RawGeo v3 curve refinement policy. 2 (default) = coarse subset 0 now, full mesh on completion; 1 = also emit after every subset; 0 = coarse only, drop refinements."),
         ECVF_Default);
 
-    // One frame's curve lattice. Curves are stored per ordinal (not per subset
-    // point), so concatenating in ordinal order is the same geometry a single
-    // S=1 payload carries.
     struct FJUSYNCRawGeoCurveMerge
     {
         int64 SubsetCount = 0;
@@ -318,7 +306,6 @@ namespace
         return GCurveMergeDefaultBudgetKPoints * 1024;
     }
 
-    // Caller holds the merge lock.
     void PruneCurveMergesLocked(double Now)
     {
         for (auto It = GRawGeoCurveMerges.CreateIterator(); It; ++It)
@@ -333,16 +320,12 @@ namespace
             }
         }
 
-        // The metadata-change warning set is only a de-duplicator; bound it so
-        // a long-lived session cannot grow it without limit.
         if (GRawGeoCurveWarnedKeys.Num() > 4096)
         {
             GRawGeoCurveWarnedKeys.Empty();
         }
     }
 
-    // Caller holds the merge lock. Drops least-recently-used frames until the
-    // new one fits; false when the stream alone is over the shared budget.
     bool CurveMergeKeyFitsBudgetLocked(int64 FullNumPoints)
     {
         const int64 Budget = CurveMergeBudgetPoints();
@@ -439,8 +422,6 @@ namespace
         return true;
     }
 
-    // Concatenates every filled ordinal in order, so an incomplete merge (policy
-    // 1) shows the curves that have arrived without holes in the middle.
     void BuildMergedCurvePayload(const FJUSYNCRawGeoCurveMerge& Merge, FJUSYNCRawGeoCurvePayload& Out)
     {
         Out.ElementName = Merge.PrimName;
@@ -512,9 +493,6 @@ namespace JUSYNCRawGeoCurves
             return false;
         }
 
-        // Every subset of a C-curve frame must carry exactly the curves with
-        // ordinals k, k+S, k+2S, ... . A short payload otherwise fills its slot
-        // and can complete a frame with missing geometry.
         const uint64 ExpectedCurves = Hdr.full_curve_count > Hdr.subset_index
             ? (Hdr.full_curve_count - Hdr.subset_index + Hdr.subset_count - 1) / Hdr.subset_count
             : 0;
@@ -648,7 +626,6 @@ namespace JUSYNCRawGeoCurves
         const int32 Policy = CVarJusyncCurveProgressive.GetValueOnAnyThread();
         if (Policy == 0)
         {
-            // Coarse-only mode: keep subset 0, drop every refinement.
             if (Subset == 0)
             {
                 EmitCurveTubes(Payload, OutMesh);
@@ -692,8 +669,6 @@ namespace JUSYNCRawGeoCurves
         {
             if (!CurveMergeKeyFitsBudgetLocked(Payload.FullNumPoints))
             {
-                // Over the shared budget: show this frame's coarse subset and
-                // let its refinements fall away.
                 if (Subset == 0)
                 {
                     EmitCurveTubes(Payload, OutMesh);
@@ -722,9 +697,6 @@ namespace JUSYNCRawGeoCurves
             GRawGeoCurveMergeTotalPoints += Merge->FullNumPoints;
         }
 
-        // A subset that arrives before subset 0 (possible with file ordering)
-        // must not permanently strip colors or widths from the merge. Upgrade
-        // the flags and backfill default values for slots already filled.
         if (Payload.bHasColors && !Merge->bHasColors)
         {
             Merge->bHasColors = true;

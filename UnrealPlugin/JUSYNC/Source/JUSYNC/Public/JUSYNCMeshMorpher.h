@@ -10,15 +10,13 @@ class UMaterialInstanceDynamic;
 class JUSYNC_API FJUSYNCMeshMorpher : public FTickableGameObject
 {
 public:
-    static const FName MorphTParameter;        // "JusyncMorphT"
-    static const FName MorphActiveParameter;   // "JusyncMorphActive"
+    static const FName MorphTParameter;  // "JusyncMorphT"
+    static const FName MorphActiveParameter;  // "JusyncMorphActive"
 
     explicit FJUSYNCMeshMorpher(TWeakObjectPtr<UObject> InOwner);
 
     enum class EApplyMode : uint8 { Normal, Blend };
 
-    // True when the material declares JusyncMorphT (and the WPO branch behind it),
-    // i.e. meshes drawn with it can be GPU-morphed.
     static bool IsMaterialMorphCapable(const UMaterialInterface* Material);
 
     EApplyMode BeginUpdate(URealtimeMeshComponent* Comp, UMaterialInterface* IntentMaterial,
@@ -53,7 +51,7 @@ private:
         double Duration = 0.0;
         bool bBlending = false;
         bool bHasTriHash = false;
-        bool bBlendByMatch = false; // last blend used cross-topology correspondence, not index alignment
+        bool bBlendByMatch = false;
 
         TWeakObjectPtr<UMaterialInstanceDynamic> MorphMID;
     };

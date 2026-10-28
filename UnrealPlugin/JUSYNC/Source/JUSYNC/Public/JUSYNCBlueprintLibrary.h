@@ -101,7 +101,6 @@ public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Legacy", DisplayName = "Request Worker Count Excluding Rank0 (Sync)")
     static bool RequestWorkerCountExcludingRank0(int32 TimeoutMs, int32& OutWorkerCount);
 
-
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request Total Worker Count Async")
     static void RequestTotalWorkerCountAsync(int32 TimeoutMs, const FOnTotalWorkerCountReceived& OnComplete, const FOnBrokerError& OnError);
 
@@ -253,7 +252,6 @@ public:
         UMaterialInterface* CustomMaterial,
         RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams);
 
-
     DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnBatchSpawnProgress,
         const TArray<AActor*>&, SpawnedActors, float, Progress);
 
@@ -264,7 +262,7 @@ public:
     static TArray<AActor*> BatchSpawnRealtimeMeshesAtLocations(
         const TArray<FJUSYNCMeshData>& MeshDataArray,
         const TArray<FVector>& SpawnLocations,
-        const TArray<FRotator>& SpawnRotations,  // Remove default parameter here
+        const TArray<FRotator>& SpawnRotations,
         bool bUseAsyncSpawning = false,
         int32 BatchSize = 5,
         float BatchDelay = 0.016f
@@ -302,7 +300,6 @@ public:
         const TArray<FVector>& SpawnLocations,
         const FOnPointCloudBatchSpawnedDyn& OnBatchSpawned);
 
-
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Reception")
     static bool CheckForReceivedFiles(TArray<FJUSYNCFileData>& OutReceivedFiles);
 
@@ -338,7 +335,6 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Validation", DisplayName = "Filter File List By Extensions (Array) With Sizes")
     static void FilterFileListByExtensionsWithSizes(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<FString>& AllowedExtensions, TArray<FString>& OutFilteredFiles, TArray<int64>& OutFilteredSizes);
-
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Validation", DisplayName = "Filter File List By Size (With Ranks)")
     static void FilterFileListBySizeWithRanks(const TArray<FString>& FileList, const TArray<int64>& FileSizes, const TArray<int32>& FileRanks, int32 MinimumSizeBytes,
@@ -383,8 +379,6 @@ public:
 
     static int64 QueryVRAMUsageBytes();
 
-    // Current process CPU usage (0.0-100.0) and active thread count.
-
     static float QueryCPUUsagePercent();
     static int32 QueryActiveThreadCount();
 
@@ -401,7 +395,7 @@ public:
     static TArray<AActor*> BatchSpawnRealtimeMeshesAtLocationsSync(
         const TArray<FJUSYNCMeshData>& MeshDataArray,
         const TArray<FVector>& SpawnLocations,
-        const TArray<FRotator>& SpawnRotations  // Remove default parameter here
+        const TArray<FRotator>& SpawnRotations
     );
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|RealtimeMesh Spawning", CallInEditor)
@@ -429,7 +423,6 @@ public:
         bool bUseUniformScaling = false, FVector OuterBoundingBoxSize = FVector::ZeroVector,
         bool bPreserveAspectRatio = true, bool bUseAsyncSpawning = true
     );
-
 
     static FBox CalculateMeshBounds(const FJUSYNCMeshData& MeshData, const FVector& Location);
 
@@ -473,7 +466,6 @@ private:
         int32 BatchSize,
         float BatchDelay
     );
-
 
 public:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
@@ -526,7 +518,6 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Benchmarking")
     static bool ExportClientBenchmarkReport(const FString& FilePath);
-
 
 private:
     UFUNCTION(BlueprintCallable, Category = "JUSYNC|Broker|Async", DisplayName = "Request File Async (Dynamic Timeout)")

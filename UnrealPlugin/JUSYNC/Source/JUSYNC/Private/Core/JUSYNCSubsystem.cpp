@@ -9,12 +9,14 @@
 #include "RealtimeMeshComponent.h"
 #include "JUSYNCModule.h"
 #include "HAL/FileManager.h"
+#include "HAL/ThreadSafeCounter.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Engine/GameInstance.h"
 #include "Kismet/GameplayStatics.h"
 #include "RealtimeMeshSimple.h"
 #include "JUSYNCStreamBuilder.h"
+#include "Core/JUSYNCRealtimeMeshUtil.h"
 #include "UObject/UObjectGlobals.h"
 #include "Misc/DateTime.h"
 #include "HAL/PlatformTime.h"
@@ -70,7 +72,6 @@ static bool JUSYNCGameSessionActive()
     return false;
 }
 
-
 static bool JUSYNCMatHasVertexColorNode(UMaterialInterface* Material)
 {
     if (!Material)
@@ -85,7 +86,6 @@ static bool JUSYNCMatHasVertexColorNode(UMaterialInterface* Material)
     }
     return BaseMat->HasAnyExpressionsInMaterialAndFunctionsOfType<UMaterialExpressionVertexColor>();
 #else
-    // The material expression graph is editor-only data; runtime builds cannot inspect it.
     return false;
 #endif
 }
@@ -326,7 +326,7 @@ extern "C" void FileReceivedCallback_Static(const CFileData* file_data)
 
 extern "C" void FileReceivedSpanCallback_Static(
     const char* filename,
-    const unsigned char* /*data*/,
+    const unsigned char*  ,
     size_t data_size,
     const char* hash,
     const char* file_type)
@@ -403,8 +403,6 @@ extern "C" void MessageReceivedCallback_Static(const char* message)
     }
 
     UE_LOG(LogJUSYNC, Log, TEXT("ZMQ Message: %s"), UTF8_TO_TCHAR(message));
-
-    // Create a copy of the message for the lambda (deep copy to avoid use-after-free)
 
     FString MessageCopy = FString(UTF8_TO_TCHAR(message));
 
@@ -858,7 +856,6 @@ static FJUSYNCMeshData ConvertCMeshDataToUE_Helper(const CMeshData& CMesh, bool 
     return UEMesh;
 }
 
-
 #endif
 
 UJUSYNCSubsystem::UJUSYNCSubsystem() = default;
@@ -944,7 +941,6 @@ bool UJUSYNCSubsystem::InitializeMiddleware(const FString& Endpoint)
     }
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
-    // A (re)connect invalidates any in-flight refinement merges.
     extern void JUSYNCFlushRawGeoMerges();
     JUSYNCFlushRawGeoMerges();
 
@@ -1083,7 +1079,6 @@ bool UJUSYNCSubsystem::StartReceiving()
 #endif
     return false;
 }
-
 
 void UJUSYNCSubsystem::StopReceiving()
 {
@@ -1288,8 +1283,8 @@ bool UJUSYNCSubsystem::LoadUSDFullFromBuffer(const TArray<uint8>& Buffer, const 
             pc.PointCount = static_cast<int32>(cpc.points_count);
             pc.bHasColors = cpc.has_colors != 0;
             pc.bHasNormals = cpc.has_normals != 0;
-            pc.BoundingBoxMin = FVector(cpc.bounding_box_min[0], cpc.bounding_box_min[2], -cpc.bounding_box_min[1]);
-            pc.BoundingBoxMax = FVector(cpc.bounding_box_max[0], cpc.bounding_box_max[2], -cpc.bounding_box_max[1]);
+            pc.BoundingBoxMin = FVector(cpc.bounding_box_min[0], cpc.bounding_box_min[2], -cpc.bounding_box_max[1]);
+            pc.BoundingBoxMax = FVector(cpc.bounding_box_max[0], cpc.bounding_box_max[2], -cpc.bounding_box_min[1]);
 
             if (cpc.points_count > 0 && cpc.positions)
             {
@@ -1361,8 +1356,6 @@ bool UJUSYNCSubsystem::LoadUSDFullFromBufferNoCopy(const TArray<uint8>& Buffer, 
     CPointCloudLayout* CloudLayouts = nullptr;
     size_t CloudCount = 0;
 
-    // C-call), serialized on ParseMutex like before.
-
     int Result = 0;
     {
         FScopeLock Lock(&ParseMutex);
@@ -1386,7 +1379,7 @@ bool UJUSYNCSubsystem::LoadUSDFullFromBufferNoCopy(const TArray<uint8>& Buffer, 
     {
         OutMeshData.SetNum(static_cast<int32>(MeshCount));
         CMeshDataFill* FillMeshes = reinterpret_cast<CMeshDataFill*>(FMemory::Malloc(MeshCount * sizeof(CMeshDataFill)));
-        FMemory::Memzero(FillMeshes, MeshCount * sizeof(CMeshDataFill)); // POD struct
+        FMemory::Memzero(FillMeshes, MeshCount * sizeof(CMeshDataFill));  // POD struct
 
         for (size_t i = 0; i < MeshCount; ++i)
         {
@@ -1434,7 +1427,7 @@ bool UJUSYNCSubsystem::LoadUSDFullFromBufferNoCopy(const TArray<uint8>& Buffer, 
     {
         OutPointCloudData.SetNum(static_cast<int32>(CloudCount));
         CPointCloudDataFill* FillClouds = reinterpret_cast<CPointCloudDataFill*>(FMemory::Malloc(CloudCount * sizeof(CPointCloudDataFill)));
-        FMemory::Memzero(FillClouds, CloudCount * sizeof(CPointCloudDataFill)); // POD struct
+        FMemory::Memzero(FillClouds, CloudCount * sizeof(CPointCloudDataFill));  // POD struct
 
         for (size_t i = 0; i < CloudCount; ++i)
         {
@@ -1490,8 +1483,8 @@ bool UJUSYNCSubsystem::LoadUSDFullFromBufferNoCopy(const TArray<uint8>& Buffer, 
         for (int32 i = 0; i < OutPointCloudData.Num(); ++i)
         {
             const CPointCloudDataFill& dst = FillClouds[i];
-            OutPointCloudData[i].BoundingBoxMin = FVector(dst.bounding_box_min[0], dst.bounding_box_min[2], -dst.bounding_box_min[1]);
-            OutPointCloudData[i].BoundingBoxMax = FVector(dst.bounding_box_max[0], dst.bounding_box_max[2], -dst.bounding_box_max[1]);
+            OutPointCloudData[i].BoundingBoxMin = FVector(dst.bounding_box_min[0], dst.bounding_box_min[2], -dst.bounding_box_max[1]);
+            OutPointCloudData[i].BoundingBoxMax = FVector(dst.bounding_box_max[0], dst.bounding_box_max[2], -dst.bounding_box_min[1]);
         }
         FMemory::Free(FillClouds);
     }
@@ -1509,12 +1502,6 @@ bool UJUSYNCSubsystem::LoadUSDFullFromBufferNoCopy(const TArray<uint8>& Buffer, 
 }
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
-// ---- RawGeo progressive refinement (wire v2) client merge ------------------
-// The sender cuts each frame into S complementary lattice subsets (subset k
-// carries source indices k, k+S, k+2S, ...). We scatter each arriving subset
-// into its lattice slot, so the completed merge is point-for-point identical
-// to a stride-1 stream. The coarse subset (k=0) emits immediately for a fast
-// first view; the completed cloud replaces it as a live update.
 static TAutoConsoleVariable<int32> CVarJusyncRawGeoProgressive(
     TEXT("jusync.RawGeo.Progressive"), 2,
     TEXT("RawGeo v2 refinement client policy. 2 (default) = emit coarse (subset 0) now, full cloud when all subsets merged; 1 = also emit after every subset; 0 = merge off (coarse-only, extra subsets dropped)."),
@@ -1567,6 +1554,10 @@ static void JUSYNCReadRawGeoAttributes(
     {
         FJUSYNCPointAttribute& Attribute = Out[static_cast<int32>(a)];
         Attribute.Name = UTF8_TO_TCHAR(Descs[a].name);
+        if (Attribute.Name.IsEmpty())
+        {
+            Attribute.Name = FString::Printf(TEXT("attribute%d"), a);
+        }
         Attribute.Components = static_cast<int32>(Descs[a].components);
         const int64 Values = Count * Attribute.Components;
         Attribute.Values.SetNumUninitialized(static_cast<int32>(Values));
@@ -1673,8 +1664,6 @@ static FJUSYNCPointCloudRef JUSYNCBuildCloudFromMergedPoints(
 
 static bool JUSYNCMergeKeyFitsBudget(int64 FullN, FString& OutEvictNote)
 {
-    // Caller holds GRawGeoMergeLock. Drops oldest-use entries until the new
-    // merge fits; returns false only when the stream alone exceeds budget.
     const int64 Budget = FMath::Max<int64>(1024,
         (int64)CVarJusyncRawGeoRefineBudget.GetValueOnAnyThread() * 1024);
     if (FullN > Budget)
@@ -1730,7 +1719,6 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
     FMemory::Memcpy(&Hdr, Src, HdrSize);
     if (MaybeVersion == 1)
     {
-        // v1 payload = whole frame; a valid prefix of the v2 struct.
         Hdr.subset_index = 0;
         Hdr.subset_count = 1;
         Hdr.full_num_points = Hdr.num_points;
@@ -1738,8 +1726,6 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
     if (!Hdr.valid(Src, (size_t)Buffer.Num()))
         return false;
 
-    // v3 curves carry whole polylines instead of a point lattice; they render
-    // as meshes, so they branch off before the zero-point guard below.
     if (Hdr.version == JUSYNC_RAWGEO_VERSION &&
         Hdr.topology == JUSYNC_RAWGEO_TOPOLOGY_LINEAR_CURVES)
     {
@@ -1771,6 +1757,30 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
     }
     if ((uint64)Buffer.Num() < Expected)
         return false;
+
+    {
+        static FThreadSafeCounter RawGeoAttrDumpCount(0);
+        const int32 DumpIndex = RawGeoAttrDumpCount.Increment();
+        if (DumpIndex <= 3 || DumpIndex % 300 == 0)
+        {
+            FString AttrDump;
+            bool bHasIdAttr = false;
+            for (uint32 a = 0; a < Hdr.num_attributes; ++a)
+            {
+                const FString AttrName(Descs[a].name);
+                bHasIdAttr |= (strcmp(Descs[a].name, "particle_id") == 0);
+                AttrDump += FString::Printf(TEXT(" %u:%s x%u"), a,
+                    AttrName.IsEmpty() ? *FString::Printf(TEXT("<empty>=attribute%u"), a) : *AttrName,
+                    Descs[a].components);
+            }
+            UE_LOG(LogJUSYNC, Display,
+                TEXT("RawGeo attrs #%d file='%s' pts=%llu attrs=%u colors=%u rows=%llu idAttr=%d:%s"),
+                DumpIndex, *FPaths::GetCleanFilename(Filename), (unsigned long long)Hdr.num_points,
+                Hdr.num_attributes, (uint32)Hdr.color_components,
+                (unsigned long long)Hdr.attr_uniform_count,
+                bHasIdAttr ? 1 : 0, *AttrDump);
+        }
+    }
 
     const float* PosF = reinterpret_cast<const float*>(Src + HdrSize + AttrTableBytes);
     const float* ColF = nullptr;
@@ -1834,7 +1844,6 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
 
     if (!bSub)
     {
-        // Whole-frame payload (v1 or a v2 single-shot): historical path.
         auto PC = MakeShared<FJUSYNCPointCloudData, ESPMode::ThreadSafe>();
         PC->ElementName = ElementName;
         PC->TypeName = TEXT("GeomPoints");
@@ -1904,8 +1913,8 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
             }
         }
 
-        PC->BoundingBoxMin = FVector(MinU[0], MinU[2], -MinU[1]);
-        PC->BoundingBoxMax = FVector(MaxU[0], MaxU[2], -MaxU[1]);
+        PC->BoundingBoxMin = FVector(MinU[0], MinU[2], -MaxU[1]);
+        PC->BoundingBoxMax = FVector(MaxU[0], MaxU[2], -MinU[1]);
 
         OutCloud = MoveTemp(PC);
         return true;
@@ -1915,8 +1924,6 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
     const uint64 S = Hdr.subset_count;
     const uint64 K = Hdr.subset_index;
     const uint64 FullN = Hdr.full_num_points;
-    // Lattice consistency: the payload must be exactly the points
-    // K, K+S, ... below FullN.
     const uint64 ExpectedSubsetN = (FullN > K) ? (FullN - K + S - 1) / S : 0;
     if (S < 2 || S > 4096 || FullN > (uint64)MAX_int32 || (uint64)N != ExpectedSubsetN)
     {
@@ -1929,7 +1936,6 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
     {
         if (K == 0)
         {
-            // Coarse-only: show what the base carries, ignore the rest.
             TArray<FLidarPointCloudPoint> Pts;
             Pts.SetNumUninitialized((int32)N);
             ParallelFor((int32)N, [&](int32 i) { Pts[i] = MakePoint(i); });
@@ -1945,7 +1951,6 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
 
     FScopeLock Lock(&GRawGeoMergeLock);
 
-    // Age out abandoned merges (dropped subsets, dead sessions).
     for (auto It = GRawGeoMerges.CreateIterator(); It; ++It)
     {
         if (NowSeconds - It.Value().LastUseSeconds > 300.0)
@@ -1984,11 +1989,9 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
                     ElementName, Hdr.color_components != 0, false, MoveTemp(Pts), {},
                     MoveTemp(SubsetAttributes), false, (int32)FullN, Hdr.time);
             }
-            return true; // subsets beyond the coarse base: dropped
+            return true;  // subsets beyond the coarse base: dropped
         }
 
-        // A fresh timestep for an element replaces that element's older-time
-        // merges (their windows are gone with the superseded spawns anyway).
         for (auto It = GRawGeoMerges.CreateIterator(); It; ++It)
         {
             if (It.Value().PrimName == ElementName && It.Value().Time != Hdr.time)
@@ -2024,7 +2027,6 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
 
     Merge->LastUseSeconds = NowSeconds;
 
-    // Scatter this subset into its lattice slots (idempotent on re-delivery).
     for (int64 j = 0; j < N; ++j)
     {
         const int64 Idx = (int64)(K + (uint64)j * S);
@@ -2062,9 +2064,6 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
 
     if (!bEmit)
     {
-        // Intermediate subset: density improved, but don't thrash the client
-        // with a rebuild per subset. Coarse is on screen; the FULL emit lands
-        // when the merge completes.
         return true;
     }
 
@@ -2084,7 +2083,6 @@ static bool JUSYNCParseRawGeoBuffer(const TArray<uint8>& Buffer, const FString& 
     }
     else
     {
-        // Partial (coarse or per-subset policy): compact the filled lattice.
         OutPts.SetNumUninitialized((int32)Merge->Filled);
         if (bOutWidths)
             OutW.SetNumUninitialized((int32)Merge->Filled);
@@ -2138,18 +2136,14 @@ void JUSYNCFlushRawGeoMerges()
     GRawGeoMergeTotalPoints = 0;
     JUSYNCRawGeoCurves::FlushMerges();
 }
-#endif // WITH_ANARI_USD_MIDDLEWARE
+#endif  // WITH_ANARI_USD_MIDDLEWARE
 
-// Streamed USD scenes (ParaView/VTK export) are right-handed Y-up. Map compact mesh
-// vertices/normals with the same (x,z,-y) rotation the point-cloud path applies.
 static TAutoConsoleVariable<int32> CVarJusyncMeshConvertYUp(
     TEXT("jusync.Mesh.ConvertUSDYUp"),
     1,
     TEXT("Compact streamed meshes: map USD (x,y,z) to UE (x,z,-y) like the point clouds. 0 = raw coordinates (legacy behavior)."),
     ECVF_Default);
 
-// (x,z,-y) is a pure rotation, so triangle winding is preserved. If faces still render
-// inside-out (culled/wrong-lit), flip this to swap the 2nd/3rd index of every triangle.
 static TAutoConsoleVariable<int32> CVarJusyncMeshFlipWinding(
     TEXT("jusync.Mesh.FlipWinding"),
     0,
@@ -2157,8 +2151,6 @@ static TAutoConsoleVariable<int32> CVarJusyncMeshFlipWinding(
     ECVF_Default);
 
 #ifdef WITH_ANARI_USD_MIDDLEWARE
-// RawGeo curve meshes return before the USD finalize loop below, so apply the
-// same winding knob and normal cleanup here.
 static void JUSYNCFinalizeCurveMesh(FJUSYNCCompactMeshData& Mesh)
 {
     if (CVarJusyncMeshFlipWinding.GetValueOnAnyThread() != 0)
@@ -2214,10 +2206,6 @@ bool UJUSYNCSubsystem::LoadUSDFullCompactFromBuffer(const TArray<uint8>& Buffer,
                         CurveMesh->Triangles.Num() / 3, *Filename);
                     OutMeshes.Add(CurveMesh);
                 }
-                // Progressive refinement: intermediate subsets parse successfully
-                // but deliberately emit no cloud (the merge is still filling in;
-                // the coarse base is already on screen and the completed cloud
-                // arrives with the last subset). Nothing to spawn in that case.
                 if (Cloud.IsValid())
                 {
                     const int32 PointCount = Cloud->PointCount;
@@ -2312,11 +2300,6 @@ bool UJUSYNCSubsystem::LoadUSDFullCompactFromBuffer(const TArray<uint8>& Buffer,
         {
             FJUSYNCCompactMeshData& Mesh = *OutMeshes[i];
 
-            // The middleware's compact mesh fill already mirrors Y
-            // ((x,y,z) -> (x,-y,z)), because USD is right-handed. Undo that
-            // mirror with a plain Y/Z swap so the result is (x,z,-y) in UE,
-            // exactly like the RawGeo point-cloud path. The combined transform
-            // has determinant +1, so triangle winding is preserved.
             if (CVarJusyncMeshConvertYUp.GetValueOnAnyThread() != 0)
             {
                 const bool bFlipWinding = CVarJusyncMeshFlipWinding.GetValueOnAnyThread() != 0;
@@ -2354,9 +2337,6 @@ bool UJUSYNCSubsystem::LoadUSDFullCompactFromBuffer(const TArray<uint8>& Buffer,
             }
             Mesh.bHasBakedColors = Mesh.VertexColors.Num() > 0;
 
-            // Diagnostic for the morph pipeline: if these hashes/bounds are
-            // identical across successive refreshes, the sender is still
-            // exporting the same vertex positions (the mesh cannot morph).
             if (Mesh.Points.Num() > 0)
             {
                 uint64 H = 1469598103934665603ull;
@@ -2439,8 +2419,8 @@ bool UJUSYNCSubsystem::LoadUSDFullCompactFromBuffer(const TArray<uint8>& Buffer,
         for (int32 i = 0; i < OutPointCloudData.Num(); ++i)
         {
             const CPointCloudDataFill& dst = FillClouds[i];
-            OutPointCloudData[i]->BoundingBoxMin = FVector(dst.bounding_box_min[0], dst.bounding_box_min[2], -dst.bounding_box_min[1]);
-            OutPointCloudData[i]->BoundingBoxMax = FVector(dst.bounding_box_max[0], dst.bounding_box_max[2], -dst.bounding_box_max[1]);
+            OutPointCloudData[i]->BoundingBoxMin = FVector(dst.bounding_box_min[0], dst.bounding_box_min[2], -dst.bounding_box_max[1]);
+            OutPointCloudData[i]->BoundingBoxMax = FVector(dst.bounding_box_max[0], dst.bounding_box_max[2], -dst.bounding_box_min[1]);
         }
         FMemory::Free(FillClouds);
     }
@@ -2725,7 +2705,7 @@ void RecalculateNormals(FJUSYNCMeshData& MeshData)
         MeshData.Normals[i] = MeshData.Normals[i].GetSafeNormal();
         if (MeshData.Normals[i].IsNearlyZero())
         {
-            MeshData.Normals[i] = FVector::UpVector; // Fallback normal
+            MeshData.Normals[i] = FVector::UpVector;
         }
     }
 
@@ -2797,7 +2777,7 @@ bool UJUSYNCSubsystem::UpdateRealtimeMeshFromJUSYNC(
     const FRealtimeMeshSectionGroupKey GroupKey = FRealtimeMeshSectionGroupKey::Create(0, TEXT("USDGroup"));
     const FRealtimeMeshSectionKey SectionKey = FRealtimeMeshSectionKey::CreateForPolyGroup(GroupKey, 0);
 
-    if (RealtimeMesh->GetSectionGroup(GroupKey))
+    if (JUSYNCRealtimeMeshHasSectionGroup(RealtimeMesh, GroupKey))
     {
         RealtimeMesh->UpdateSectionGroup(GroupKey, MoveTemp(Streams));
     }
@@ -2836,8 +2816,6 @@ static TAutoConsoleVariable<float> CVarJUSyncMeshEmissiveFloor(
     TEXT(" Re-applied to the mesh MIDs on every streamed update, so it can be tuned live."),
     ECVF_Default);
 
-// Applies the live brightness knob to a mesh material. Returns a MID when the material
-// exposes EmissiveFloor; callers should use the return value (if any) as the material.
 static UMaterialInstanceDynamic* ApplyMeshEmissiveFloor(UMaterialInterface* Base, UObject* Outer)
 {
     if (!Base || !Outer)
@@ -2862,8 +2840,6 @@ static UMaterialInstanceDynamic* ApplyMeshEmissiveFloor(UMaterialInterface* Base
     return MID;
 }
 
-// One morph-MID per streamed component so concurrent meshes ramp independently;
-// weak on both ends so the cache never keeps a mesh or material alive.
 static TMap<TWeakObjectPtr<URealtimeMeshComponent>, TWeakObjectPtr<UMaterialInstanceDynamic>>
     GJUSyncMorphOverrideMIDs;
 
@@ -2963,8 +2939,6 @@ bool UJUSYNCSubsystem::UpdateRealtimeMeshFromJUSYNC_WithCompact(
                        == FJUSYNCMeshMorpher::EApplyMode::Blend);
     }
 
-    // Diagnostic: distinguishes "geometry never reached the component" from
-    // "the update landed but the GPU blend did not engage".
     {
         float MaxDelta = 0.0f;
         if (bMorphBlend && MorphPrev.Num() == MeshData.Points.Num())
@@ -3040,10 +3014,6 @@ bool UJUSYNCSubsystem::UpdateRealtimeMeshFromJUSYNC_WithCompact(
     const FRealtimeMeshSectionGroupKey GroupKey = FRealtimeMeshSectionGroupKey::Create(0, TEXT("USDGroup"));
     const FRealtimeMeshSectionKey SectionKey = FRealtimeMeshSectionKey::CreateForPolyGroup(GroupKey, 0);
 
-    // Order matters: MID parameter writes enqueue immediately, so game-thread call order is
-    // render-queue order. Geometry must not swap before the morph state is committed, or one
-    // frame draws the new positions with the previous blend's finished T~1 (visible end-of-
-    // blend "chop").
     if (ActiveMaterial)
     {
         RealtimeMeshComponent->SetMaterial(0, ActiveMaterial);
@@ -3055,7 +3025,7 @@ bool UJUSYNCSubsystem::UpdateRealtimeMeshFromJUSYNC_WithCompact(
                             bMorphBlend, MoveTemp(MorphPrev));
     }
 
-    if (RealtimeMesh->GetSectionGroup(GroupKey))
+    if (JUSYNCRealtimeMeshHasSectionGroup(RealtimeMesh, GroupKey))
     {
         RealtimeMesh->UpdateSectionGroup(GroupKey, MoveTemp(Streams));
     }
@@ -3162,7 +3132,6 @@ bool UJUSYNCSubsystem::CreateRealtimeMeshFromJUSYNC_WithStreams(
     {
         UE_LOG(LogJUSYNC, Log, TEXT("Using provided material (preserving texture material from Blueprint)"));
     }
-
 
     RealtimeMesh::FRealtimeMeshStreamSet Streams;
     if (PrebuiltStreams)
@@ -3495,9 +3464,9 @@ TArray<FJUSYNCMeshData> UJUSYNCSubsystem::SplitLargeMeshForRealtimeMesh(
     UE_LOG(LogJUSYNC, Log, TEXT("Splitting into %d chunks (%dx%dx%d grid)"),
            NumChunks, GridCellsPerAxis, GridCellsPerAxis, GridCellsPerAxis);
 
-    TArray<TArray<int32>> ChunkVertices;  // Vertex indices per chunk
-    TArray<TArray<int32>> ChunkTriangles; // Triangle indices per chunk
-    TArray<TMap<int32, int32>> VertexRemapping; // Original -> Chunk vertex mapping
+    TArray<TArray<int32>> ChunkVertices;
+    TArray<TArray<int32>> ChunkTriangles;
+    TArray<TMap<int32, int32>> VertexRemapping;
 
     ChunkVertices.SetNum(NumChunks);
     ChunkTriangles.SetNum(NumChunks);
@@ -3652,7 +3621,7 @@ bool UJUSYNCSubsystem::CheckMemoryLimitsForMesh(
     UE_LOG(LogJUSYNC, Log, TEXT("Mesh: %d vertices, %d triangles"), TotalVertices, TotalTriangles);
     UE_LOG(LogJUSYNC, Log, TEXT("Safety margin: %.1f%%"), SafetyMarginPercent);
 
-    float BytesPerVertex = 36.0f; // Conservative estimate
+    float BytesPerVertex = 36.0f;
     float BytesPerTriangle = 12.0f;
 
     if (MeshData.Normals.Num() > 0) BytesPerVertex += 12.0f;
@@ -3733,7 +3702,7 @@ TArray<URealtimeMeshComponent*> UJUSYNCSubsystem::CreateMultipleRMCComponentsFor
     TArray<FJUSYNCMeshData> SplitMeshes = this->SplitLargeMeshForRealtimeMesh(
         LargeMesh,
         MaxVerticesPerComponent,
-        true); // Preserve connectivity
+        true);
 
     if (SplitMeshes.Num() == 0)
     {
@@ -3782,7 +3751,6 @@ TArray<URealtimeMeshComponent*> UJUSYNCSubsystem::CreateMultipleRMCComponentsFor
     UE_LOG(LogJUSYNC, Log, TEXT("Created %d RMC components for large mesh"), CreatedComponents.Num());
     return CreatedComponents;
 }
-
 
 bool UJUSYNCSubsystem::BatchCreateRealtimeMeshesFromJUSYNC(const TArray<FJUSYNCMeshData>& MeshDataArray, const TArray<URealtimeMeshComponent*>& MeshComponents)
 {
@@ -3838,7 +3806,6 @@ bool UJUSYNCSubsystem::BatchCreateRealtimeMeshesFromJUSYNC(const TArray<FJUSYNCM
     return bAllSuccessful.load();
 }
 
-
 FJUSYNCRealtimeMeshData UJUSYNCSubsystem::ConvertToRealtimeMeshFormat(const FJUSYNCMeshData& StandardMesh)
 {
     FJUSYNCRealtimeMeshData RealtimeMesh;
@@ -3884,7 +3851,6 @@ FJUSYNCRealtimeMeshData UJUSYNCSubsystem::ConvertToRealtimeMeshFormat(const FJUS
     RealtimeMesh.Triangles = StandardMesh.Triangles;
     return RealtimeMesh;
 }
-
 
 bool UJUSYNCSubsystem::LoadPointCloudFromBuffer(const TArray<uint8>& Buffer, const FString& Filename, TArray<FJUSYNCPointCloudData>& OutPointCloudData)
 {
@@ -3943,8 +3909,8 @@ bool UJUSYNCSubsystem::LoadPointCloudFromBuffer(const TArray<uint8>& Buffer, con
         pc.bHasColors = cpc.has_colors != 0;
         pc.bHasNormals = cpc.has_normals != 0;
 
-        pc.BoundingBoxMin = FVector(cpc.bounding_box_min[0], cpc.bounding_box_min[2], -cpc.bounding_box_min[1]);
-        pc.BoundingBoxMax = FVector(cpc.bounding_box_max[0], cpc.bounding_box_max[2], -cpc.bounding_box_max[1]);
+        pc.BoundingBoxMin = FVector(cpc.bounding_box_min[0], cpc.bounding_box_min[2], -cpc.bounding_box_max[1]);
+        pc.BoundingBoxMax = FVector(cpc.bounding_box_max[0], cpc.bounding_box_max[2], -cpc.bounding_box_min[1]);
 
         if (cpc.points_count > 0 && cpc.positions)
         {
@@ -4043,8 +4009,6 @@ AActor* UJUSYNCSubsystem::SpawnLidarPointCloudAtLocation(const FJUSYNCPointCloud
     int32 PointCount = PointCloudData.PointCount;
     FString ElementNameCopy = PointCloudData.ElementName;
 
-    // Copy gradient LUT for thread-safe use (same as spawner path)
-
     TArray<FColor> PCLUT = PCSpawner.IsValid() ? PCSpawner->GetGradientLUT() : TArray<FColor>();
     bool bUseGradient = PCLUT.Num() > 0 && !bHasColors && Widths.Num() > 0;
     FJUSYNCPointCloudSpawner* PCSpawnerPtr = PCSpawner.Get();
@@ -4052,8 +4016,6 @@ AActor* UJUSYNCSubsystem::SpawnLidarPointCloudAtLocation(const FJUSYNCPointCloud
     TWeakObjectPtr<ALidarPointCloudActor> WeakActor = SpawnedActor;
     TWeakObjectPtr<ULidarPointCloudComponent> WeakComp = Comp;
     FString ElementNameForLog = PointCloudData.ElementName;
-
-    // UObject creation must happen on the game thread. The point array is still built asynchronously.
 
     ULidarPointCloud* LidarCloud = NewObject<ULidarPointCloud>(SpawnedActor);
     LidarCloud->SetOptimizedForDynamicData(true);
@@ -4080,8 +4042,6 @@ AActor* UJUSYNCSubsystem::SpawnLidarPointCloudAtLocation(const FJUSYNCPointCloud
             }
             else
             {
-                // Neutral gray instead of white (see FJUSYNCPointCloudSpawner legacy path):
-                // white point clouds glare like a glow until recolored.
                 col = FColor(128, 128, 128);
             }
             Points[i] = FLidarPointCloudPoint(pos.X, pos.Y, pos.Z, col.R / 255.f, col.G / 255.f, col.B / 255.f, col.A / 255.f);
@@ -4230,7 +4190,6 @@ void UJUSYNCSubsystem::BatchSpawnPointCloudsAtLocations_Async(
     });
 }
 
-
 UTexture2D* UJUSYNCSubsystem::CreateUETextureFromJUSYNC(const FJUSYNCTextureData& TextureData)
 {
     if (!TextureData.IsValid())
@@ -4259,7 +4218,6 @@ UTexture2D* UJUSYNCSubsystem::CreateUETextureFromJUSYNC(const FJUSYNCTextureData
 
     return NewTexture;
 }
-
 
 void UJUSYNCSubsystem::PreloadCommonMaterials()
 {
@@ -4308,7 +4266,6 @@ UMaterialInterface* UJUSYNCSubsystem::GetCachedMaterial(const FString& MaterialP
     return Material;
 }
 
-
 UJUSYNCSubsystem::FProcessedMeshData UJUSYNCSubsystem::ProcessMeshDataCPU(const FJUSYNCMeshData& MeshData)
 {
     UE_LOG(LogJUSYNC, Log, TEXT("Processing mesh data on background thread: %s"), *MeshData.ElementName);
@@ -4317,8 +4274,6 @@ UJUSYNCSubsystem::FProcessedMeshData UJUSYNCSubsystem::ProcessMeshDataCPU(const 
     ProcessedData.ElementName = MeshData.ElementName;
     ProcessedData.FinalVertexCount = MeshData.Vertices.Num();
     ProcessedData.FinalTriCount = MeshData.Triangles.Num() / 3;
-
-    // Convert vertices to FVector3f (CPU-intensive but thread-safe)
 
     ProcessedData.Positions.Reserve(ProcessedData.FinalVertexCount);
     for (const FVector& Vertex : MeshData.Vertices)
@@ -4456,8 +4411,6 @@ void UJUSYNCSubsystem::ApplyProcessedMeshToComponent(const FProcessedMeshData& P
         }
     }
 
-    // Finalize the mesh section (game-thread only)
-
     const FRealtimeMeshSectionGroupKey GroupKey = FRealtimeMeshSectionGroupKey::Create(0, TEXT("USDGroup"));
     const FRealtimeMeshSectionKey SectionKey = FRealtimeMeshSectionKey::CreateForPolyGroup(GroupKey, 0);
     RealtimeMesh->CreateSectionGroup(GroupKey, Streams);
@@ -4566,7 +4519,6 @@ void UJUSYNCSubsystem::CreateMaterialFromTexture_Async_Return_Internal(
 
     AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this, TexturePtr, BaseMaterialPtr, CapturedTextureParameterName, MaterialCreatedCallback]()
     {
-        // On background thread: prepare material data (could do validation here)
 
         AsyncTask(ENamedThreads::GameThread, [this, TexturePtr, BaseMaterialPtr, CapturedTextureParameterName, MaterialCreatedCallback]()
         {
@@ -4596,7 +4548,6 @@ void UJUSYNCSubsystem::CreateMaterialFromTexture_Async_Return_Internal(
         });
     });
 }
-
 
 AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation(const FJUSYNCMeshData& MeshData, const FVector& SpawnLocation, const FRotator& SpawnRotation, UMaterialInterface* CustomMaterial)
 {
@@ -4679,7 +4630,6 @@ AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation_WithStreams(const F
         return nullptr;
     }
 }
-
 
 AActor* UJUSYNCBlueprintLibrary::SpawnRealtimeMeshAtLocation_WithCompact(const FJUSYNCCompactMeshData& MeshData, const FVector& SpawnLocation, const FRotator& SpawnRotation, UMaterialInterface* CustomMaterial, RealtimeMesh::FRealtimeMeshStreamSet* PrebuiltStreams)
 {
@@ -4811,7 +4761,6 @@ TArray<AActor*> UJUSYNCBlueprintLibrary::BatchSpawnRealtimeMeshesAtLocations(
     return TArray<AActor*>();
 }
 
-
 TArray<FVector> UJUSYNCBlueprintLibrary::GetSpawnPointLocations(const FString& TagFilter)
 {
     TArray<FVector> SpawnLocations;
@@ -4852,7 +4801,6 @@ TArray<FVector> UJUSYNCBlueprintLibrary::GetSpawnPointLocations(const FString& T
     UE_LOG(LogJUSYNC, Log, TEXT("Total spawn points: %d"), SpawnLocations.Num());
     return SpawnLocations;
 }
-
 
 bool UJUSYNCSubsystem::ConnectToBroker(const FString& BrokerEndpoint, int32 TimeoutMs)
 {
@@ -4994,7 +4942,7 @@ bool UJUSYNCSubsystem::RequestFileListWithSizes(int32 TargetRank, int32 TimeoutM
 
     int32 AdjustedTimeoutMs = TimeoutMs;
     if (TargetRank == -1) {
-        int32 TotalWorkerCount = 1; // Default to single-rank mode
+        int32 TotalWorkerCount = 1;
         if (RequestTotalWorkerCount(2000, TotalWorkerCount)) {
             UE_LOG(LogJUSYNC, Log, TEXT("Broadcast request: dynamically detected %d total workers (including rank 0)"), TotalWorkerCount);
 
@@ -5207,7 +5155,7 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
 
     if (Result == 1 && FileData && FileSize > 0)
     {
-        const size_t MAX_REASONABLE_FILE_SIZE = 100ULL * 1024 * 1024 * 1024; // 100GB
+        const size_t MAX_REASONABLE_FILE_SIZE = 100ULL * 1024 * 1024 * 1024;  // 100GB
         if (FileSize > MAX_REASONABLE_FILE_SIZE)
         {
             UE_LOG(LogJUSYNC, Error, TEXT("File size suspiciously large: %llu bytes (max: %llu)"), FileSize, MAX_REASONABLE_FILE_SIZE);
@@ -5236,7 +5184,7 @@ bool UJUSYNCSubsystem::RequestFile(const FString& Filename, int32 TargetRank, in
         FMemory::Memcpy(DestPtr, FileData, FileSize);
 
         FreeBuffer_C(FileData);
-        FileData = nullptr; // Prevent accidental reuse
+        FileData = nullptr;
 
         UE_LOG(LogJUSYNC, Log, TEXT("Retrieved file '%s' (%d bytes) from broker"), *Filename, OutData.Num());
         return true;
@@ -5265,7 +5213,7 @@ bool UJUSYNCSubsystem::RequestFileSized(const FString& Filename, int32 TargetRan
 #ifdef WITH_ANARI_USD_MIDDLEWARE
     if (bIsInitialized.load() && IsBrokerConnected() && ExpectedFileSize > 0)
     {
-        const uint64 MAX_REASONABLE_FILE_SIZE = 100ULL * 1024 * 1024 * 1024; // 100GB
+        const uint64 MAX_REASONABLE_FILE_SIZE = 100ULL * 1024 * 1024 * 1024;  // 100GB
         if (ExpectedFileSize <= MAX_REASONABLE_FILE_SIZE)
         {
             FTCHARToUTF8 FilenameConverter(*Filename);
@@ -5386,8 +5334,6 @@ bool UJUSYNCSubsystem::RequestFilesParallel(const TArray<FString>& Filenames, co
         TargetRanksArray.push_back(Rank);
     }
 
-    // We'll use a mutex to prevent concurrent calls (simplified implementation)
-
     static FCriticalSection CallbackMutex;
     static TArray<FJUSYNCFileData>* CurrentOutFiles = nullptr;
     static std::atomic<bool>* CurrentDownloadComplete = nullptr;
@@ -5451,7 +5397,6 @@ bool UJUSYNCSubsystem::RequestFilesParallel(const TArray<FString>& Filenames, co
 
         UE_LOG(LogJUSYNC, Log, TEXT("RequestFilesParallelAsync_C called - downloads running in background"));
 
-
         if (TimeoutMs == 0)
         {
             UE_LOG(LogJUSYNC, Log, TEXT("Pipeline mode: returning immediately, callbacks will process files as they arrive"));
@@ -5471,12 +5416,12 @@ bool UJUSYNCSubsystem::RequestFilesParallel(const TArray<FString>& Filenames, co
 
     if (TimeoutMs > 0)
     {
-        const int MaxWaitMs = TimeoutMs + 1000; // Add some buffer
+        const int MaxWaitMs = TimeoutMs + 1000;
         const auto StartTime = FPlatformTime::Seconds();
 
         while (!bDownloadComplete && (FPlatformTime::Seconds() - StartTime) * 1000.0 < MaxWaitMs)
         {
-            FPlatformProcess::Sleep(0.01f); // Sleep 10ms
+            FPlatformProcess::Sleep(0.01f);  // Sleep 10ms
         }
 
         if (bDownloadSuccess && FilesReceived >= FilesExpected)
@@ -5684,7 +5629,6 @@ bool UJUSYNCSubsystem::RequestTotalWorkerCount(int32 TimeoutMs, int32& OutTotalC
     return false;
 }
 
-
 bool UJUSYNCSubsystem::RequestWorkerCountExcludingRank0(int32 TimeoutMs, int32& OutWorkerCount)
 {
 
@@ -5722,7 +5666,6 @@ bool UJUSYNCSubsystem::RequestWorkerCountExcludingRank0(int32 TimeoutMs, int32& 
 #endif
     return false;
 }
-
 
 void UJUSYNCSubsystem::CreateMaterialFromTexture_Async(UTexture2D* Texture, URealtimeMeshComponent* TargetComponent)
 {
@@ -5769,7 +5712,6 @@ void UJUSYNCSubsystem::CreateMaterialFromTexture_Async(UTexture2D* Texture, URea
         });
     });
 }
-
 
 void UJUSYNCSubsystem::ConfigureMetrics(const FJUSYNCMetricsConfig& NewConfig)
 {
@@ -5977,7 +5919,6 @@ bool UJUSYNCSubsystem::IsMetricsDisplayVisible() const
     return bMetricsDisplayVisible;
 }
 
-
 void UJUSYNCSubsystem::CollectMetrics()
 {
     if (!bMetricsCollectionActive.load()) return;
@@ -6033,7 +5974,6 @@ void UJUSYNCSubsystem::SaveMetricsToHistory()
     OnMetricsUpdated.Broadcast(CurrentMetrics);
 }
 
-
 float UJUSYNCSubsystem::GetSystemRAMUsage_GB() const
 {
     return 0.0f;
@@ -6042,7 +5982,7 @@ float UJUSYNCSubsystem::GetSystemRAMUsage_GB() const
 float UJUSYNCSubsystem::GetVRAMUsage_GB() const
 {
 
-    static int64 vramCounter = 1 * 1024 * 1024 * 1024; // 1GB
+    static int64 vramCounter = 1 * 1024 * 1024 * 1024;  // 1GB
 
     vramCounter += 200 * 1024 * 1024;
 
@@ -6052,10 +5992,9 @@ float UJUSYNCSubsystem::GetVRAMUsage_GB() const
 float UJUSYNCSubsystem::GetCPUUsage_Percent() const
 {
 
-
     static float simulatedCPU = 20.0f;
 
-    simulatedCPU = 15.0f + FMath::FRand() * 30.0f; // Between 15% and 45%
+    simulatedCPU = 15.0f + FMath::FRand() * 30.0f;  // Between 15% and 45%
 
     return FMath::Clamp(simulatedCPU, 0.0f, 100.0f);
 }
@@ -6083,7 +6022,6 @@ float UJUSYNCSubsystem::GetGPUUsage_Percent() const
 
     return SimulatedGPUUsage;
 }
-
 
 int32 UJUSYNCSubsystem::CountRMCComponents() const
 {
@@ -6133,8 +6071,8 @@ int32 UJUSYNCSubsystem::CountInstancedRMCComponents() const
                     ComponentName.Contains(TEXT("Part")) ||
                     ComponentName.Contains(TEXT("Segment")) ||
                     ComponentName.Contains(TEXT("Slice")) ||
-                    ComponentName.Contains(TEXT("_C")) ||  // Common suffix for chunks
-                    (ComponentName.Contains(TEXT("_")) && ComponentName.Contains(TEXT("of")))) // "Mesh_1_of_4"
+                    ComponentName.Contains(TEXT("_C")) ||
+                    (ComponentName.Contains(TEXT("_")) && ComponentName.Contains(TEXT("of"))))  // "Mesh_1_of_4"
                 {
                     Count++;
                 }

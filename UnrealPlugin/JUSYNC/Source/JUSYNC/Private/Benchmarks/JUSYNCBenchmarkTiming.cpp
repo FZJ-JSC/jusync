@@ -12,7 +12,6 @@ FJUSYNCBenchmarkTiming& FJUSYNCBenchmarkTiming::Get()
 
 FJUSYNCBenchmarkTiming::FJUSYNCBenchmarkTiming()
 {
-	// Per-frame game-thread tick. One registration for the process lifetime;
 
 	TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
 		FTickerDelegate::CreateLambda([this](float DeltaTime) -> bool
@@ -150,7 +149,7 @@ void FJUSYNCBenchmarkTiming::MarkFirstActorSpawned()
 	}
 	if (FirstFrameWall >= 0.0)
 	{
-		return; // already captured
+		return;  // already captured
 	}
 	bFirstSpawnPending = true;
 }
@@ -163,7 +162,7 @@ void FJUSYNCBenchmarkTiming::MarkFullScene()
 	}
 	if (FullSceneWall >= 0.0 || bFullScenePending)
 	{
-		return; // already captured (or already deferred to the first frame)
+		return;
 	}
 	const double Now = FPlatformTime::Seconds();
 	if (FirstFrameWall >= 0.0)

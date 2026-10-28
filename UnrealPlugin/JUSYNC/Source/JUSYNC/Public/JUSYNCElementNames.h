@@ -5,12 +5,6 @@
 
 namespace JUSYNCElementNames
 {
-    // VTK's ANARI mapper names geometry "vtk_actor_<id>_<representation>_<n>".
-    // ParaView recreates the actor across frames, so <id> is not stable even
-    // when the visible element is the same. Fold that id away so one UE actor
-    // and one cache key represent the element across time. The representation
-    // suffix (e.g. "triangles_0", "spheres_0") stays intact, so genuinely
-    // distinct geometry still gets distinct keys.
     inline FString CanonicalActorIdentity(const FString& ElementName)
     {
         static const FString Prefix = TEXT("vtk_actor_");
@@ -100,10 +94,6 @@ namespace JUSYNCElementNames
 
     namespace Private
     {
-        // Stage postfixes the sender inserts between the prim name and the
-        // "__<time>" marker of a clip key ("spheres_0_u1_Geom__0.000000"). Left in
-        // place, the uniquifier is no longer the last segment, so a prim and its
-        // rebuilt twin land in different groups and no duplicate is detected.
         inline void StripStagePostfix(FString& Name)
         {
             static const TCHAR* const Postfixes[] = {
@@ -120,11 +110,6 @@ namespace JUSYNCElementNames
             }
         }
 
-        // Peels whatever sits between the prim name and its "_u<k>" rebuild
-        // uniquifier - a stage postfix, an embedded rank mark, or both - and
-        // retries until the uniquifier is exposed. Peeling is lossless: the rank
-        // marks are appended back to the element, so distinct elements stay
-        // distinct and only the duplicate detection improves.
         inline void UnwindHead(FString Head, const FString& RankMark, FString& OutElement, int32& OutUniq)
         {
             FString Merged = RankMark;
@@ -161,21 +146,12 @@ namespace JUSYNCElementNames
         }
     }
 
-    // Morph, ramp and timeline state is keyed by (element, owning rank), so build
-    // the string in one place. If a producer and a consumer disagree, two ranks of
-    // one partitioned element share a morph chain and blend each other's previous
-    // positions; an anonymous element falls back to a stable placeholder so it
-    // still gets a key of its own.
     inline FString MakeRankedElementKey(const FString& Element, int32 Rank)
     {
         const FString Base = Element.IsEmpty() ? FString(TEXT("jusync_pc")) : Element;
         return Base + TEXT("_r") + FString::FromInt(FMath::Max(Rank, 0));
     }
 
-    // Producer rank encoded in a clip name: "_r<digits>_" immediately after the
-    // last "__" (e.g. "Wave_Geom__r3_7_s2.geo" -> 3). The rank suffix is what
-    // keeps the pieces of one element spread over several ranks from sharing a
-    // merge or a morph key. Returns false when the mark is absent.
     inline bool ParseFileRank(const FString& Filename, int32& OutRank)
     {
         OutRank = INDEX_NONE;
@@ -209,10 +185,6 @@ namespace JUSYNCElementNames
         return OutRank >= 0;
     }
 
-    // Splits a rank mark off the end, then the rebuild uniquifier off what is
-    // left. The rank mark is kept in the element so the pieces of one element
-    // spread over several ranks never compete in the same visibility election -
-    // every rank must stay visible for its timestep.
     inline FVariant ParseElement(const FString& ElementKey)
     {
         FVariant Out;
@@ -261,9 +233,6 @@ namespace JUSYNCElementNames
             Head = Name.Left(TimeSep);
             Tail = Name.Mid(TimeSep + 2);
 
-            // RawGeo curve subsets append "_s<k>" after the time. It is a
-            // transport shard, not part of the element identity; keeping it
-            // would give the coarse and completed frames different actor keys.
             const int32 SubsetSep = Tail.Find(TEXT("_s"), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
             if (SubsetSep != INDEX_NONE &&
                 Private::AllDigits(Tail.Mid(SubsetSep + 2)))
@@ -272,9 +241,6 @@ namespace JUSYNCElementNames
             }
         }
 
-        // Multi-rank clip keys carry the owner before the time ("__r1_0.500000");
-        // every non-numeric token of that tail belongs to the element, so ranks
-        // stay in separate groups.
         FString RankMark;
         if (!Tail.IsEmpty())
         {

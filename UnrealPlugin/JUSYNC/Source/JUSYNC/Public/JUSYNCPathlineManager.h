@@ -2,26 +2,23 @@
 
 #include "CoreMinimal.h"
 #include "JUSYNCTypes.h"
+#include "UObject/SoftObjectPtr.h"
 
 class UMaterialInterface;
-class UWorld;
-class FJUSYNCPointCloudSpawner;
+class UNiagaraSystem;
 
-/**
- * User-facing pathline controls. These mirror the details panel controls on
- * AJUSYNCFileSpawnerActor; the manager itself has no UI.
- */
 struct JUSYNC_API FJUSYNCPathlineSettings
 {
 	bool bEnabled = false;
 
 	int32 MaxTracks = 4096;
 	int32 HistorySamples = 128;
+	int32 RetentionSamples = 256;
 	int32 MaxNodes = 524288;
-	// A track that is not present in N consecutive emitted samples is removed.
 	int32 TrackExpirySamples = 32;
 
-	int32 TubeSides = 4;
+	TSoftObjectPtr<UNiagaraSystem> NiagaraSystem;
+
 	float Radius = 0.5f;
 	float RadiusScale = 1.0f;
 	bool bUsePointWidth = false;
@@ -34,12 +31,15 @@ struct JUSYNC_API FJUSYNCPathlineSettings
 	float FilterMin = 0.0f;
 	float FilterMax = 1.0f;
 
+	bool bFilterByHue = false;
+	float FilterHue = 0.0f;  // degrees, 0-360
+	float FilterHueTolerance = 30.0f;  // degrees
+
 	bool bColorByScalar = true;
 	float ColorMin = 0.0f;
 	float ColorMax = 1.0f;
 	FLinearColor FlatColor = FLinearColor::White;
 
-	// Stable hash rank. Changing the seed re-samples which IDs are tracked.
 	uint64 SelectionSeed = 1337;
 
 	UMaterialInterface* Material = nullptr;
@@ -57,16 +57,35 @@ struct JUSYNC_API FJUSYNCPathlineStats
 	double LastBuildMs = 0.0;
 };
 
-/**
- * CPU pathline store and mesh builder.
- *
- * Ingestion and geometry construction run on a serialized background worker.
- * The game thread only applies finished meshes (see PumpGameThread). Tests can
- * use IngestSampleNow/BuildGeometry directly without starting the worker.
- *
- * Threading contract: the point-cloud and LUT arguments are copied into the
- * work item. FJUSYNCPointCloudData is treated as immutable after enqueue.
- */
+struct JUSYNC_API FJUSYNCPathlineArrays
+{
+	TArray<FVector> Positions;
+	TArray<float> LinkOrders;
+	TArray<float> Widths;
+	TArray<FLinearColor> Colors;
+	TArray<float> Scalars;
+
+	int32 Num() const { return Positions.Num(); }
+
+	void Reset()
+	{
+		Positions.Reset();
+		LinkOrders.Reset();
+		Widths.Reset();
+		Colors.Reset();
+		Scalars.Reset();
+	}
+
+	void Reserve(int32 Count)
+	{
+		Positions.Reserve(Count);
+		LinkOrders.Reserve(Count);
+		Widths.Reserve(Count);
+		Colors.Reserve(Count);
+		Scalars.Reserve(Count);
+	}
+};
+
 class JUSYNC_API FJUSYNCPathlineManager
 {
 public:
@@ -79,15 +98,10 @@ public:
 	void SetSettings(const FJUSYNCPathlineSettings& NewSettings);
 	const FJUSYNCPathlineSettings& GetSettings() const;
 
-	// True when structural settings changed and the file spawner should replay
-	// its retained samples through the manager.
 	bool ConsumeResampleRequest();
 
 	void Reset();
 
-	// Drops all retained state for one canonical element. Called when the last
-	// point-cloud rank for that element is retired; PumpGameThread removes the
-	// matching actor on its next pass.
 	void RemoveElement(const FString& ElementName);
 
 	void EnqueueSample(const FString& ElementName, const FJUSYNCPointCloudRef& Cloud,
@@ -95,30 +109,34 @@ public:
 	void IngestSampleNow(const FString& ElementName, const FJUSYNCPointCloudRef& Cloud,
 		int32 Rank, uint64 SampleId, const TArray<FColor>& Lut);
 
-	// Builds geometry for one canonical element at a sample cutoff.
-	// MAX_uint64 means "live". Returns false when the element has no state.
-	bool BuildGeometry(const FString& ElementName, uint64 CutoffSampleId,
-		FJUSYNCCompactMeshData& OutMesh, int32& OutVisibleTracks);
+	bool BuildArrays(const FString& ElementName, uint64 CutoffSampleId,
+		FJUSYNCPathlineArrays& OutArrays, int32& OutVisibleTracks);
 
 	void SetDisplaySampleId(uint64 SampleId);
 	uint64 GetDisplaySampleId() const;
 
-	// Queue a rebuild from retained state (playback scrub or visual change).
+	void SetDisplayTipBlendSeconds(float Seconds);
+	void TickDisplayBlend();
+
 	void RequestRebuild();
 
-	// Drains worker results and uploads them to pathline actors through the
-	// spawner. The manager never touches UObjects off the game thread.
-	void PumpGameThread(UWorld* World, FJUSYNCPointCloudSpawner* Spawner,
-		UMaterialInterface* Material);
+	struct FCompletedArrays
+	{
+		FString ElementName;
+		TSharedPtr<FJUSYNCPathlineArrays, ESPMode::ThreadSafe> Arrays;
+	};
+
+	void DrainArrays(TArray<FCompletedArrays>& OutArrays);
 
 	FJUSYNCPathlineStats GetStats() const;
 
 	TArray<FString> GetElementKeys() const;
 
-	// Deterministic selection inspection (tests/tools).
 	TArray<uint64> GetTrackIds(const FString& ElementName, int32 Rank) const;
 	int32 GetElementNodeCount(const FString& ElementName) const;
 	int32 GetTrackNodeCount(const FString& ElementName, int32 Rank, uint64 Id) const;
+
+	static FString ResolveAttributeName(const FJUSYNCPointCloudData& Cloud, const FString& Name);
 
 private:
 	struct FImpl;

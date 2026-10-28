@@ -16,12 +16,7 @@
 
 namespace
 {
-/**
- * Dropdown picker for cached samples. Selecting an entry scrubs to that
- * sample; "LIVE (newest)" resumes the live stream. The list is rebuilt only
- * when the cache length changes, and the current selection follows the
- * transport buttons/slider without feeding a change back into playback.
- */
+
 class SJUSYNCSampleDropdown final : public SCompoundWidget
 {
 public:
@@ -215,7 +210,7 @@ private:
     bool bLastLive = true;
     bool bUpdatingSelection = false;
 };
-} // namespace
+}  // namespace
 
 TSharedRef<IDetailCustomization> FJUSYNCFileSpawnerCustomization::MakeInstance()
 {
@@ -242,8 +237,6 @@ void FJUSYNCFileSpawnerCustomization::CustomizeDetails(IDetailLayoutBuilder& Det
         return;
     }
 
-    // The real slider replaces the raw normalized float row. The cache settings
-    // and read-only counters remain as normal Details rows.
     DetailBuilder.HideProperty(
         GET_MEMBER_NAME_CHECKED(AJUSYNCFileSpawnerActor, PlaybackPosition));
 
@@ -312,8 +305,6 @@ void FJUSYNCFileSpawnerCustomization::CustomizeDetails(IDetailLayoutBuilder& Det
             + SVerticalBox::Slot()
             .AutoHeight()
             [
-                // Same timeline scrubber widget that the DaySequence
-                // time-of-day preview uses, but indexed by cached sample.
                 SNew(SSimpleTimeSlider)
                     .IsEnabled_Lambda([Spawner]()
                     {
@@ -340,7 +331,7 @@ void FJUSYNCFileSpawnerCustomization::CustomizeDetails(IDetailLayoutBuilder& Det
                             ? static_cast<double>(Spawner->GetPlaybackSampleIndex())
                             : 0.0;
                     })
-                    .OnScrubPositionChanged_Lambda([Spawner](double NewScrubTime, bool /*bIsScrubbing*/)
+                    .OnScrubPositionChanged_Lambda([Spawner](double NewScrubTime, bool  )  // bIsScrubbing
                     {
                         if (!Spawner.IsValid())
                         {

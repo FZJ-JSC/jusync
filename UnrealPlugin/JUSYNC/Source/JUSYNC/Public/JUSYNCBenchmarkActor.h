@@ -50,7 +50,7 @@ public:
     FString OutputDirectory;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Benchmark|Config")
-    int32 OutputFormat; // 0=CSV, 1=JSON, 2=Both
+    int32 OutputFormat;  // 0=CSV, 1=JSON, 2=Both
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JUSYNC|Benchmark|Config")
     bool bAutoStart;
@@ -162,7 +162,7 @@ private:
 
     double SessionStartTime    = 0.0;
     double StageStartTime      = 0.0;
-    double DownloadStageStart  = 0.0;  // download->spawn window start
+    double DownloadStageStart  = 0.0;
     int64  TotalBytesAllRuns   = 0;
     int32  TotalTriangleCount  = 0;
     int32  TotalVertexCount    = 0;

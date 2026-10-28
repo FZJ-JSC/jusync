@@ -48,13 +48,11 @@ class JUSYNC_API FJUSYNCBenchmarkTiming
 public:
 	static FJUSYNCBenchmarkTiming& Get();
 
-
 	void BeginInteractiveWindow(double DurationSeconds);
 
 	void EndInteractiveWindow();
 
 	FJUSYNCInteractiveStats GetInteractiveStats() const;
-
 
 	void MarkConnectStart();
 

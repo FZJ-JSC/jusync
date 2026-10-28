@@ -51,7 +51,7 @@ static void JusyncLogDiagTable(int32 Rows)
     Buf[Written] = '\0';
     const FString Table(UTF8_TO_TCHAR(Buf.GetData()));
     TArray<FString> Lines;
-    Table.ParseIntoArrayLines(Lines, /*bCullEmpty=*/false);
+    Table.ParseIntoArrayLines(Lines,  false);
     UE_LOG(LogJUSYNC, Display,
         TEXT("===== JUSYNC streaming stage latency (ms, -1 = stage not reached) ====="));
     for (const FString& Line : Lines)
@@ -60,7 +60,6 @@ static void JusyncLogDiagTable(int32 Rows)
     }
 }
 #endif
-
 
 void FJUSYNCModule::StartupModule() {
     try {
@@ -129,7 +128,7 @@ bool FJUSYNCModule::InitializePlatformSpecific() {
 
 #else
     UE_LOG(LogJUSYNC, Warning, TEXT("Middleware support not compiled - skipping platform initialization"));
-    return true;  // Not an error, just limited functionality
+    return true;
 #endif
 }
 
@@ -233,7 +232,6 @@ bool FJUSYNCModule::AttemptLibraryLoad(const FString& FullPath, const FString& L
     return IFileManager::Get().FileExists(*FullPath);
 }
 
-
 void FJUSYNCModule::LogMiddlewareCapabilities() {
     UE_LOG(LogJUSYNC, Log, TEXT("Middleware ready: ZeroMQ, USD (TinyUSDZ), hash verification (OpenSSL), "
                                 "textures (STB), RealtimeMeshComponent integration"));
@@ -262,8 +260,6 @@ void FJUSYNCModule::RegisterModuleSystems() {
                 FOnGetDetailCustomizationInstance::CreateStatic(
                     &FJUSYNCFileSpawnerCustomization::MakeInstance));
 
-            // Existing Details views keep the layout they were built with until
-            // they are told that customizations changed.
             PropertyModule.NotifyCustomizationModuleChanged();
 
             bPlaybackDetailsRegistered = true;
@@ -276,10 +272,6 @@ void FJUSYNCModule::RegisterModuleSystems() {
         }
         else
         {
-            // JUSYNC loads at PostConfigInit, which is before the editor and
-            // the details panels exist. Register once the engine is ready so
-            // the PropertyEditor module used by the Details panel is the same
-            // one that owns our customization.
             PostEngineInitHandle = FCoreDelegates::OnPostEngineInit.AddLambda(RegisterPlaybackDetails);
             UE_LOG(LogJUSYNC, Log, TEXT("Deferred JUSYNC playback Details registration until post engine init"));
         }
@@ -306,8 +298,6 @@ void FJUSYNCModule::RegisterModuleSystems() {
             }),
             ECVF_Default);
     }
-
-    // (its ticker is tied to the process lifetime of the headless run).
 
     MaybeStartHeadlessHarness();
 #endif
@@ -363,7 +353,7 @@ namespace
     };
     FJusyncHarnessState GHarness;
 
-    bool JusyncHarnessTick(float /*DeltaTime*/)
+    bool JusyncHarnessTick(float  )  // DeltaTime
     {
         const double Elapsed = FPlatformTime::Seconds() - GHarness.StartTime;
 
@@ -384,7 +374,7 @@ namespace
                 if (AJUSYNCFileSpawnerActor* Spawner = World->SpawnActor<AJUSYNCFileSpawnerActor>(
                         FVector::ZeroVector, FRotator::ZeroRotator, Params))
                 {
-                    Spawner->bEnablePerfLogging = true; // the harness is the perf instrument
+                    Spawner->bEnablePerfLogging = true;  // the harness is the perf instrument
                     if (GHarness.PointSizeOverride >= 0.f)
                     {
                         Spawner->PointCloudSize = GHarness.PointSizeOverride;
@@ -461,7 +451,7 @@ void FJUSYNCModule::MaybeStartHeadlessHarness()
 
     if (GHarness.DiagInterval <= 0.0 && GHarness.QuitAt <= 0.0 && !GHarness.bAutoSpawner)
     {
-        return; // nothing requested
+        return;  // nothing requested
     }
 
     GHarness.StartTime = FPlatformTime::Seconds();
