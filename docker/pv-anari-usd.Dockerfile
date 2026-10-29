@@ -8,9 +8,12 @@
 #
 # Build context is the ANARI-USD source tree, e.g. from the jusync repo:
 #   docker compose build pv-desktop
-# or directly:
+# or directly (both extra contexts are required - the launcher scripts and the
+# pathline example generator live in the jusync repo, not in ANARI-USD):
 #   docker build -f docker/pv-anari-usd.Dockerfile \
-#                -t pv-anari-usd:6.0.6-jusync ../ANARI-USD
+#                --build-context scripts=./docker \
+#                --build-context presets=./examples/paraview-pathlines \
+#                -t staticxg7/pv-anari-usd:6.0.7 ../ANARI-USD
 ARG BASE_IMAGE=staticxg7/pv-anari-usd:6.0.6
 
 FROM ${BASE_IMAGE} AS device-build
@@ -64,3 +67,35 @@ COPY --from=scripts jusync-frame-index /usr/local/bin/jusync-frame-index
 RUN chmod +x /opt/pv61/start-paraview-anari.sh /usr/local/bin/jusync-preset \
       /usr/local/bin/jusync-anim-dt /usr/local/bin/jusync-frame-index \
  && if [ -d /opt/sender ]; then cp /opt/pv61/start-paraview-anari.sh /opt/sender/start-paraview-anari.sh; fi
+
+# Small animated point cloud for the UE pathline tracker: 256 particles, 100
+# frames, dt = 0.05 (5 s loop), stable particle_id + attribute0 (see
+# examples/paraview-pathlines). Generated at build time from the repo
+# generator, so no binary data has to be committed; the script is installed
+# alongside make_presets.py so variants can be generated inside the image.
+COPY --from=presets make_particle_example.py /opt/jusync/make_particle_example.py
+RUN python3 /opt/jusync/make_particle_example.py \
+      --out /opt/jusync/presets/pathlines --name pathlines
+
+# One-click desktop entry, same convention as the presets shipped by the base
+# image (which knows nothing about pathlines).
+RUN printf '%s\n' \
+      '[Desktop Entry]' \
+      'Type=Application' \
+      'Version=1.0' \
+      'Name=ParaView preset: pathlines' \
+      'Comment=Open the pathlines sample on the ANARI usd device' \
+      'Exec=/usr/local/bin/jusync-preset pathlines' \
+      'Icon=paraview' \
+      'Terminal=false' \
+      'Categories=Graphics;Science;' \
+      > /usr/share/applications/jusync-preset-pathlines.desktop \
+ && chmod +x /usr/share/applications/jusync-preset-pathlines.desktop \
+ && cp /usr/share/applications/jusync-preset-pathlines.desktop /root/Desktop/ \
+ && chmod +x /root/Desktop/jusync-preset-pathlines.desktop
+
+# The base image's labels still say 6.0.6 / anim-player v12; this image builds
+# the device from source (module v15) and adds the pathline preset.
+LABEL org.opencontainers.image.title="pv-anari-usd:6.0.7" \
+      org.opencontainers.image.version="6.0.7" \
+      org.opencontainers.image.description="ParaView 6.1 + ANARI-USD RawGeo v3 device (anim-player v15, JUSYNC fixes) + VNC desktop with one-click presets (streamlines, large-cloud, fast-morph, mesh, pathlines)"

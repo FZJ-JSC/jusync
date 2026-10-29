@@ -31,7 +31,7 @@ services:
     # Built from the sibling ANARI-USD checkout (docker/pv-anari-usd.Dockerfile):
     # same base image, with libanari_library_usd.so rebuilt from source so the
     # JUSYNC device fixes are baked in instead of patched into a live container.
-    image: pv-anari-usd:6.0.6-jusync
+    image: staticxg7/pv-anari-usd:6.0.7
     build:
       context: ../ANARI-USD
       dockerfile: ../jusync/docker/pv-anari-usd.Dockerfile
@@ -40,6 +40,9 @@ services:
         # must be baked into the image (the .pvsm presets never animated, see
         # docker/jusync-preset).
         scripts: ./docker
+        # Generator for the pathline example preset that the image bakes in
+        # as a fifth preset (see docker/pv-anari-usd.Dockerfile).
+        presets: ./examples/paraview-pathlines
     container_name: pv-desktop
     ports:
       - "127.0.0.1:6080:6080" # open http://localhost:6080/vnc.html

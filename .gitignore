@@ -83,3 +83,8 @@ graphify-out/
 
 # Local planning docs / specs (kept on disk, not published)
 docs/
+
+# Generated ParaView preset data (regenerate with
+# examples/paraview-pathlines/make_particle_example.py; the 6.0.7 image bakes
+# it in at build time, so it never needs to be committed)
+examples/paraview-pathlines/particles/

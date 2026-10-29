@@ -183,6 +183,12 @@ jusync-uesample/
 
 The middleware repository produces the shared library and headers consumed by the UE plugin.
 
+`examples/paraview-pathlines/` holds the generator for the `pathlines` preset
+(a 256-particle, 100-frame PVD that exercises the plugin's pathline renderer
+against a live ParaView/ANARI stream). Since 6.0.7 that preset is baked into
+`staticxg7/pv-anari-usd`, so it needs no setup; see the README in that
+directory to regenerate or vary it.
+
 ---
 
 ## Dependencies

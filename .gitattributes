@@ -1,0 +1,8 @@
+# Keep the files that end up inside the container LF-only. The checkout here
+# uses core.autocrlf=true, and CRLF would break the Dockerfile's line
+# continuations and the shell entry points baked into the image.
+.gitattributes          text eol=lf
+docker/*                text eol=lf
+docker-compose*.yml     text eol=lf
+examples/paraview-pathlines/* text eol=lf
+*.sh                    text eol=lf
