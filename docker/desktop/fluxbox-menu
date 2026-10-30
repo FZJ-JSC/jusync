@@ -1,0 +1,4 @@
+[begin] (fluxbox)
+[exec] (Start ParaView) {/root/Desktop/start-paraview.sh}
+[include] (/etc/X11/fluxbox/fluxbox-menu)
+[end]

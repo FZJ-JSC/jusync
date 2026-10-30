@@ -2,7 +2,7 @@
 #
 # docker-compose.yml builds the image from the sibling ../ANARI-USD checkout,
 # which a machine that only wants to *use* the desktop does not have. This file
-# has no build section: it always pulls staticxg7/pv-anari-usd:6.0.7, which
+# has no build section: it always pulls staticxg7/pv-anari-usd:6.0.8, which
 # already contains the rebuilt ANARI-USD device and all five presets.
 #
 #   docker compose -f docker-compose.pull.yml pull
@@ -14,7 +14,7 @@
 # any data you drop next to this file are reachable from inside the container.
 services:
   pv-desktop:
-    image: staticxg7/pv-anari-usd:6.0.7
+    image: staticxg7/pv-anari-usd:6.0.8
     pull_policy: missing
     container_name: pv-desktop
     ports:

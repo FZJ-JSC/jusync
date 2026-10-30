@@ -1,0 +1,169 @@
+#!/bin/sh
+# VNC session startup; entrypoint.sh installs it as ~/.vnc/Xstartup and ~/.xsession.
+#
+# Env: JUSYNC_AUTOSTART_PV=0 (image default) desktop only, JUSYNC_PRESET=<name>,
+# JUSYNC_PV_STATE=<file>, JUSYNC_PV_AUTORESTART=0 (default: respawn).
+set -u
+
+for candidate in /opt/pv61/anari-env.sh /usr/local/bin/anari-env.sh; do
+    if [ -f "$candidate" ]; then
+        . "$candidate"
+        break
+    fi
+done
+
+export DISPLAY="${DISPLAY:-:1}"
+PRESET_ROOT=/opt/jusync/presets
+CURRENT=/opt/jusync/current
+
+if [ -f /usr/share/backgrounds/jusync.png ]; then
+    feh --bg-fill /usr/share/backgrounds/jusync.png >/dev/null 2>&1 &
+fi
+if command -v picom >/dev/null 2>&1; then
+    picom --config /root/.config/picom.conf >/tmp/picom.log 2>&1 &
+fi
+fluxbox >/tmp/fluxbox.log 2>&1 &
+# fluxbox gives ParaView's dock panels and dialogs decorations and lets them be
+# moved; tint2 needs the WM up before it can reserve its _NET_WM struts.
+sleep 1
+if command -v tint2 >/dev/null 2>&1; then
+    tint2 -c /root/.config/tint2/tint2rc >/tmp/tint2.log 2>&1 &
+fi
+
+# vncserver starts tigervncconfig, which puts a 300x100 "VNC config" window on
+# the desktop; keep the clipboard but drop the window.
+if command -v vncconfig >/dev/null 2>&1; then
+    pkill -f tigervncconfig 2>/dev/null
+    pkill -x vncconfig 2>/dev/null
+    vncconfig -nowin >/dev/null 2>&1 &
+fi
+
+# TigerVNC 1.13 runs /etc/X11/Xtigervnc-session, which kills the server as soon
+# as the session process returns, so every "stay down" path must block here.
+keepalive() {
+    while :; do
+        sleep 3600
+    done
+}
+
+if [ "${JUSYNC_AUTOSTART_PV:-1}" != "1" ]; then
+    echo "[xstartup] JUSYNC_AUTOSTART_PV=0 - desktop only" >&2
+    keepalive
+fi
+
+# When this image runs the streamer (jusync-start.sh -> run-sender.sh ->
+# anariBigCloudUsd) the sender owns broker port 5556 and an autostarted
+# ParaView would fight it for the pipe.
+case "$(tr '\0' ' ' < /proc/1/cmdline 2>/dev/null)" in
+    *jusync-start*|*run-sender*|*anariBigCloudUsd*)
+        echo "[xstartup] container runs the sender - not autostarting ParaView" >&2
+        keepalive
+        ;;
+esac
+i=0
+while [ "$i" -lt 3 ]; do
+    if pgrep -f 'anariBigCloudUsd' >/dev/null 2>&1; then
+        echo "[xstartup] sender running (broker 5556) - not autostarting ParaView" >&2
+        keepalive
+    fi
+    sleep 1
+    i=$(( i + 1 ))
+done
+
+# Priority: JUSYNC_PV_STATE, JUSYNC_PRESET, last preset used, first installed.
+resolve_state() {
+    if [ -n "${JUSYNC_PV_STATE:-}" ]; then
+        if [ -f "${JUSYNC_PV_STATE}" ]; then
+            printf '%s\n' "${JUSYNC_PV_STATE}"
+            return 0
+        fi
+        echo "[xstartup] JUSYNC_PV_STATE=${JUSYNC_PV_STATE} does not exist" >&2
+    fi
+
+    name="${JUSYNC_PRESET:-}"
+    if [ -z "$name" ] && [ -f "$CURRENT" ]; then
+        name=$(cat "$CURRENT" 2>/dev/null)
+    fi
+    if [ -n "$name" ] && [ -f "$PRESET_ROOT/$name/$name.pvsm" ]; then
+        printf '%s\n' "$PRESET_ROOT/$name/$name.pvsm"
+        return 0
+    fi
+    if [ -n "$name" ]; then
+        echo "[xstartup] preset '$name' not installed" >&2
+    fi
+
+    for dir in "$PRESET_ROOT"/*/; do
+        [ -d "$dir" ] || continue
+        base=$(basename "$dir")
+        if [ -f "$dir/$base.pvsm" ]; then
+            printf '%s\n' "$dir/$base.pvsm"
+            return 0
+        fi
+    done
+
+    if [ -f "$PRESET_ROOT/streamlines/streamlines.pvsm" ]; then
+        printf '%s\n' "$PRESET_ROOT/streamlines/streamlines.pvsm"
+        return 0
+    fi
+    return 1
+}
+
+state=$(resolve_state) || {
+    echo "[xstartup] no preset state files under $PRESET_ROOT - starting bare ParaView" >&2
+    state=""
+}
+
+if [ -n "$state" ]; then
+    preset_dir=$(dirname "$state")
+    if [ -f "$preset_dir/preset.env" ]; then
+        set -a
+        . "$preset_dir/preset.env"
+        set +a
+    fi
+    echo "[xstartup] preset state: $state"
+else
+    preset_dir=""
+fi
+
+# The launcher execs ParaView and blocks until the window closes. HANDOVER is
+# how jusync-preset takes ownership: it touches the flag and kills ParaView, so
+# this supervisor stands down instead of respawning the preset it replaced.
+HANDOVER=/tmp/jusync-pv-handover
+rm -f "$HANDOVER"
+
+attempt=0
+while :; do
+    started=$(date +%s)
+    if [ -n "$state" ]; then
+        echo "[xstartup] exec ${PVDIR}/start-paraview-anari.sh --state=$state"
+        "${PVDIR}/start-paraview-anari.sh" --state="$state" \
+            >>/tmp/paraview-session.log 2>&1
+    else
+        echo "[xstartup] exec ${PVDIR}/start-paraview-anari.sh"
+        "${PVDIR}/start-paraview-anari.sh" >>/tmp/paraview-session.log 2>&1
+    fi
+    rc=$?
+    ran=$(( $(date +%s) - started ))
+    echo "[xstartup] ParaView exited rc=$rc after ${ran}s" >>/tmp/paraview-session.log
+
+    if [ -f "$HANDOVER" ]; then
+        rm -f "$HANDOVER"
+        echo "[xstartup] handover to jusync-preset - supervisor standing down" >&2
+        keepalive
+    fi
+
+    [ "${JUSYNC_PV_AUTORESTART:-1}" = "1" ] || break
+    # Treat quick exits as crashes: back off rather than hammer broker 5556.
+    if [ "$ran" -lt 10 ]; then
+        attempt=$(( attempt + 1 ))
+        [ "$attempt" -gt 5 ] && attempt=5
+        delay=$(( attempt * 5 ))
+    else
+        attempt=0
+        delay=3
+    fi
+    echo "[xstartup] restarting ParaView in ${delay}s" >&2
+    sleep "$delay"
+done
+
+keepalive

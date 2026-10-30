@@ -31,7 +31,7 @@ services:
     # Built from the sibling ANARI-USD checkout (docker/pv-anari-usd.Dockerfile):
     # same base image, with libanari_library_usd.so rebuilt from source so the
     # JUSYNC device fixes are baked in instead of patched into a live container.
-    image: staticxg7/pv-anari-usd:6.0.7
+    image: staticxg7/pv-anari-usd:6.0.8
     build:
       context: ../ANARI-USD
       dockerfile: ../jusync/docker/pv-anari-usd.Dockerfile

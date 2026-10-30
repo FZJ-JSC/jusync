@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Start ParaView
+GenericName=Scientific visualization
+Comment=Start ParaView 6.1 with the current ANARI-USD preset
+Exec=/root/Desktop/start-paraview.sh
+TryExec=/root/Desktop/start-paraview.sh
+Icon=paraview
+Terminal=false
+Categories=Graphics;Science;DataVisualization;
+StartupNotify=true

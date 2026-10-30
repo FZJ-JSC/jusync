@@ -13,8 +13,9 @@
 #   docker build -f docker/pv-anari-usd.Dockerfile \
 #                --build-context scripts=./docker \
 #                --build-context presets=./examples/paraview-pathlines \
-#                -t staticxg7/pv-anari-usd:6.0.7 ../ANARI-USD
+#                -t staticxg7/pv-anari-usd:6.0.8 ../ANARI-USD
 ARG BASE_IMAGE=staticxg7/pv-anari-usd:6.0.6
+ARG DESKTOP_BASE=staticxg7/pv-anari-usd:6.0.7
 
 FROM ${BASE_IMAGE} AS device-build
 
@@ -99,3 +100,36 @@ RUN printf '%s\n' \
 LABEL org.opencontainers.image.title="pv-anari-usd:6.0.7" \
       org.opencontainers.image.version="6.0.7" \
       org.opencontainers.image.description="ParaView 6.1 + ANARI-USD RawGeo v3 device (anim-player v15, JUSYNC fixes) + VNC desktop with one-click presets (streamlines, large-cloud, fast-morph, mesh, pathlines)"
+
+# 6.0.8: desktop layer on the published 6.0.7, so desktop edits do not rebuild
+# the ANARI device (the stages above become unreachable and are skipped).
+FROM ${DESKTOP_BASE}
+
+# Two commands on purpose: this is the exact pair used for the live desktop, and
+# splitting them keeps the resolved dependency set the same.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+      tint2 picom feh imagemagick fonts-inter \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq librsvg2-bin \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=scripts desktop/jusync-xstartup /usr/local/bin/jusync-xstartup
+COPY --from=scripts desktop/tint2rc /root/.config/tint2/tint2rc
+COPY --from=scripts desktop/picom.conf /root/.config/picom.conf
+COPY --from=scripts desktop/fluxbox-init /root/.fluxbox/init
+COPY --from=scripts desktop/fluxbox-menu /root/.fluxbox/menu
+COPY --from=scripts desktop/jusync.png /usr/share/backgrounds/jusync.png
+COPY --from=scripts desktop/paraview.png /usr/share/icons/hicolor/64x64/apps/paraview.png
+COPY --from=scripts desktop/start-paraview.sh /root/Desktop/start-paraview.sh
+COPY --from=scripts desktop/start-paraview.desktop /root/Desktop/start-paraview.desktop
+COPY --from=scripts desktop/xterm.desktop /usr/share/applications/xterm.desktop
+
+RUN chmod +x /usr/local/bin/jusync-xstartup /root/Desktop/start-paraview.sh \
+      /root/Desktop/start-paraview.desktop \
+ && ln -sf /root/Desktop/start-paraview.sh /usr/local/bin/start-paraview
+
+# ParaView must not autostart; the panel/desktop launcher is the only way in.
+ENV JUSYNC_AUTOSTART_PV=0
+
+LABEL org.opencontainers.image.title="pv-anari-usd:6.0.8" \
+      org.opencontainers.image.version="6.0.8" \
+      org.opencontainers.image.description="ParaView 6.1 + ANARI-USD RawGeo v3 device (anim-player v15, JUSYNC fixes) + beautified VNC desktop (JSC wallpaper, tint2 panel, picom, fluxbox) with one-click presets (streamlines, large-cloud, fast-morph, mesh, pathlines); ParaView starts from the launcher, not at boot"

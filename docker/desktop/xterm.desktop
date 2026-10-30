@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Terminal
+Comment=Open a shell in the desktop
+Exec=xterm -geometry 100x28+40+70 -fa "DejaVu Sans Mono" -fs 10 -bg "#0b1220" -fg "#c9d1d9" -title jusync-console -ls
+Icon=utilities-terminal
+Terminal=false
+Categories=System;TerminalEmulator;
