@@ -502,6 +502,28 @@ ANARI_USD_MIDDLEWARE_C_API int64_t RequestFileIntoBufferAbort_C(
     size_t* out_size,
     uint64_t abort_handle);
 
+// Opaque read-only view over a downloaded file.  A single-chunk transfer is
+// exposed in place in the transport buffer (no payload copy); a split
+// transfer owns one assembled buffer.  The bytes stay valid until
+// FreeFileView_C.  Pass 0 for abort_handle to disable cancellation.
+typedef struct CFileView CFileView;
+
+ANARI_USD_MIDDLEWARE_C_API CFileView* RequestFileView_C(
+    const char* filename,
+    int32_t target_rank,
+    int timeout_ms,
+    uint64_t abort_handle);
+
+ANARI_USD_MIDDLEWARE_C_API const unsigned char* GetFileViewData_C(
+    const CFileView* view,
+    size_t* out_size);
+
+// 1 when the bytes alias the transport buffer, 0 when they are an assembled
+// copy (and for a null view).
+ANARI_USD_MIDDLEWARE_C_API int FileViewIsAliased_C(const CFileView* view);
+
+ANARI_USD_MIDDLEWARE_C_API void FreeFileView_C(CFileView* view);
+
 
 ANARI_USD_MIDDLEWARE_C_API uint64_t JusyncAbortCreate_C(void);
 

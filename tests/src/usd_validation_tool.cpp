@@ -17,6 +17,7 @@
 // Include both C and C++ interfaces
 #include "AnariUsdMiddleware.h"
 #include "AnariUsdMiddleware_C.h"
+#include "FileView.h"
 #include "MiddlewareLogging.h"
 
 using namespace anari_usd_middleware;
@@ -71,6 +72,7 @@ enum TestMode {
     USD_BASIC,
     GEOMETRY_HASH,
     TEXTURE_HASH,
+    FILE_VIEW,
     CORE_API,
     COLLISION,
     ERROR_HANDLING,
@@ -85,6 +87,7 @@ static const char* ModeName(TestMode mode) {
         case USD_BASIC: return "usd-basic";
         case GEOMETRY_HASH: return "geometry-hash";
         case TEXTURE_HASH: return "texture-hash";
+        case FILE_VIEW: return "file-view";
         case CORE_API: return "core-api";
         case COLLISION: return "collision";
         case ERROR_HANDLING: return "error-handling";
@@ -520,6 +523,155 @@ public:
         return failures > 0 ? 1 : 0;
     }
 
+
+    // The transport can hand over a file as one in-place chunk or as several
+    // separate frames.  A one-chunk file must be exposed without a copy; a
+    // split file must be assembled once and still match the legacy download.
+    int runFileViewTests() {
+        std::cout << "Checking file-view assembly (alias vs owned)..." << std::endl;
+
+        int failures = 0;
+        int total = 0;
+        auto check = [&](const char* name, bool ok) {
+            ++total;
+            if (!ok) ++failures;
+            std::cout << (ok ? "  ok   " : "  FAIL ") << name << std::endl;
+        };
+
+        struct Owner {
+            std::vector<uint8_t> payload;
+            bool* released = nullptr;
+            ~Owner() { if (released) *released = true; }
+        };
+
+        // 1. One chunk covering the whole file: alias it and retain its owner.
+        {
+            bool released = false;
+            auto owner = std::make_shared<Owner>();
+            owner->released = &released;
+            owner->payload.resize(64);
+            for (size_t i = 0; i < owner->payload.size(); ++i) {
+                owner->payload[i] = static_cast<uint8_t>(i * 3 + 1);
+            }
+
+            const uint8_t* base = owner->payload.data();
+            const size_t n = owner->payload.size();
+
+            anari_usd_middleware::FileViewAssembler assembler;
+            assembler.AddChunk(owner, base, n, 0, n);
+            assembler.Complete(n);
+            anari_usd_middleware::FileView view = assembler.TakeView();
+
+            const bool aliased = view.isAliased();
+            const bool samePtr = view.data() == base;
+            const bool content = view.size() == n &&
+                std::memcmp(view.data(), base, n) == 0;
+
+            owner.reset();
+            const bool retained = !released;
+            check("alias_single_chunk", aliased && samePtr && content && retained);
+
+            {
+                anari_usd_middleware::FileView discarded = std::move(view);
+                (void)discarded;
+            }
+            check("alias_releases_owner", released);
+        }
+
+        // 2. Two chunks must be assembled contiguously into owned storage.
+        {
+            auto first = std::make_shared<Owner>();
+            auto second = std::make_shared<Owner>();
+            first->payload = {1, 2, 3, 4};
+            second->payload = {5, 6, 7, 8};
+            const std::vector<uint8_t> expected = {1, 2, 3, 4, 5, 6, 7, 8};
+            const uint64_t totalSize = expected.size();
+
+            anari_usd_middleware::FileViewAssembler assembler;
+            assembler.AddChunk(first, first->payload.data(), first->payload.size(),
+                               0, totalSize);
+            assembler.AddChunk(second, second->payload.data(), second->payload.size(),
+                               first->payload.size(), totalSize);
+            assembler.Complete(totalSize);
+            anari_usd_middleware::FileView view = assembler.TakeView();
+
+            bool ok = !view.isAliased() && view.size() == expected.size() &&
+                std::memcmp(view.data(), expected.data(), expected.size()) == 0;
+
+            // The assembled view must not depend on the source frames.
+            first->payload.assign(first->payload.size(), 0xFF);
+            second->payload.assign(second->payload.size(), 0xFF);
+            ok = ok && std::memcmp(view.data(), expected.data(), expected.size()) == 0;
+            check("assemble_two_chunks", ok);
+        }
+
+        // 3. Out-of-order chunks with a tail gap are placed by offset and the
+        //    gap is zero-filled on completion, like RequestFileIntoBuffer_C.
+        {
+            std::vector<uint8_t> tail = {9, 9};
+            std::vector<uint8_t> head = {1, 2};
+
+            anari_usd_middleware::FileViewAssembler assembler;
+            assembler.AddChunk(nullptr, tail.data(), tail.size(), 2, 6);
+            assembler.AddChunk(nullptr, head.data(), head.size(), 0, 6);
+            assembler.Complete(6);
+            anari_usd_middleware::FileView view = assembler.TakeView();
+
+            const std::vector<uint8_t> expected = {1, 2, 9, 9, 0, 0};
+            const bool ok = !view.isAliased() && view.size() == expected.size() &&
+                std::memcmp(view.data(), expected.data(), expected.size()) == 0;
+            check("assemble_out_of_order", ok);
+        }
+
+        // 4. A single chunk shorter than the announced file must not alias, or
+        //    reading the tail would run past the frame.
+        {
+            std::vector<uint8_t> part = {4, 5, 6};
+
+            anari_usd_middleware::FileViewAssembler assembler;
+            assembler.AddChunk(nullptr, part.data(), part.size(), 0, 8);
+            assembler.Complete(8);
+            anari_usd_middleware::FileView view = assembler.TakeView();
+
+            const std::vector<uint8_t> expected = {4, 5, 6, 0, 0, 0, 0, 0};
+            const bool ok = !view.isAliased() && view.size() == expected.size() &&
+                std::memcmp(view.data(), expected.data(), expected.size()) == 0;
+            check("short_single_chunk_not_aliased", ok);
+        }
+
+        // 5. An empty transfer produces an empty view.
+        {
+            anari_usd_middleware::FileViewAssembler assembler;
+            assembler.Complete(0);
+            anari_usd_middleware::FileView view = assembler.TakeView();
+            check("empty_transfer", !view && view.size() == 0);
+        }
+
+        // 6. An announced size with no chunks arrives zero-filled.
+        {
+            anari_usd_middleware::FileViewAssembler assembler;
+            assembler.Complete(4);
+            anari_usd_middleware::FileView view = assembler.TakeView();
+            const std::vector<uint8_t> zeros(4, 0);
+            const bool ok = !view.isAliased() && view.size() == 4 &&
+                std::memcmp(view.data(), zeros.data(), zeros.size()) == 0;
+            check("complete_without_chunks", ok);
+        }
+
+        // 7. C API guards: null view reads and frees must be safe.
+        {
+            size_t n = 123;
+            bool ok = GetFileViewData_C(nullptr, &n) == nullptr && n == 0;
+            ok = ok && FileViewIsAliased_C(nullptr) == 0;
+            FreeFileView_C(nullptr);
+            ok = ok && RequestFileView_C(nullptr, -1, 100, 0) == nullptr;
+            check("c_api_null_guards", ok);
+        }
+
+        std::cout << "File view: " << (total - failures) << " ok, "
+                  << failures << " failed" << std::endl;
+        return failures > 0 ? 1 : 0;
+    }
 
     // Cross-checks every public parse/fill entry point against the in-situ
     // view path the UE plugin uses.  The sample files cover a large mesh and a
@@ -1577,6 +1729,7 @@ TestMode parseMode(int argc, char* argv[], std::string& collisionType, std::stri
         else if (arg == "--mode=usd-basic") mode = USD_BASIC;
         else if (arg == "--mode=geometry-hash") mode = GEOMETRY_HASH;
         else if (arg == "--mode=texture-hash") mode = TEXTURE_HASH;
+        else if (arg == "--mode=file-view") mode = FILE_VIEW;
         else if (arg == "--mode=core-api" || arg == "--mode=api-parity") mode = CORE_API;
         else if (arg == "--mode=collision") mode = COLLISION;
         else if (arg == "--mode=error-handling") mode = ERROR_HANDLING;
@@ -1649,6 +1802,10 @@ int main(int argc, char* argv[]) {
 
         case TEXTURE_HASH:
             result = validator.runTextureHashTests();
+            break;
+
+        case FILE_VIEW:
+            result = validator.runFileViewTests();
             break;
 
         case CORE_API:

@@ -945,6 +945,17 @@ struct JusyncAbortRegistry {
 JusyncAbortRegistry g_abortRegistry;
 } // namespace
 
+namespace {
+std::shared_ptr<std::atomic<bool>> findAbortFlag(uint64_t handle) {
+    if (handle == 0) {
+        return nullptr;
+    }
+    std::lock_guard<std::mutex> lock(g_abortRegistry.mutex);
+    auto it = g_abortRegistry.tokens.find(handle);
+    return it == g_abortRegistry.tokens.end() ? nullptr : it->second;
+}
+} // namespace
+
 uint64_t AnariUsdMiddleware::createAbortToken() {
     auto flag = std::make_shared<std::atomic<bool>>(false);
     const uint64_t handle = g_abortRegistry.nextHandle.fetch_add(1);
@@ -1049,6 +1060,47 @@ bool AnariUsdMiddleware::requestFileIntoBuffer(const std::string& filename, int3
 
     outSize = totalSize;
     outStatus = 1;
+    return true;
+}
+
+bool AnariUsdMiddleware::requestFileView(const std::string& filename, int32_t targetRank,
+                                          FileView& outView, int timeoutMs,
+                                          uint64_t abortHandle) {
+    outView = FileView{};
+    if (!pImpl->anariUsdClient || !pImpl->anariUsdClient->isConnected()) {
+        MIDDLEWARE_LOG_ERROR("ANARI USD client not connected");
+        return false;
+    }
+
+    std::shared_ptr<std::atomic<bool>> abortFlag = findAbortFlag(abortHandle);
+    if (abortHandle != 0 && !abortFlag) {
+        MIDDLEWARE_LOG_WARNING("RequestFileView: unknown abort handle %llu for '%s'",
+                               static_cast<unsigned long long>(abortHandle), filename.c_str());
+    }
+
+    FileViewAssembler assembler;
+    auto chunkSink = [&assembler](std::shared_ptr<const void> owner,
+                                  const std::string& /*fname*/,
+                                  const uint8_t* chunk, size_t chunkSize,
+                                  uint64_t offset, uint64_t totalSize) {
+        assembler.AddChunk(std::move(owner), chunk, chunkSize, offset, totalSize);
+    };
+    auto completeSink = [&assembler](const std::string& /*fname*/, uint64_t size) {
+        assembler.Complete(size);
+    };
+
+    if (!pImpl->anariUsdClient->requestFileView(filename, targetRank, chunkSink,
+                                                completeSink, nullptr, timeoutMs,
+                                                abortFlag.get())) {
+        return false;
+    }
+
+    if (assembler.overflow()) {
+        MIDDLEWARE_LOG_ERROR("File '%s' is too large to expose as a view", filename.c_str());
+        return false;
+    }
+
+    outView = assembler.TakeView();
     return true;
 }
 

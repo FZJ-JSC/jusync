@@ -628,6 +628,53 @@ int64_t RequestFileIntoBufferAbort_C(const char* filename,
     }
 }
 
+struct CFileView {
+    anari_usd_middleware::FileView view;
+};
+
+CFileView* RequestFileView_C(const char* filename,
+                             int32_t target_rank,
+                             int timeout_ms,
+                             uint64_t abort_handle) {
+    if (!g_middleware || !filename) {
+        return nullptr;
+    }
+    try {
+        auto* handle = new CFileView();
+        if (!g_middleware->requestFileView(filename, target_rank, handle->view,
+                                           timeout_ms, abort_handle) ||
+            !handle->view) {
+            delete handle;
+            return nullptr;
+        }
+        return handle;
+    } catch (...) {
+        MIDDLEWARE_LOG_ERROR("RequestFileView_C: exception for '%s'", filename);
+        return nullptr;
+    }
+}
+
+const unsigned char* GetFileViewData_C(const CFileView* view, size_t* out_size) {
+    if (out_size) {
+        *out_size = 0;
+    }
+    if (!view) {
+        return nullptr;
+    }
+    if (out_size) {
+        *out_size = view->view.size();
+    }
+    return view->view.data();
+}
+
+int FileViewIsAliased_C(const CFileView* view) {
+    return (view && view->view.isAliased()) ? 1 : 0;
+}
+
+void FreeFileView_C(CFileView* view) {
+    delete view;
+}
+
 uint64_t JusyncAbortCreate_C(void) {
     if (!g_middleware) {
         return 0;

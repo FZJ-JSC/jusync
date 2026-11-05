@@ -11,6 +11,7 @@
 #include "MiddlewareLogging.h"
 #include "CollisionProcessor.h"     // NEW: collision types / data
 #include "AnariUsdMessages.h"       // FileInfo struct
+#include "FileView.h"               // zero-copy download view
 
 #ifndef ANARI_USD_MIDDLEWARE_API
 # ifdef _WIN32
@@ -113,6 +114,12 @@ public:
                                uint8_t* outBuffer, size_t outCapacity,
                                size_t& outSize, int& outStatus, int timeoutMs = 30000,
                                uint64_t abortHandle = 0);
+
+    // Downloads filename into a view.  A single-chunk file is aliased in the
+    // transport buffer (no copy); a split file is assembled once.
+    bool requestFileView(const std::string& filename, int32_t targetRank,
+                         FileView& outView, int timeoutMs = 30000,
+                         uint64_t abortHandle = 0);
 
     uint64_t createAbortToken();
     bool triggerAbortToken(uint64_t handle);

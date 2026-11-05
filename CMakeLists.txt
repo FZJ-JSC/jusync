@@ -556,6 +556,10 @@ if(BUILD_TESTS)
               COMMAND usd_validation_tool --mode=texture-hash
               WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+    add_test(NAME "file_view"
+              COMMAND usd_validation_tool --mode=file-view
+              WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
     add_test(NAME "core_api_parity"
               COMMAND usd_validation_tool --mode=core-api
               WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -588,7 +592,7 @@ if(BUILD_TESTS)
     # Set test properties
     set_tests_properties(
         build_verification binary_static_check usd_basic_processing
-        geometry_hash texture_hash core_api_parity
+        geometry_hash texture_hash file_view core_api_parity
         collision_simple collision_complex collision_convex
         error_handling_tests performance_benchmarks integration_suite
         PROPERTIES TIMEOUT 300
@@ -596,7 +600,7 @@ if(BUILD_TESTS)
 
     set_tests_properties(build_verification binary_static_check PROPERTIES LABELS "build")
     set_tests_properties(usd_basic_processing PROPERTIES LABELS "basic")
-    set_tests_properties(geometry_hash texture_hash core_api_parity PROPERTIES LABELS "parity")
+    set_tests_properties(geometry_hash texture_hash file_view core_api_parity PROPERTIES LABELS "parity")
     set_tests_properties(collision_simple collision_complex collision_convex PROPERTIES LABELS "collision")
     set_tests_properties(error_handling_tests PROPERTIES LABELS "error")
     set_tests_properties(performance_benchmarks PROPERTIES LABELS "performance")

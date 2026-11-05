@@ -45,6 +45,14 @@ public:
                                                   size_t chunkSize,
                                                   uint64_t offset,
                                                   uint64_t totalSize)>;
+    // Chunk callback that also receives the transport buffer owning the chunk,
+    // so a consumer can expose the payload in place instead of copying it.
+    using FileViewChunkCallback = std::function<void(std::shared_ptr<const void> owner,
+                                                      const std::string& filename,
+                                                      const uint8_t* chunk,
+                                                      size_t chunkSize,
+                                                      uint64_t offset,
+                                                      uint64_t totalSize)>;
     using FileCompleteCallback = std::function<void(const std::string& filename,
                                                     uint64_t totalSize)>;
     using FileListCallback = std::function<void(const std::vector<std::string>& files)>;
@@ -148,6 +156,13 @@ public:
                      int timeoutMs = 30000,
                      const std::atomic<bool>* abortFlag = nullptr);
 
+    bool requestFileView(const std::string& filename, int32_t targetRank,
+                         FileViewChunkCallback chunkCallback,
+                         FileCompleteCallback completeCallback,
+                         ErrorCallback errorCallback = nullptr,
+                         int timeoutMs = 30000,
+                         const std::atomic<bool>* abortFlag = nullptr);
+
     void abandonRequestFrames(uint32_t requestId);
     void wakeResponseWaiters();
     bool requestFrame(int32_t frameNumber, int32_t targetRank,
@@ -215,6 +230,14 @@ private:
     void cleanup();
 
     bool sendRequest(const void* data, size_t size, uint32_t requestId);
+
+    // Shared request/response loop for requestFile and requestFileView.
+    bool requestFileImpl(const std::string& filename, int32_t targetRank,
+                         const FileViewChunkCallback& chunkCallback,
+                         FileCompleteCallback completeCallback,
+                         ErrorCallback errorCallback,
+                         int timeoutMs,
+                         const std::atomic<bool>* abortFlag);
 
     bool handleFileChunkResponse(const ZmqFileChunk& chunk,
                                   const std::vector<uint8_t>& chunkData,

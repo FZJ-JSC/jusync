@@ -743,6 +743,35 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
                                   ErrorCallback errorCallback,
                                   int timeoutMs,
                                   const std::atomic<bool>* abortFlag) {
+    FileViewChunkCallback sink;
+    if (chunkCallback) {
+        sink = [chunkCallback](std::shared_ptr<const void> /*owner*/,
+                               const std::string& fname,
+                               const uint8_t* chunk, size_t chunkSize,
+                               uint64_t offset, uint64_t totalSize) {
+            chunkCallback(fname, chunk, chunkSize, offset, totalSize);
+        };
+    }
+    return requestFileImpl(filename, targetRank, sink, completeCallback,
+                           errorCallback, timeoutMs, abortFlag);
+}
+
+bool AnariUsdClient::requestFileView(const std::string& filename, int32_t targetRank,
+                                     FileViewChunkCallback chunkCallback,
+                                     FileCompleteCallback completeCallback,
+                                     ErrorCallback errorCallback,
+                                     int timeoutMs,
+                                     const std::atomic<bool>* abortFlag) {
+    return requestFileImpl(filename, targetRank, chunkCallback, completeCallback,
+                           errorCallback, timeoutMs, abortFlag);
+}
+
+bool AnariUsdClient::requestFileImpl(const std::string& filename, int32_t targetRank,
+                                     const FileViewChunkCallback& chunkCallback,
+                                     FileCompleteCallback completeCallback,
+                                     ErrorCallback errorCallback,
+                                     int timeoutMs,
+                                     const std::atomic<bool>* abortFlag) {
     if (connectionStatus.load() != ConnectionStatus::Connected || !zmqSocket) {
         MIDDLEWARE_LOG_ERROR("AnariUsdClient not connected");
         return false;
@@ -831,7 +860,8 @@ bool AnariUsdClient::requestFile(const std::string& filename, int32_t targetRank
                     }
 
                     if (chunkCallback) {
-                        chunkCallback(chunk->getFilename(),
+                        chunkCallback(std::shared_ptr<const void>(dataFrame),
+                                      chunk->getFilename(),
                                       combinedData + sizeof(ZmqFileChunk),
                                       dataSize, chunk->chunk_offset, chunk->file_size);
                     }
