@@ -537,9 +537,86 @@ private:
             return false;
         }
 
+        // The Y-up fill must be byte-identical to the historical (x,-y,z) fill
+        // followed by UE's component swap (X, Z, Y) -> (x, z, -y).
+        bool bYUpOk = true;
+        {
+            std::vector<CMeshDataFillCompact> fillMeshesYUp(meshCount);
+            std::vector<std::vector<float>> pointStoreYUp(meshCount);
+            std::vector<std::vector<int32_t>> indexStoreYUp(meshCount);
+            std::vector<std::vector<float>> normalStoreYUp(meshCount);
+            std::vector<std::vector<float>> uvStoreYUp(meshCount);
+            std::vector<std::vector<unsigned char>> colorStoreYUp(meshCount);
+
+            for (size_t i = 0; i < meshCount; ++i) {
+                const CMeshLayout& l = meshLayouts[i];
+                const size_t normalCount = std::max(l.normals_count, l.points_count);
+                const size_t uvCount = std::max(l.uvs_count, l.points_count);
+                const size_t colorCount = std::max(l.vertex_colors_count, l.points_count);
+
+                pointStoreYUp[i].assign(l.points_count * 3, 0.0f);
+                indexStoreYUp[i].assign(l.indices_count, 0);
+                normalStoreYUp[i].assign(normalCount * 3, 0.0f);
+                uvStoreYUp[i].assign(uvCount * 2, 0.0f);
+                colorStoreYUp[i].assign(colorCount * 4, 0);
+
+                CMeshDataFillCompact& f = fillMeshesYUp[i];
+                f.points = pointStoreYUp[i].data();
+                f.indices = indexStoreYUp[i].data();
+                f.normals = l.normals_count > 0 ? normalStoreYUp[i].data() : nullptr;
+                f.uvs = l.uvs_count > 0 ? uvStoreYUp[i].data() : nullptr;
+                f.vertex_colors8 = l.vertex_colors_count > 0 ? colorStoreYUp[i].data() : nullptr;
+            }
+
+            const int yupResult = FillUSDFullCompactYUp_C(
+                handle,
+                fillMeshesYUp.empty() ? nullptr : fillMeshesYUp.data(), fillMeshesYUp.size(),
+                nullptr, 0);
+
+            if (!yupResult) {
+                std::cerr << "YUP fill failed for " << filename << std::endl;
+                bYUpOk = false;
+            } else {
+                for (size_t i = 0; i < meshCount && bYUpOk; ++i) {
+                    const CMeshLayout& l = meshLayouts[i];
+                    for (size_t v = 0; v < l.points_count; ++v) {
+                        const size_t o = v * 3;
+                        if (pointStoreYUp[i][o + 0] != pointStore[i][o + 0] ||
+                            pointStoreYUp[i][o + 1] != pointStore[i][o + 2] ||
+                            pointStoreYUp[i][o + 2] != pointStore[i][o + 1]) {
+                            std::cerr << "YUP point v=" << v
+                                      << " base=(" << pointStore[i][o + 0] << "," << pointStore[i][o + 1] << "," << pointStore[i][o + 2] << ")"
+                                      << " yup=(" << pointStoreYUp[i][o + 0] << "," << pointStoreYUp[i][o + 1] << "," << pointStoreYUp[i][o + 2] << ")"
+                                      << std::endl;
+                            bYUpOk = false;
+                            break;
+                        }
+                    }
+                    for (size_t v = 0; v < l.normals_count && bYUpOk; ++v) {
+                        const size_t o = v * 3;
+                        if (normalStoreYUp[i][o + 0] != normalStore[i][o + 0] ||
+                            normalStoreYUp[i][o + 1] != normalStore[i][o + 2] ||
+                            normalStoreYUp[i][o + 2] != normalStore[i][o + 1]) {
+                            bYUpOk = false;
+                            break;
+                        }
+                    }
+                    if (indexStoreYUp[i] != indexStore[i] ||
+                        uvStoreYUp[i] != uvStore[i] ||
+                        colorStoreYUp[i] != colorStore[i]) {
+                        bYUpOk = false;
+                    }
+                }
+            }
+        }
+        if (!bYUpOk) {
+            std::cerr << "YUP mismatch for " << filename << std::endl;
+        }
+
         const uint64_t seed = 1469598103934665603ull;
         std::cout << "H file=" << filename
-                  << " meshes=" << meshCount << " clouds=" << cloudCount << std::endl;
+                  << " meshes=" << meshCount << " clouds=" << cloudCount
+                  << " yup=" << (bYUpOk ? "ok" : "FAIL") << std::endl;
 
         for (size_t i = 0; i < meshCount; ++i) {
             uint64_t h = seed;
@@ -573,7 +650,7 @@ private:
 
         FreeUSDFullLayouts_C(meshLayouts, meshCount, cloudLayouts, cloudCount);
         FreeParsedUSD_C(handle);
-        return true;
+        return bYUpOk;
     }
 
     void processFileBasic(const std::string& filePath) {        std::string filename = fs::path(filePath).filename().string();

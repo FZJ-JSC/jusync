@@ -248,6 +248,15 @@ ANARI_USD_MIDDLEWARE_C_API int FillUSDFullCompact_C(
     CPointCloudDataFill* clouds,
     size_t cloud_count);
 
+// Same as FillUSDFullCompact_C, but mesh points/normals are written directly in
+// UE's left-handed (x, z, -y) convention.  Point clouds are unaffected.
+ANARI_USD_MIDDLEWARE_C_API int FillUSDFullCompactYUp_C(
+    void* handle,
+    CMeshDataFillCompact* meshes,
+    size_t mesh_count,
+    CPointCloudDataFill* clouds,
+    size_t cloud_count);
+
 ANARI_USD_MIDDLEWARE_C_API void FreeParsedUSD_C(void* handle);
 
 ANARI_USD_MIDDLEWARE_C_API void FreeUSDFullLayouts_C(

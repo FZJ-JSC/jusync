@@ -928,15 +928,27 @@ int FillUSDFull_C(void* handle,
     }
 }
 
-static bool FillMeshIntoBufferCompact(const anari_usd_middleware::UsdProcessor::MeshData& src,
-                                      CMeshDataFillCompact& dst) {
+// bUEYUp writes UE's left-handed (x, z, -y) directly, which is what the UE
+// plugin used to produce with a post-fill remap loop.  The default keeps the
+// historical Z-up mirrored layout (x, -y, z) for every other consumer.
+static bool FillMeshIntoBufferCompactEx(const anari_usd_middleware::UsdProcessor::MeshData& src,
+                                        CMeshDataFillCompact& dst,
+                                        bool bUEYUp) {
     const size_t nVerts = src.points.size();
 
     if (dst.points && nVerts > 0) {
-        for (size_t i = 0; i < nVerts; ++i) {
-            dst.points[i * 3 + 0] = src.points[i].x;
-            dst.points[i * 3 + 1] = -src.points[i].y;
-            dst.points[i * 3 + 2] = src.points[i].z;
+        if (bUEYUp) {
+            for (size_t i = 0; i < nVerts; ++i) {
+                dst.points[i * 3 + 0] = src.points[i].x;
+                dst.points[i * 3 + 1] = src.points[i].z;
+                dst.points[i * 3 + 2] = -src.points[i].y;
+            }
+        } else {
+            for (size_t i = 0; i < nVerts; ++i) {
+                dst.points[i * 3 + 0] = src.points[i].x;
+                dst.points[i * 3 + 1] = -src.points[i].y;
+                dst.points[i * 3 + 2] = src.points[i].z;
+            }
         }
     }
 
@@ -948,10 +960,18 @@ static bool FillMeshIntoBufferCompact(const anari_usd_middleware::UsdProcessor::
 
     const size_t nNormals = src.normals.size();
     if (dst.normals && nNormals > 0) {
-        for (size_t i = 0; i < nNormals; ++i) {
-            dst.normals[i * 3 + 0] = src.normals[i].x;
-            dst.normals[i * 3 + 1] = -src.normals[i].y;
-            dst.normals[i * 3 + 2] = src.normals[i].z;
+        if (bUEYUp) {
+            for (size_t i = 0; i < nNormals; ++i) {
+                dst.normals[i * 3 + 0] = src.normals[i].x;
+                dst.normals[i * 3 + 1] = src.normals[i].z;
+                dst.normals[i * 3 + 2] = -src.normals[i].y;
+            }
+        } else {
+            for (size_t i = 0; i < nNormals; ++i) {
+                dst.normals[i * 3 + 0] = src.normals[i].x;
+                dst.normals[i * 3 + 1] = -src.normals[i].y;
+                dst.normals[i * 3 + 2] = src.normals[i].z;
+            }
         }
     }
 
@@ -976,11 +996,12 @@ static bool FillMeshIntoBufferCompact(const anari_usd_middleware::UsdProcessor::
     return true;
 }
 
-int FillUSDFullCompact_C(void* handle,
-                         CMeshDataFillCompact* meshes,
-                         size_t mesh_count,
-                         CPointCloudDataFill* clouds,
-                         size_t cloud_count) {
+static int FillUSDFullCompactInternal(void* handle,
+                                      CMeshDataFillCompact* meshes,
+                                      size_t mesh_count,
+                                      CPointCloudDataFill* clouds,
+                                      size_t cloud_count,
+                                      bool bUEYUp) {
     auto* h = static_cast<ParsedUSDHandle*>(handle);
     if (!h) return 0;
     if (mesh_count > h->meshes.size() || cloud_count > h->clouds.size()) {
@@ -990,7 +1011,7 @@ int FillUSDFullCompact_C(void* handle,
     }
     try {
         for (size_t i = 0; i < mesh_count; ++i) {
-            if (!FillMeshIntoBufferCompact(h->meshes[i], meshes[i])) return 0;
+            if (!FillMeshIntoBufferCompactEx(h->meshes[i], meshes[i], bUEYUp)) return 0;
         }
         for (size_t i = 0; i < cloud_count; ++i) {
             if (!FillCloudIntoBuffer(h->clouds[i], clouds[i])) return 0;
@@ -1003,6 +1024,22 @@ int FillUSDFullCompact_C(void* handle,
         MIDDLEWARE_LOG_ERROR("FillUSDFullCompact_C: exception");
         return 0;
     }
+}
+
+int FillUSDFullCompact_C(void* handle,
+                         CMeshDataFillCompact* meshes,
+                         size_t mesh_count,
+                         CPointCloudDataFill* clouds,
+                         size_t cloud_count) {
+    return FillUSDFullCompactInternal(handle, meshes, mesh_count, clouds, cloud_count, false);
+}
+
+int FillUSDFullCompactYUp_C(void* handle,
+                            CMeshDataFillCompact* meshes,
+                            size_t mesh_count,
+                            CPointCloudDataFill* clouds,
+                            size_t cloud_count) {
+    return FillUSDFullCompactInternal(handle, meshes, mesh_count, clouds, cloud_count, true);
 }
 
 void FreeParsedUSD_C(void* handle) {
