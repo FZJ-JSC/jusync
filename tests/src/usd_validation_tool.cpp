@@ -524,10 +524,104 @@ public:
     }
 
 
+    // Parses a payload through the in-situ compact path and digests every
+    // buffer a consumer receives, so two byte sources can be compared.
+    bool digestCompactFill(const unsigned char* data, size_t size,
+                           const std::string& filename, uint64_t& outDigest) {
+        void* handle = nullptr;
+        CMeshLayout* meshLayouts = nullptr;
+        size_t meshCount = 0;
+        CPointCloudLayout* cloudLayouts = nullptr;
+        size_t cloudCount = 0;
+
+        if (!QueryUSDFullLayout_C(data, size, filename.c_str(),
+                                  &handle, &meshLayouts, &meshCount,
+                                  &cloudLayouts, &cloudCount) || !handle) {
+            if (handle) FreeParsedUSD_C(handle);
+            FreeUSDFullLayouts_C(meshLayouts, meshCount, cloudLayouts, cloudCount);
+            return false;
+        }
+
+        std::vector<CMeshDataFillCompact> fillMeshes(meshCount);
+        std::vector<std::vector<float>> pointStore(meshCount);
+        std::vector<std::vector<int32_t>> indexStore(meshCount);
+        std::vector<std::vector<float>> normalStore(meshCount);
+        std::vector<std::vector<float>> uvStore(meshCount);
+        std::vector<std::vector<unsigned char>> colorStore(meshCount);
+
+        for (size_t i = 0; i < meshCount; ++i) {
+            const CMeshLayout& l = meshLayouts[i];
+            const size_t normalCount = std::max(l.normals_count, l.points_count);
+            const size_t uvCount = std::max(l.uvs_count, l.points_count);
+            const size_t colorCount = std::max(l.vertex_colors_count, l.points_count);
+
+            pointStore[i].assign(l.points_count * 3, 0.0f);
+            indexStore[i].assign(l.indices_count, 0);
+            normalStore[i].assign(normalCount * 3, 0.0f);
+            uvStore[i].assign(uvCount * 2, 0.0f);
+            colorStore[i].assign(colorCount * 4, 0);
+
+            CMeshDataFillCompact& f = fillMeshes[i];
+            f.points = pointStore[i].data();
+            f.indices = indexStore[i].data();
+            f.normals = l.normals_count > 0 ? normalStore[i].data() : nullptr;
+            f.uvs = l.uvs_count > 0 ? uvStore[i].data() : nullptr;
+            f.vertex_colors8 = l.vertex_colors_count > 0 ? colorStore[i].data() : nullptr;
+        }
+
+        std::vector<CPointCloudDataFill> fillClouds(cloudCount);
+        std::vector<std::vector<double>> cloudPosStore(cloudCount);
+        std::vector<std::vector<unsigned char>> cloudColorStore(cloudCount);
+        std::vector<std::vector<float>> cloudWidthStore(cloudCount);
+
+        for (size_t i = 0; i < cloudCount; ++i) {
+            const CPointCloudLayout& l = cloudLayouts[i];
+            cloudPosStore[i].assign(l.point_count * 3, 0.0);
+            cloudColorStore[i].assign(l.point_count * 4, 0);
+            cloudWidthStore[i].assign(l.point_count, 0.0f);
+
+            CPointCloudDataFill& f = fillClouds[i];
+            f.positions = cloudPosStore[i].data();
+            f.colors8 = l.has_colors ? cloudColorStore[i].data() : nullptr;
+            f.widths = l.has_widths ? cloudWidthStore[i].data() : nullptr;
+            f.bounding_box_min[0] = f.bounding_box_min[1] = f.bounding_box_min[2] = 0.0f;
+            f.bounding_box_max[0] = f.bounding_box_max[1] = f.bounding_box_max[2] = 0.0f;
+            f.lidar_points = nullptr;
+            f.lidar_point_stride = 0;
+            f.lidar_point_version = 0;
+        }
+
+        const bool filled = FillUSDFullCompact_C(
+            handle,
+            fillMeshes.empty() ? nullptr : fillMeshes.data(), fillMeshes.size(),
+            fillClouds.empty() ? nullptr : fillClouds.data(), fillClouds.size()) != 0;
+
+        uint64_t h = 1469598103934665603ull;
+        for (size_t i = 0; i < meshCount && filled; ++i) {
+            h = HashBytes(h, pointStore[i].data(), pointStore[i].size() * sizeof(float));
+            h = HashBytes(h, indexStore[i].data(), indexStore[i].size() * sizeof(int32_t));
+            h = HashBytes(h, normalStore[i].data(), normalStore[i].size() * sizeof(float));
+            h = HashBytes(h, uvStore[i].data(), uvStore[i].size() * sizeof(float));
+            h = HashBytes(h, colorStore[i].data(), colorStore[i].size());
+        }
+        for (size_t i = 0; i < cloudCount && filled; ++i) {
+            h = HashBytes(h, cloudPosStore[i].data(), cloudPosStore[i].size() * sizeof(double));
+            h = HashBytes(h, cloudColorStore[i].data(), cloudColorStore[i].size());
+            h = HashBytes(h, cloudWidthStore[i].data(), cloudWidthStore[i].size() * sizeof(float));
+            h = HashBytes(h, fillClouds[i].bounding_box_min, sizeof(float) * 3);
+            h = HashBytes(h, fillClouds[i].bounding_box_max, sizeof(float) * 3);
+        }
+
+        FreeUSDFullLayouts_C(meshLayouts, meshCount, cloudLayouts, cloudCount);
+        FreeParsedUSD_C(handle);
+        outDigest = h;
+        return filled;
+    }
+
     // The transport can hand over a file as one in-place chunk or as several
     // separate frames.  A one-chunk file must be exposed without a copy; a
     // split file must be assembled once and still match the legacy download.
-    int runFileViewTests() {
+    int runFileViewTests(const std::string& testDataPath) {
         std::cout << "Checking file-view assembly (alias vs owned)..." << std::endl;
 
         int failures = 0;
@@ -666,6 +760,64 @@ public:
             FreeFileView_C(nullptr);
             ok = ok && RequestFileView_C(nullptr, -1, 100, 0) == nullptr;
             check("c_api_null_guards", ok);
+        }
+
+        // 8. Each view path over a real sample must reproduce the file bytes and
+        //    drive the compact fill to the same digest as the direct buffer.
+        {
+            const bool initialized = InitializeMiddleware_C(nullptr) != 0;
+            bool ok = initialized;
+            const std::vector<std::string> files =
+                ok ? findUSDFiles(testDataPath) : std::vector<std::string>{};
+            ok = ok && !files.empty();
+
+            int parsedFiles = 0;
+            for (const std::string& path : files) {
+                std::vector<unsigned char> bytes;
+                if (!ok || !readFileBytes(path, bytes) || bytes.empty()) {
+                    ok = false;
+                    break;
+                }
+                const std::string name = fs::path(path).filename().string();
+
+                anari_usd_middleware::FileViewAssembler single;
+                single.AddChunk(nullptr, bytes.data(), bytes.size(), 0, bytes.size());
+                single.Complete(bytes.size());
+                anari_usd_middleware::FileView aliased = single.TakeView();
+
+                anari_usd_middleware::FileViewAssembler split;
+                const size_t cutA = bytes.size() / 3;
+                const size_t cutB = (bytes.size() * 2) / 3;
+                split.AddChunk(nullptr, bytes.data(), cutA, 0, bytes.size());
+                split.AddChunk(nullptr, bytes.data() + cutA, cutB - cutA, cutA, bytes.size());
+                split.AddChunk(nullptr, bytes.data() + cutB, bytes.size() - cutB, cutB, bytes.size());
+                split.Complete(bytes.size());
+                anari_usd_middleware::FileView assembled = split.TakeView();
+
+                ok = ok && aliased.isAliased() &&
+                     aliased.size() == bytes.size() &&
+                     std::memcmp(aliased.data(), bytes.data(), bytes.size()) == 0;
+                ok = ok && !assembled.isAliased() &&
+                     assembled.size() == bytes.size() &&
+                     std::memcmp(assembled.data(), bytes.data(), bytes.size()) == 0;
+
+                uint64_t directDigest = 0, aliasDigest = 0, assembledDigest = 0;
+                ok = ok && digestCompactFill(bytes.data(), bytes.size(), name, directDigest);
+                ok = ok && digestCompactFill(aliased.data(), aliased.size(), name, aliasDigest);
+                ok = ok && digestCompactFill(assembled.data(), assembled.size(), name, assembledDigest);
+                ok = ok && directDigest == aliasDigest && directDigest == assembledDigest;
+                if (!ok) {
+                    break;
+                }
+                ++parsedFiles;
+            }
+
+            if (initialized) {
+                ShutdownMiddleware_C();
+            }
+            std::cout << "  (" << parsedFiles << " sample files parsed through both view paths)"
+                      << std::endl;
+            check("sample_view_parity", ok);
         }
 
         std::cout << "File view: " << (total - failures) << " ok, "
@@ -1805,7 +1957,7 @@ int main(int argc, char* argv[]) {
             break;
 
         case FILE_VIEW:
-            result = validator.runFileViewTests();
+            result = validator.runFileViewTests(test_data_dir.string());
             break;
 
         case CORE_API:
