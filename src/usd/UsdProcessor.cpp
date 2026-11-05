@@ -966,7 +966,17 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
 
         const uint8_t* wirePtr = buffer;
         size_t wireSize = buffer_size;
-        static thread_local std::vector<uint8_t> decompressed;
+        // Decompression scratch: grown-only and allocated without value-init,
+        // so we do not zero a large buffer that ZSTD immediately overwrites.
+        static thread_local std::unique_ptr<uint8_t[]> decompressedBuffer;
+        static thread_local size_t decompressedCapacity = 0;
+        auto ensureDecompressedCapacity = [](size_t required) {
+            if (required > decompressedCapacity) {
+                decompressedBuffer.reset(new uint8_t[required]); // default-init: no memset
+                decompressedCapacity = required;
+            }
+            return decompressedBuffer.get();
+        };
 #if defined(JUSYNC_HAS_ZSTD)
         // Explicit byte compare (not an endianness-dependent uint32_t compare):
 
@@ -981,7 +991,7 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
             }
 
             if (contentSize == 0) {
-                wirePtr = decompressed.data();
+                wirePtr = decompressedBuffer.get();
                 wireSize = 0;
             } else {
                 size_t dstCapacity;
@@ -1000,10 +1010,11 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
                     dstCapacity = std::min(initialGuess, static_cast<size_t>(safety::MAX_BUFFER_SIZE));
                 }
 
-                decompressed.resize(dstCapacity);
+                uint8_t* dst = ensureDecompressedCapacity(dstCapacity);
                 bool success = false;
+                size_t actualSize = 0;
                 for (;;) {
-                    size_t actual = ZSTD_decompress(decompressed.data(), decompressed.size(), wirePtr, wireSize);
+                    size_t actual = ZSTD_decompress(dst, dstCapacity, wirePtr, wireSize);
                     if (!ZSTD_isError(actual)) {
                         if (actual > static_cast<size_t>(safety::MAX_BUFFER_SIZE)) {
                             MIDDLEWARE_LOG_ERROR("zstd USD payload too large after decompression: %zu bytes for '%s'",
@@ -1011,7 +1022,7 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
                             stats.processingErrors.fetch_add(1);
                             return false;
                         }
-                        decompressed.resize(actual);
+                        actualSize = actual;
                         success = true;
                         break;
                     }
@@ -1021,20 +1032,21 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
                         stats.processingErrors.fetch_add(1);
                         return false;
                     }
-                    if (decompressed.size() >= static_cast<size_t>(safety::MAX_BUFFER_SIZE)) {
+                    if (dstCapacity >= static_cast<size_t>(safety::MAX_BUFFER_SIZE)) {
                         MIDDLEWARE_LOG_ERROR("zstd USD payload too large after decompression for '%s'",
                                              fileName.c_str());
                         stats.processingErrors.fetch_add(1);
                         return false;
                     }
-                    size_t nextCapacity = std::min(
-                        decompressed.size() * 2,
+                    const size_t nextCapacity = std::min(
+                        dstCapacity * 2,
                         static_cast<size_t>(safety::MAX_BUFFER_SIZE));
-                    decompressed.resize(nextCapacity);
+                    dstCapacity = nextCapacity;
+                    dst = ensureDecompressedCapacity(dstCapacity);
                 }
 
-                wirePtr = decompressed.data();
-                wireSize = decompressed.size();
+                wirePtr = dst;
+                wireSize = actualSize;
                 MIDDLEWARE_LOG_INFO("Decompressed zstd USD payload for '%s': %zu -> %zu bytes",
                                     fileName.c_str(), buffer_size, wireSize);
             }
