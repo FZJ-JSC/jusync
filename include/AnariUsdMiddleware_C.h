@@ -291,6 +291,23 @@ ANARI_USD_MIDDLEWARE_C_API int SetCollisionParameters_C(float simplification_rat
 ANARI_USD_MIDDLEWARE_C_API CTextureData CreateTextureFromBuffer_C(const unsigned char* buffer,
                                                                    size_t buffer_size);
 
+/* Handle-based texture decode: the decoded RGBA pixels stay owned by the
+   handle, so callers (e.g. a GPU upload) can read them without another copy.
+   Release with FreeTextureHandle_C. */
+typedef struct CTextureHandle CTextureHandle;
+
+ANARI_USD_MIDDLEWARE_C_API CTextureHandle* CreateTextureHandle_C(const unsigned char* buffer,
+                                                                 size_t buffer_size);
+
+ANARI_USD_MIDDLEWARE_C_API int GetTextureHandleData_C(CTextureHandle* handle,
+                                                      int* out_width,
+                                                      int* out_height,
+                                                      int* out_channels,
+                                                      const unsigned char** out_data,
+                                                      size_t* out_size);
+
+ANARI_USD_MIDDLEWARE_C_API void FreeTextureHandle_C(CTextureHandle* handle);
+
 ANARI_USD_MIDDLEWARE_C_API int WriteGradientLineAsPNG_C(const unsigned char* buffer,
                                                         size_t buffer_size,
                                                         const char* output_path);

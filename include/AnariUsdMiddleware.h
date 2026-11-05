@@ -195,6 +195,16 @@ public:
 
     TextureData CreateTextureFromBuffer(const std::vector<uint8_t>& buffer);
 
+    /// Decode a texture without copying the decoded pixels into a vector.
+    /// @param outData malloc-owned RGBA pixels; release with FreeTextureBuffer().
+    /// @return true when the outputs are valid.
+    bool CreateTextureFromBufferOwning(const uint8_t* buffer, size_t bufferSize,
+                                       int& outWidth, int& outHeight, int& outChannels,
+                                       unsigned char** outData, size_t& outSize);
+
+    /// Release a buffer returned by CreateTextureFromBufferOwning().
+    static void FreeTextureBuffer(unsigned char* data);
+
     bool LoadUSDBuffer(const std::vector<uint8_t>& buffer,
                        const std::string& fileName,
                        std::vector<MeshData>& outMeshes);

@@ -8,6 +8,7 @@
 #include <shared_mutex>
 #include <functional>
 #include <limits>
+#include <cstdlib>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include "MiddlewareLogging.h"
@@ -122,6 +123,48 @@ public:
         }
     };
 
+    /// Decoded RGBA pixels owned by the producer.  Consumers that can read the
+    /// decoded buffer directly (e.g. a GPU upload) use this instead of copying
+    /// into TextureData::data.
+    struct OwningTextureData {
+        unsigned char* data = nullptr;  ///< malloc'd; freed by Reset/destructor
+        int width = 0;
+        int height = 0;
+        int channels = 0;
+        size_t size = 0;
+
+        OwningTextureData() = default;
+        OwningTextureData(const OwningTextureData&) = delete;
+        OwningTextureData& operator=(const OwningTextureData&) = delete;
+        OwningTextureData(OwningTextureData&& other) noexcept { MoveFrom(other); }
+        OwningTextureData& operator=(OwningTextureData&& other) noexcept {
+            if (this != &other) { Reset(); MoveFrom(other); }
+            return *this;
+        }
+        ~OwningTextureData() { Reset(); }
+
+        bool isValid() const {
+            return data != nullptr && width > 0 && height > 0 &&
+                   channels > 0 && channels <= 4 && size > 0 &&
+                   width <= 16384 && height <= 16384;
+        }
+
+        void Reset() {
+            if (data) { std::free(data); data = nullptr; }
+            width = height = channels = 0;
+            size = 0;
+        }
+
+    private:
+        void MoveFrom(OwningTextureData& other) {
+            data = other.data; width = other.width; height = other.height;
+            channels = other.channels; size = other.size;
+            other.data = nullptr;
+            other.width = other.height = other.channels = 0;
+            other.size = 0;
+        }
+    };
+
     struct PointCloudData {
         std::string elementName;        ///< Name of the USD element
         std::string typeName;           ///< Type (always "GeomPoints")
@@ -221,6 +264,11 @@ public:
     TextureData CreateTextureFromBuffer(const std::vector<uint8_t>& buffer,
                                        const std::string& expectedFormat = "");
 
+    /// Same decode as CreateTextureFromBuffer, but returns the decoded pixels
+    /// without copying them into a vector.  The input buffer is not copied
+    /// either, so callers can decode straight from their own memory.
+    OwningTextureData CreateTextureFromBufferOwning(const uint8_t* buffer, size_t bufferSize);
+
     bool LoadUSDBuffer(const std::vector<uint8_t>& buffer,
                        const std::string& fileName,
                        std::vector<MeshData>& outMeshData,
@@ -260,6 +308,11 @@ public:
     static bool isSupportedExtension(const std::string& extension);
 
 private:
+    // Shared texture decode used by the copying and owning entry points.
+    // Returns a malloc-owned RGBA buffer (release with std::free), or nullptr.
+    unsigned char* DecodeTextureBuffer(const uint8_t* buffer, size_t bufferSize,
+                                       int& outWidth, int& outHeight, size_t& outSize);
+
     class UsdProcessorImpl;
     std::unique_ptr<UsdProcessorImpl> pImpl;
 

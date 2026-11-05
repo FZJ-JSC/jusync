@@ -1596,6 +1596,58 @@ CTextureData CreateTextureFromBuffer_C(const unsigned char* buffer, size_t buffe
     return result;
 }
 
+struct CTextureHandle {
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    unsigned char* data = nullptr;
+    size_t data_size = 0;
+};
+
+CTextureHandle* CreateTextureHandle_C(const unsigned char* buffer, size_t buffer_size) {
+    if (!g_middleware || !buffer || buffer_size == 0) {
+        return nullptr;
+    }
+
+    auto* handle = new (std::nothrow) CTextureHandle();
+    if (!handle) {
+        return nullptr;
+    }
+
+    if (!g_middleware->CreateTextureFromBufferOwning(buffer, buffer_size,
+                                                     handle->width, handle->height,
+                                                     handle->channels, &handle->data,
+                                                     handle->data_size)) {
+        delete handle;
+        return nullptr;
+    }
+
+    return handle;
+}
+
+int GetTextureHandleData_C(CTextureHandle* handle, int* out_width, int* out_height,
+                           int* out_channels, const unsigned char** out_data,
+                           size_t* out_size) {
+    if (!handle || !handle->data || handle->data_size == 0) {
+        return 0;
+    }
+
+    if (out_width) *out_width = handle->width;
+    if (out_height) *out_height = handle->height;
+    if (out_channels) *out_channels = handle->channels;
+    if (out_data) *out_data = handle->data;
+    if (out_size) *out_size = handle->data_size;
+    return 1;
+}
+
+void FreeTextureHandle_C(CTextureHandle* handle) {
+    if (!handle) {
+        return;
+    }
+    anari_usd_middleware::AnariUsdMiddleware::FreeTextureBuffer(handle->data);
+    delete handle;
+}
+
 int WriteGradientLineAsPNG_C(const unsigned char* buffer, size_t buffer_size, const char* output_path) {
     if (!g_middleware || !buffer || !output_path) {
         return 0;

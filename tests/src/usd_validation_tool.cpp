@@ -67,6 +67,7 @@ enum TestMode {
     STATIC_CHECK,
     USD_BASIC,
     GEOMETRY_HASH,
+    TEXTURE_HASH,
     COLLISION,
     ERROR_HANDLING,
     PERFORMANCE,
@@ -252,6 +253,108 @@ public:
 
         ShutdownMiddleware_C();
         std::cout << "📊 Geometry hash: " << (usdFiles.size() - failures) << " ok, "
+                  << failures << " failed" << std::endl;
+        return failures > 0 ? 1 : 0;
+    }
+
+    // Builds an uncompressed 24-bit BMP so the texture tests need no image
+    // files on disk.  Rows are bottom-up, as BMP expects.
+    static std::vector<unsigned char> makeTestBmp(int width, int height) {
+        const int rowBytes = width * 3;
+        const int pad = (4 - (rowBytes % 4)) % 4;
+        const int imageSize = (rowBytes + pad) * height;
+        std::vector<unsigned char> bmp(54 + imageSize, 0);
+
+        auto put32 = [&bmp](int off, uint32_t v) {
+            bmp[off] = static_cast<unsigned char>(v & 0xFF);
+            bmp[off + 1] = static_cast<unsigned char>((v >> 8) & 0xFF);
+            bmp[off + 2] = static_cast<unsigned char>((v >> 16) & 0xFF);
+            bmp[off + 3] = static_cast<unsigned char>((v >> 24) & 0xFF);
+        };
+        auto put16 = [&bmp](int off, uint16_t v) {
+            bmp[off] = static_cast<unsigned char>(v & 0xFF);
+            bmp[off + 1] = static_cast<unsigned char>((v >> 8) & 0xFF);
+        };
+
+        bmp[0] = 'B';
+        bmp[1] = 'M';
+        put32(2, static_cast<uint32_t>(54 + imageSize));
+        put32(10, 54);
+        put32(14, 40);
+        put32(18, static_cast<uint32_t>(width));
+        put32(22, static_cast<uint32_t>(height));
+        put16(26, 1);
+        put16(28, 24);
+        put32(34, static_cast<uint32_t>(imageSize));
+
+        int off = 54;
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                bmp[off++] = static_cast<unsigned char>(x * 40 + y * 7);       // B
+                bmp[off++] = static_cast<unsigned char>(200 - x * 13 + y * 3); // G
+                bmp[off++] = static_cast<unsigned char>(50 + x * 11 + y * 20); // R
+            }
+            for (int p = 0; p < pad; ++p) {
+                bmp[off++] = 0;
+            }
+        }
+        return bmp;
+    }
+
+    // The handle API must return exactly the same pixels as the legacy
+    // struct API, for both a normal image and the two-row gradient case.
+    int runTextureHashTests() {
+        std::cout << "🧪 Comparing legacy and handle texture decode..." << std::endl;
+
+        if (!InitializeMiddleware_C(nullptr)) {
+            std::cerr << "❌ Failed to initialize middleware" << std::endl;
+            return 1;
+        }
+
+        int failures = 0;
+        const struct { const char* name; int width; int height; } cases[] = {
+            {"bmp_4x3", 4, 3},
+            {"bmp_4x2_gradient", 4, 2},
+        };
+
+        for (const auto& c : cases) {
+            const std::vector<unsigned char> bmp = makeTestBmp(c.width, c.height);
+
+            CTextureData legacy = CreateTextureFromBuffer_C(bmp.data(), bmp.size());
+            CTextureHandle* handle = CreateTextureHandle_C(bmp.data(), bmp.size());
+
+            int hw = 0, hh = 0, hc = 0;
+            const unsigned char* hp = nullptr;
+            size_t hs = 0;
+            const bool haveHandle = handle &&
+                GetTextureHandleData_C(handle, &hw, &hh, &hc, &hp, &hs) != 0;
+
+            const bool ok = legacy.data && legacy.data_size > 0 && haveHandle &&
+                legacy.width == hw && legacy.height == hh &&
+                legacy.channels == hc && legacy.data_size == hs &&
+                hp && std::memcmp(legacy.data, hp, hs) == 0;
+
+            uint64_t digest = 1469598103934665603ull;
+            if (haveHandle) {
+                digest = HashBytes(digest, hp, hs);
+            }
+
+            std::cout << (ok ? "  ✅ " : "  ❌ ") << c.name
+                      << " legacy=" << legacy.width << "x" << legacy.height
+                      << " handle=" << hw << "x" << hh
+                      << " bytes=" << (haveHandle ? hs : 0)
+                      << " hash=" << std::hex << digest << std::dec << std::endl;
+
+            if (!ok) {
+                ++failures;
+            }
+
+            FreeTextureHandle_C(handle);
+            FreeTextureData_C(&legacy);
+        }
+
+        ShutdownMiddleware_C();
+        std::cout << "📊 Texture hash: " << (2 - failures) << " ok, "
                   << failures << " failed" << std::endl;
         return failures > 0 ? 1 : 0;
     }
@@ -794,6 +897,7 @@ TestMode parseMode(int argc, char* argv[], std::string& collisionType, std::stri
         if (arg == "--mode=static-check") mode = STATIC_CHECK;
         else if (arg == "--mode=usd-basic") mode = USD_BASIC;
         else if (arg == "--mode=geometry-hash") mode = GEOMETRY_HASH;
+        else if (arg == "--mode=texture-hash") mode = TEXTURE_HASH;
         else if (arg == "--mode=collision") mode = COLLISION;
         else if (arg == "--mode=error-handling") mode = ERROR_HANDLING;
         else if (arg == "--mode=performance") mode = PERFORMANCE;
@@ -861,6 +965,10 @@ int main(int argc, char* argv[]) {
 
         case GEOMETRY_HASH:
             result = validator.runGeometryHashTests(test_data_dir.string());
+            break;
+
+        case TEXTURE_HASH:
+            result = validator.runTextureHashTests();
             break;
 
         case COLLISION:

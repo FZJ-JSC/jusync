@@ -1,4 +1,4 @@
-#include "UsdProcessor.h"
+﻿#include "UsdProcessor.h"
 #include "MiddlewareLogging.h"
 
 #ifdef ENABLE_CUDA_ACCELERATION
@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <regex>
@@ -405,11 +406,11 @@ public:
         std::vector<glm::vec3> gpuResult;
 
  #ifdef ENABLE_CUDA_ACCELERATION
-        MIDDLEWARE_LOG_INFO("🔥 GPU Acceleration Check: vertices=%zu, threshold=10000, isAvailable=%d",
+        MIDDLEWARE_LOG_INFO("ðŸ”¥ GPU Acceleration Check: vertices=%zu, threshold=10000, isAvailable=%d",
                            points.size(), GpuContext::isAvailable() ? 1 : 0);
 
         if (GpuContext::isAvailable() && points.size() >= 10000) {
-            MIDDLEWARE_LOG_INFO("🚀 Attempting GPU vertex transformation for %zu vertices", points.size());
+            MIDDLEWARE_LOG_INFO("ðŸš€ Attempting GPU vertex transformation for %zu vertices", points.size());
 
             std::vector<glm::vec3> inputVertices(points.size());
             for (size_t i = 0; i < points.size(); ++i) {
@@ -680,15 +681,15 @@ UsdProcessor::UsdProcessor() : pImpl(std::make_unique<UsdProcessorImpl>()) {
     stats.reset();
 
 #ifdef ENABLE_CUDA_ACCELERATION
-    MIDDLEWARE_LOG_INFO("🔥 Initializing GPU acceleration support...");
+    MIDDLEWARE_LOG_INFO("ðŸ”¥ Initializing GPU acceleration support...");
     if (GpuContext::getInstance().initialize()) {
-        MIDDLEWARE_LOG_INFO("✅ GPU acceleration initialized successfully - Device: %s",
+        MIDDLEWARE_LOG_INFO("âœ… GPU acceleration initialized successfully - Device: %s",
                            GpuContext::getDeviceInfo().deviceName.c_str());
     } else {
-        MIDDLEWARE_LOG_WARNING("⚠️ GPU acceleration not available - using CPU fallback");
+        MIDDLEWARE_LOG_WARNING("âš ï¸ GPU acceleration not available - using CPU fallback");
     }
 #else
-    MIDDLEWARE_LOG_INFO("ℹ️ GPU acceleration not compiled in - using CPU only");
+    MIDDLEWARE_LOG_INFO("â„¹ï¸ GPU acceleration not compiled in - using CPU only");
 #endif
 }
 
@@ -700,55 +701,44 @@ UsdProcessor::~UsdProcessor() {
     MIDDLEWARE_LOG_INFO("UsdProcessor shutdown complete");
 }
 
-UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vector<uint8_t>& buffer,
-                                                               const std::string& expectedFormat) {
-    std::shared_lock<std::shared_mutex> lock(processingMutex);
+// Decodes an encoded image into an RGBA buffer.  Returns a malloc-owned buffer
+// (release with std::free) and fills the dimensions, or returns nullptr after
+// logging the reason.  Shared by the copying and the owning public entry
+// points so both paths validate identically.
+unsigned char* UsdProcessor::DecodeTextureBuffer(const uint8_t* buffer, size_t bufferSize,
+                                                 int& outWidth, int& outHeight, size_t& outSize) {
+    outWidth = 0;
+    outHeight = 0;
+    outSize = 0;
 
-    MIDDLEWARE_LOG_INFO("Creating texture from buffer of size %zu", buffer.size());
-
-    TextureData textureData;
-
-    if (buffer.empty()) {
+    if (!buffer || bufferSize == 0) {
         MIDDLEWARE_LOG_ERROR("CreateTextureFromBuffer: Empty buffer");
         stats.processingErrors.fetch_add(1);
-        return textureData;
+        return nullptr;
     }
 
-    if (buffer.size() > safety::MAX_BUFFER_SIZE) {
+    if (bufferSize > safety::MAX_BUFFER_SIZE) {
         MIDDLEWARE_LOG_ERROR("Buffer too large for texture creation: %zu bytes (max: %zu)",
-                            buffer.size(), safety::MAX_BUFFER_SIZE);
+                            bufferSize, safety::MAX_BUFFER_SIZE);
         stats.processingErrors.fetch_add(1);
-        return textureData;
+        return nullptr;
     }
 
-    if (!buffer.data()) {
-        MIDDLEWARE_LOG_ERROR("Buffer has null data pointer despite non-zero size: %zu", buffer.size());
+    if (bufferSize > INT_MAX) {
+        MIDDLEWARE_LOG_ERROR("Buffer too large for STB image processing: %zu bytes (max: %d)",
+                            bufferSize, INT_MAX);
         stats.processingErrors.fetch_add(1);
-        return textureData;
+        return nullptr;
     }
 
     try {
-        int width, height, channels;
+        int width = 0, height = 0, channels = 0;
 
         stbi_set_flip_vertically_on_load(0); // Don't flip for consistency
 
-        if (buffer.size() > INT_MAX) {
-            MIDDLEWARE_LOG_ERROR("Buffer too large for STB image processing: %zu bytes (max: %d)",
-                                buffer.size(), INT_MAX);
-            stats.processingErrors.fetch_add(1);
-            return textureData;
-        }
-
-        const unsigned char* bufferPtr = buffer.data();
-        if (!bufferPtr) {
-            MIDDLEWARE_LOG_ERROR("Buffer data pointer is null before STB processing");
-            stats.processingErrors.fetch_add(1);
-            return textureData;
-        }
-
         unsigned char* imageData = stbi_load_from_memory(
-            bufferPtr,
-            static_cast<int>(buffer.size()),
+            buffer,
+            static_cast<int>(bufferSize),
             &width, &height, &channels,
             4 // Force RGBA
         );
@@ -757,24 +747,22 @@ UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vecto
             const char* reason = stbi_failure_reason();
             MIDDLEWARE_LOG_ERROR("Failed to decode image data: %s", reason ? reason : "Unknown error");
             stats.processingErrors.fetch_add(1);
-            return textureData;
+            return nullptr;
         }
 
         if (width <= 0 || height <= 0) {
             MIDDLEWARE_LOG_ERROR("Invalid image dimensions from STB: %dx%d", width, height);
             stbi_image_free(imageData);
             stats.processingErrors.fetch_add(1);
-            return textureData;
+            return nullptr;
         }
 
-        if (width > 0 && height > 0) {
-            size_t maxAllowedWidth = safety::MAX_BUFFER_SIZE / static_cast<size_t>(height) / 4;
-            if (static_cast<size_t>(width) > maxAllowedWidth) {
-                MIDDLEWARE_LOG_ERROR("Image dimensions would cause overflow: %dx%d", width, height);
-                stbi_image_free(imageData);
-                stats.processingErrors.fetch_add(1);
-                return textureData;
-            }
+        size_t maxAllowedWidth = safety::MAX_BUFFER_SIZE / static_cast<size_t>(height) / 4;
+        if (static_cast<size_t>(width) > maxAllowedWidth) {
+            MIDDLEWARE_LOG_ERROR("Image dimensions would cause overflow: %dx%d", width, height);
+            stbi_image_free(imageData);
+            stats.processingErrors.fetch_add(1);
+            return nullptr;
         }
 
         size_t expectedDataSize = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
@@ -783,129 +771,139 @@ UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vecto
                                 expectedDataSize, safety::MAX_BUFFER_SIZE);
             stbi_image_free(imageData);
             stats.processingErrors.fetch_add(1);
-            return textureData;
-        }
-
-        if (!imageData) {
-            MIDDLEWARE_LOG_ERROR("STB returned null image data pointer");
-            stats.processingErrors.fetch_add(1);
-            return textureData;
+            return nullptr;
         }
 
         if (height == 2) {
             MIDDLEWARE_LOG_INFO("Detected gradient image, extracting top row");
 
             size_t rowSize = static_cast<size_t>(width) * 4;
-
             if (rowSize == 0 || rowSize > safety::MAX_BUFFER_SIZE) {
                 MIDDLEWARE_LOG_ERROR("Invalid gradient row size: %zu", rowSize);
                 stbi_image_free(imageData);
                 stats.processingErrors.fetch_add(1);
-                return textureData;
+                return nullptr;
             }
 
-            try {
-                textureData.data.clear();
-                textureData.data.reserve(rowSize);
-                textureData.data.resize(rowSize);
-
-                std::memcpy(textureData.data.data(), imageData, rowSize);
-
-                if (textureData.data.size() != rowSize) {
-                    MIDDLEWARE_LOG_ERROR("Gradient data copy size mismatch: expected %zu, got %zu",
-                                        rowSize, textureData.data.size());
-                    stbi_image_free(imageData);
-                    textureData.clear();
-                    stats.processingErrors.fetch_add(1);
-                    return textureData;
-                }
-
-            } catch (const std::bad_alloc& e) {
-                MIDDLEWARE_LOG_ERROR("Memory allocation failed for gradient data: %s", e.what());
+            unsigned char* row = static_cast<unsigned char*>(std::malloc(rowSize));
+            if (!row) {
+                MIDDLEWARE_LOG_ERROR("Memory allocation failed for gradient data");
                 stbi_image_free(imageData);
-                textureData.clear();
                 stats.processingErrors.fetch_add(1);
-                return textureData;
+                return nullptr;
             }
-
-            textureData.width = width;
-            textureData.height = 1;
-            textureData.channels = 4;
-
+            std::memcpy(row, imageData, rowSize);
             stbi_image_free(imageData);
 
-            MIDDLEWARE_LOG_INFO("Gradient line extracted: %dx%d, %d channels",
-                              textureData.width, textureData.height, textureData.channels);
+            outWidth = width;
+            outHeight = 1;
+            outSize = rowSize;
 
+            MIDDLEWARE_LOG_INFO("Gradient line extracted: %dx%d, %d channels", outWidth, outHeight, 4);
             stats.texturesProcessed.fetch_add(1);
-            return textureData;
+            return row;
         }
 
-        try {
-            textureData.data.clear();
-            textureData.data.reserve(expectedDataSize);
-            textureData.data.resize(expectedDataSize);
+        outWidth = width;
+        outHeight = height;
+        outSize = expectedDataSize;
 
-            std::memcpy(textureData.data.data(), imageData, expectedDataSize);
-
-            if (textureData.data.size() != expectedDataSize) {
-                MIDDLEWARE_LOG_ERROR("Image data copy size mismatch: expected %zu, got %zu",
-                                    expectedDataSize, textureData.data.size());
-                stbi_image_free(imageData);
-                textureData.clear();
-                stats.processingErrors.fetch_add(1);
-                return textureData;
-            }
-
-        } catch (const std::bad_alloc& e) {
-            MIDDLEWARE_LOG_ERROR("Memory allocation failed for image data: %s", e.what());
-            stbi_image_free(imageData);
-            textureData.clear();
-            stats.processingErrors.fetch_add(1);
-            return textureData;
-        } catch (const std::exception& e) {
-            MIDDLEWARE_LOG_ERROR("Exception during image data copy: %s", e.what());
-            stbi_image_free(imageData);
-            textureData.clear();
-            stats.processingErrors.fetch_add(1);
-            return textureData;
-        }
-
-        textureData.width = width;
-        textureData.height = height;
-        textureData.channels = 4;
-
-        stbi_image_free(imageData);
-
-        if (!textureData.isValid()) {
-            MIDDLEWARE_LOG_ERROR("Created texture data failed validation");
-            textureData.clear();
-            stats.processingErrors.fetch_add(1);
-            return textureData;
-        }
-
-        MIDDLEWARE_LOG_INFO("Texture created successfully: %dx%d, %d channels",
-                          textureData.width, textureData.height, textureData.channels);
-
+        MIDDLEWARE_LOG_INFO("Texture decoded successfully: %dx%d, %d channels", outWidth, outHeight, 4);
         stats.texturesProcessed.fetch_add(1);
-        return textureData;
+        return imageData;
 
     } catch (const std::bad_alloc& e) {
         MIDDLEWARE_LOG_ERROR("Memory allocation error in CreateTextureFromBuffer: %s", e.what());
         stats.processingErrors.fetch_add(1);
-        return textureData;
+        return nullptr;
 
     } catch (const std::exception& e) {
         MIDDLEWARE_LOG_ERROR("Exception in CreateTextureFromBuffer: %s", e.what());
         stats.processingErrors.fetch_add(1);
-        return textureData;
+        return nullptr;
 
     } catch (...) {
         MIDDLEWARE_LOG_ERROR("Unknown exception in CreateTextureFromBuffer");
         stats.processingErrors.fetch_add(1);
-        return textureData;
+        return nullptr;
     }
 }
+
+UsdProcessor::TextureData UsdProcessor::CreateTextureFromBuffer(const std::vector<uint8_t>& buffer,
+                                                               const std::string& /*expectedFormat*/) {
+    std::shared_lock<std::shared_mutex> lock(processingMutex);
+
+    MIDDLEWARE_LOG_INFO("Creating texture from buffer of size %zu", buffer.size());
+
+    TextureData textureData;
+
+    int width = 0, height = 0;
+    size_t dataSize = 0;
+    unsigned char* imageData = DecodeTextureBuffer(buffer.data(), buffer.size(),
+                                                   width, height, dataSize);
+    if (!imageData) {
+        return textureData;
+    }
+
+    try {
+        textureData.data.assign(imageData, imageData + dataSize);
+    } catch (const std::bad_alloc& e) {
+        MIDDLEWARE_LOG_ERROR("Memory allocation failed for image data: %s", e.what());
+        std::free(imageData);
+        stats.processingErrors.fetch_add(1);
+        return textureData;
+    } catch (const std::exception& e) {
+        MIDDLEWARE_LOG_ERROR("Exception during image data copy: %s", e.what());
+        std::free(imageData);
+        stats.processingErrors.fetch_add(1);
+        return textureData;
+    }
+    std::free(imageData);
+
+    textureData.width = width;
+    textureData.height = height;
+    textureData.channels = 4;
+
+    if (!textureData.isValid()) {
+        MIDDLEWARE_LOG_ERROR("Created texture data failed validation");
+        textureData.clear();
+        stats.processingErrors.fetch_add(1);
+        return textureData;
+    }
+
+    MIDDLEWARE_LOG_INFO("Texture created successfully: %dx%d, %d channels",
+                      textureData.width, textureData.height, textureData.channels);
+
+    return textureData;
+}
+
+UsdProcessor::OwningTextureData UsdProcessor::CreateTextureFromBufferOwning(const uint8_t* buffer,
+                                                                           size_t bufferSize) {
+    std::shared_lock<std::shared_mutex> lock(processingMutex);
+
+    OwningTextureData textureData;
+
+    int width = 0, height = 0;
+    size_t dataSize = 0;
+    unsigned char* imageData = DecodeTextureBuffer(buffer, bufferSize, width, height, dataSize);
+    if (!imageData) {
+        return textureData;
+    }
+
+    textureData.data = imageData;
+    textureData.width = width;
+    textureData.height = height;
+    textureData.channels = 4;
+    textureData.size = dataSize;
+
+    if (!textureData.isValid()) {
+        MIDDLEWARE_LOG_ERROR("Created texture data failed validation");
+        textureData.Reset();
+    }
+
+    return textureData;
+}
+
 
 bool UsdProcessor::LoadUSDBuffer(const std::vector<uint8_t>& buffer,
                                  const std::string& fileName,
@@ -1732,7 +1730,7 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
             vertexEndTime - vertexStartTime).count();
 
         if (points.size() > 1000) {
-            MIDDLEWARE_LOG_DEBUG("Parallel vertex processing: %zu vertices in %lld µs (%.2f µs/vertex)",
+            MIDDLEWARE_LOG_DEBUG("Parallel vertex processing: %zu vertices in %lld Âµs (%.2f Âµs/vertex)",
                                points.size(), vertexDuration,
                                static_cast<float>(vertexDuration) / points.size());
         }
@@ -1770,7 +1768,7 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
 
         bool bHasFaces = !faceVertexCounts.empty() && !faceVertexIndices.empty();
         if (!bHasFaces) {
-            MIDDLEWARE_LOG_INFO("No face data for %s — treating as point cloud (%zu points)",
+            MIDDLEWARE_LOG_INFO("No face data for %s â€” treating as point cloud (%zu points)",
                 outMeshData.elementName.c_str(), outMeshData.points.size());
         }
 
@@ -1886,7 +1884,7 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
                     normalEndTime - normalStartTime).count();
 
                 if (normals.size() > 1000) {
-                    MIDDLEWARE_LOG_DEBUG("Parallel normal processing: %zu normals in %lld µs",
+                    MIDDLEWARE_LOG_DEBUG("Parallel normal processing: %zu normals in %lld Âµs",
                                        normals.size(), normalDuration);
                 }
             }
@@ -2402,7 +2400,7 @@ void UsdProcessor::normalizeUVCoordinatesParallel(std::vector<glm::vec2>& uvs) {
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime).count();
 
     if (uvs.size() > 10000) {
-        MIDDLEWARE_LOG_DEBUG("Parallel UV normalization: %zu UVs in %lld µs", uvs.size(), duration);
+        MIDDLEWARE_LOG_DEBUG("Parallel UV normalization: %zu UVs in %lld Âµs", uvs.size(), duration);
     }
 }
 
@@ -2565,7 +2563,7 @@ void UsdProcessor::extractUVCoordinates(lightusd::GeomMesh* mesh, MeshData& mesh
             auto uvDuration = std::chrono::duration_cast<std::chrono::microseconds>(
                 uvEndTime - uvStartTime).count();
 
-            MIDDLEWARE_LOG_DEBUG("Mesh '%s' has %zu UV channels processed in %lld µs",
+            MIDDLEWARE_LOG_DEBUG("Mesh '%s' has %zu UV channels processed in %lld Âµs",
                                meshData.elementName.c_str(), meshData.uvSets.size(), uvDuration);
 
         } else {

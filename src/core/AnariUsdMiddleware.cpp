@@ -12,6 +12,7 @@
 
 #include <memory>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <filesystem>
 #include <thread>
@@ -419,6 +420,43 @@ public:
         }
     }
 
+    bool CreateTextureFromBufferOwning(const uint8_t* buffer, size_t bufferSize,
+                                       int& outWidth, int& outHeight, int& outChannels,
+                                       unsigned char** outData, size_t& outSize) {
+        outWidth = outHeight = outChannels = 0;
+        *outData = nullptr;
+        outSize = 0;
+
+        if (!usdProcessor) {
+            MIDDLEWARE_LOG_ERROR("USD processor not initialized");
+            return false;
+        }
+
+        if (shutdownRequested.load()) {
+            MIDDLEWARE_LOG_WARNING("Texture creation aborted: shutdown requested");
+            return false;
+        }
+
+        try {
+            UsdProcessor::OwningTextureData texData =
+                usdProcessor->CreateTextureFromBufferOwning(buffer, bufferSize);
+            if (!texData.isValid()) {
+                return false;
+            }
+
+            *outData = texData.data;
+            texData.data = nullptr;  // transfer ownership to the caller
+            outWidth = texData.width;
+            outHeight = texData.height;
+            outChannels = texData.channels;
+            outSize = texData.size;
+            return true;
+        } catch (const std::exception& e) {
+            MIDDLEWARE_LOG_ERROR("Exception in CreateTextureFromBufferOwning: %s", e.what());
+            return false;
+        }
+    }
+
     bool WriteGradientLineAsPNG(const std::vector<uint8_t>& buffer, const std::string& outPath) {
         try {
             if (buffer.empty()) {
@@ -790,6 +828,17 @@ void AnariUsdMiddleware::stopReceiving() {
 
 TextureData AnariUsdMiddleware::CreateTextureFromBuffer(const std::vector<uint8_t>& buffer) {
     return pImpl->CreateTextureFromBuffer(buffer);
+}
+
+bool AnariUsdMiddleware::CreateTextureFromBufferOwning(const uint8_t* buffer, size_t bufferSize,
+                                                       int& outWidth, int& outHeight, int& outChannels,
+                                                       unsigned char** outData, size_t& outSize) {
+    return pImpl->CreateTextureFromBufferOwning(buffer, bufferSize, outWidth, outHeight,
+                                                outChannels, outData, outSize);
+}
+
+void AnariUsdMiddleware::FreeTextureBuffer(unsigned char* data) {
+    std::free(data);
 }
 
 bool AnariUsdMiddleware::LoadUSDBuffer(const std::vector<uint8_t>& buffer, const std::string& fileName,
