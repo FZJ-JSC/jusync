@@ -13,6 +13,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cctype>
 
 // Include both C and C++ interfaces
 #include "AnariUsdMiddleware.h"
@@ -73,6 +75,7 @@ enum TestMode {
     GEOMETRY_HASH,
     TEXTURE_HASH,
     FILE_VIEW,
+    FILE_VIEW_LIVE,
     CORE_API,
     COLLISION,
     ERROR_HANDLING,
@@ -88,6 +91,7 @@ static const char* ModeName(TestMode mode) {
         case GEOMETRY_HASH: return "geometry-hash";
         case TEXTURE_HASH: return "texture-hash";
         case FILE_VIEW: return "file-view";
+        case FILE_VIEW_LIVE: return "file-view-live";
         case CORE_API: return "core-api";
         case COLLISION: return "collision";
         case ERROR_HANDLING: return "error-handling";
@@ -175,6 +179,13 @@ private:
 
 public:
     std::string explicitFile;
+
+    // Options for --mode=file-view-live.  Empty endpoint means the
+    // middleware default; empty file means "first USD file the broker lists".
+    std::string liveEndpoint;
+    std::string liveFile;
+    int32_t liveRank = 0;
+    int liveTimeoutMs = 30000;
 
     // Static checks for GitHub Actions
     int runStaticChecks() {
@@ -821,6 +832,187 @@ public:
         }
 
         std::cout << "File view: " << (total - failures) << " ok, "
+                  << failures << " failed" << std::endl;
+        return failures > 0 ? 1 : 0;
+    }
+
+    // Opt-in end-to-end check against a running broker: the same file is
+    // downloaded through the copying buffer path and through the view path,
+    // then compared byte for byte and by compact-fill digest.  A missing
+    // broker is a skip, not a failure, because this mode is not part of CTest.
+    int runFileViewLiveTest() {
+        std::cout << "Live broker check: view vs copy download..." << std::endl;
+
+        int failures = 0;
+        int total = 0;
+        auto check = [&](const char* name, bool ok) {
+            ++total;
+            if (!ok) ++failures;
+            std::cout << (ok ? "  ok   " : "  FAIL ") << name << std::endl;
+        };
+
+        const char* endpoint = liveEndpoint.empty() ? nullptr : liveEndpoint.c_str();
+        if (!InitializeMiddleware_C(endpoint)) {
+            std::cerr << "Failed to initialize middleware" << std::endl;
+            ShutdownMiddleware_C();
+            return 1;
+        }
+
+        if (!IsConnected_C()) {
+            std::cout << "  skip: middleware could not connect (endpoint "
+                      << (endpoint ? endpoint : "default") << ")" << std::endl;
+            ShutdownMiddleware_C();
+            return 0;
+        }
+        if (!IsBrokerConnected_C()) {
+            std::cout << "  skip: no broker at " << (endpoint ? endpoint : "default")
+                      << " (start a worker+bridge to run this mode)" << std::endl;
+            ShutdownMiddleware_C();
+            return 0;
+        }
+        check("broker_connected", true);
+
+        char** names = nullptr;
+        uint64_t* sizes = nullptr;
+        size_t count = 0;
+        bool listed = RequestFileListWithSizes_C(liveRank, &names, &sizes, &count,
+                                                 liveTimeoutMs) != 0;
+        const bool haveSizes = listed;
+        if (!listed) {
+            listed = RequestFileList_C(liveRank, &names, &count, liveTimeoutMs) != 0;
+        }
+        check("file_list", listed && count > 0);
+
+        std::string chosen;
+        uint64_t chosenSize = 0;
+        if (listed) {
+            auto isUsdName = [](const std::string& name) {
+                auto endsWith = [&](const char* suffix) {
+                    const size_t n = std::strlen(suffix);
+                    return name.size() >= n &&
+                           name.compare(name.size() - n, n, suffix) == 0;
+                };
+                return endsWith(".usd") || endsWith(".usda") ||
+                       endsWith(".usdc") || endsWith(".usdz");
+            };
+
+            for (size_t i = 0; i < count; ++i) {
+                const std::string name = names[i] ? names[i] : "";
+                if (name.empty()) continue;
+
+                if (!liveFile.empty()) {
+                    if (name == liveFile) {
+                        chosen = name;
+                        chosenSize = haveSizes ? sizes[i] : 0;
+                        break;
+                    }
+                    continue;
+                }
+                if (isUsdName(name)) {
+                    chosen = name;
+                    chosenSize = haveSizes ? sizes[i] : 0;
+                    break;
+                }
+            }
+        }
+
+        if (chosen.empty()) {
+            if (!liveFile.empty()) {
+                chosen = liveFile;  // ask for it anyway; the broker is authoritative
+            } else if (listed && count > 0 && names[0]) {
+                chosen = names[0];  // no USD file listed: fall back to the first entry
+            }
+        }
+
+        check("file_selected", !chosen.empty());
+        if (chosen.empty()) {
+            if (listed) {
+                if (haveSizes) FreeFileListWithSizes_C(names, sizes, count);
+                else FreeFileList_C(names, count);
+            }
+            ShutdownMiddleware_C();
+            return failures > 0 ? 1 : 0;
+        }
+
+        std::cout << "  downloading '" << chosen << "' (rank " << liveRank
+                  << ", timeout " << liveTimeoutMs << "ms)" << std::endl;
+
+        // The buffer path needs a capacity up front.  Use the advertised size
+        // first; if that is missing or wrong, ask the allocating call for the
+        // exact size once and retry, so a stale listing cannot silently turn
+        // the comparison into a skip.
+        std::vector<unsigned char> copyBytes;
+        size_t copySize = 0;
+        auto downloadCopy = [&](size_t capacity) {
+            copyBytes.assign(capacity, 0);
+            copySize = 0;
+            const int64_t got = RequestFileIntoBufferAbort_C(
+                chosen.c_str(), liveRank, liveTimeoutMs,
+                copyBytes.empty() ? nullptr : copyBytes.data(),
+                copyBytes.size(), &copySize, 0);
+            const bool ok = got >= 0 && copySize > 0 && copySize <= copyBytes.size();
+            copyBytes.resize(ok ? copySize : 0);
+            return ok;
+        };
+
+        bool copyOk = chosenSize > 0 && downloadCopy(static_cast<size_t>(chosenSize));
+        if (!copyOk) {
+            unsigned char* probe = nullptr;
+            size_t probeSize = 0;
+            if (RequestFile_C(chosen.c_str(), liveRank, &probe, &probeSize,
+                              liveTimeoutMs) != 0) {
+                if (probeSize > 0) {
+                    copyOk = downloadCopy(probeSize);
+                }
+                delete[] probe;
+            }
+        }
+        check("copy_download", copyOk);
+
+        CFileView* view = RequestFileView_C(chosen.c_str(), liveRank, liveTimeoutMs, 0);
+        size_t viewSize = 0;
+        const unsigned char* viewData = GetFileViewData_C(view, &viewSize);
+        const bool viewOk = view != nullptr && viewData != nullptr && viewSize > 0;
+        check("view_download", viewOk);
+
+        if (viewOk) {
+            std::cout << "  (" << chosen << ": " << viewSize << " bytes, "
+                      << (FileViewIsAliased_C(view) ? "aliased" : "assembled")
+                      << ")" << std::endl;
+        }
+
+        if (viewOk && copyOk) {
+            check("size_match", viewSize == copySize);
+            check("bytes_match",
+                  viewSize == copySize &&
+                  std::memcmp(viewData, copyBytes.data(), copySize) == 0);
+
+            uint64_t viewDigest = 0;
+            uint64_t copyDigest = 0;
+            const std::string name = fs::path(chosen).filename().string();
+            std::string ext = fs::path(name).extension().string();
+            for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            const bool isUsd = ext == ".usd" || ext == ".usda" ||
+                               ext == ".usdc" || ext == ".usdz";
+            if (isUsd) {
+                const bool parsed =
+                    digestCompactFill(viewData, viewSize, name, viewDigest) &&
+                    digestCompactFill(copyBytes.data(), copyBytes.size(), name, copyDigest);
+                check("digest_match", parsed && viewDigest == copyDigest);
+            } else {
+                std::cout << "  (skipping digest: '" << name << "' is not a USD file)"
+                          << std::endl;
+            }
+        }
+
+        if (view) FreeFileView_C(view);
+        if (listed) {
+            if (haveSizes) FreeFileListWithSizes_C(names, sizes, count);
+            else FreeFileList_C(names, count);
+        }
+        ShutdownMiddleware_C();
+
+        std::cout << "File view (live): " << (total - failures) << " ok, "
                   << failures << " failed" << std::endl;
         return failures > 0 ? 1 : 0;
     }
@@ -1870,10 +2062,16 @@ private:
 };
 
 // Parse command line arguments
-TestMode parseMode(int argc, char* argv[], std::string& collisionType, std::string& explicitFile) {
+TestMode parseMode(int argc, char* argv[], std::string& collisionType, std::string& explicitFile,
+                   std::string& liveEndpoint, std::string& liveFile, int32_t& liveRank,
+                   int& liveTimeoutMs) {
     TestMode mode = FULL;
     collisionType = "simple";
     explicitFile.clear();
+    liveEndpoint.clear();
+    liveFile.clear();
+    liveRank = 0;
+    liveTimeoutMs = 30000;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -1882,11 +2080,16 @@ TestMode parseMode(int argc, char* argv[], std::string& collisionType, std::stri
         else if (arg == "--mode=geometry-hash") mode = GEOMETRY_HASH;
         else if (arg == "--mode=texture-hash") mode = TEXTURE_HASH;
         else if (arg == "--mode=file-view") mode = FILE_VIEW;
+        else if (arg == "--mode=file-view-live") mode = FILE_VIEW_LIVE;
         else if (arg == "--mode=core-api" || arg == "--mode=api-parity") mode = CORE_API;
         else if (arg == "--mode=collision") mode = COLLISION;
         else if (arg == "--mode=error-handling") mode = ERROR_HANDLING;
         else if (arg == "--mode=performance") mode = PERFORMANCE;
         else if (arg == "--mode=integration") mode = INTEGRATION;
+        else if (arg.substr(0, 11) == "--endpoint=") liveEndpoint = arg.substr(11);
+        else if (arg.substr(0, 7) == "--file=") liveFile = arg.substr(7);
+        else if (arg.substr(0, 7) == "--rank=") liveRank = std::atoi(arg.substr(7).c_str());
+        else if (arg.substr(0, 10) == "--timeout=") liveTimeoutMs = std::atoi(arg.substr(10).c_str());
         else if (arg.substr(0, 7) == "--type=") collisionType = arg.substr(7);
         else if (arg.substr(0, 2) != "--") explicitFile = arg;
     }
@@ -1924,7 +2127,12 @@ fs::path findTestDataDir(int argc, char* argv[]) {
 int main(int argc, char* argv[]) {
     std::string collisionType;
     std::string explicitFile;
-    TestMode mode = parseMode(argc, argv, collisionType, explicitFile);
+    std::string liveEndpoint;
+    std::string liveFile;
+    int32_t liveRank = 0;
+    int liveTimeoutMs = 30000;
+    TestMode mode = parseMode(argc, argv, collisionType, explicitFile,
+                              liveEndpoint, liveFile, liveRank, liveTimeoutMs);
     fs::path test_data_dir = findTestDataDir(argc, argv);
 
     std::cout << "🚀 USD Middleware Test Runner" << std::endl;
@@ -1933,10 +2141,22 @@ int main(int argc, char* argv[]) {
     if (!explicitFile.empty()) {
         std::cout << "Explicit File: " << explicitFile << std::endl;
     }
+    if (mode == FILE_VIEW_LIVE) {
+        std::cout << "Endpoint: " << (liveEndpoint.empty() ? "(default)" : liveEndpoint)
+                  << std::endl;
+        std::cout << "Broker File: " << (liveFile.empty() ? "(first USD file)" : liveFile)
+                  << std::endl;
+        std::cout << "Rank: " << liveRank << ", Timeout: " << liveTimeoutMs << "ms"
+                  << std::endl;
+    }
     std::cout << std::string(60, '-') << std::endl;
 
     USDValidator validator;
     validator.explicitFile = explicitFile;
+    validator.liveEndpoint = liveEndpoint;
+    validator.liveFile = liveFile;
+    validator.liveRank = liveRank;
+    validator.liveTimeoutMs = liveTimeoutMs;
     int result = 0;
 
     switch (mode) {
@@ -1958,6 +2178,10 @@ int main(int argc, char* argv[]) {
 
         case FILE_VIEW:
             result = validator.runFileViewTests(test_data_dir.string());
+            break;
+
+        case FILE_VIEW_LIVE:
+            result = validator.runFileViewLiveTest();
             break;
 
         case CORE_API:
