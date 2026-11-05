@@ -1058,7 +1058,6 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
         }
 
         static thread_local std::string content;
-        static thread_local std::string fixedContent; // holds fixed content for clip extraction
 
         const uint8_t* parsePtr = wirePtr;
         size_t parseSize = wireSize;
@@ -1081,7 +1080,6 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
                 content.find("point3f[] points") != std::string::npos ||
                 content.find("float3[] points") != std::string::npos) {
                 MIDDLEWARE_LOG_INFO("Large geometry detected - using working buffer for Unreal RealtimeMesh");
-                fixedContent = content; // keep for clip extraction below
             }
 
             parsePtr = reinterpret_cast<const uint8_t*>(content.data());
@@ -1180,7 +1178,11 @@ bool UsdProcessor::LoadUSDBufferFromRaw(const uint8_t* buffer, size_t buffer_siz
             MIDDLEWARE_LOG_INFO("Attempting reference resolution for missing geometry");
 
             std::vector<uint8_t> refBuffer(parsePtr, parsePtr + parseSize);
-            if (!resolveReferences(stage, refBuffer, fileName, outMeshData, progressCallback, &fixedContent)) {
+            // Only hand over rewritten content; otherwise let resolveReferences
+            // read the original buffer (a stale thread_local string would leak
+            // clips from a previous file).
+            const std::string* preprocessedContent = needsPreprocess ? &content : nullptr;
+            if (!resolveReferences(stage, refBuffer, fileName, outMeshData, progressCallback, preprocessedContent)) {
                 MIDDLEWARE_LOG_WARNING("Reference resolution completed with some failures");
             }
         }
@@ -1768,7 +1770,8 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
                 for (int32_t count : faceVertexCounts) {
                     if (count >= 3 && count <= 100) totalTriangles += (count - 2);
                 }
-                finalIndices.reserve(totalTriangles * 3);
+                finalIndices.resize(totalTriangles * 3);
+                size_t writeIdx = 0;
                 size_t indexOffset = 0;
                 const size_t vertexCount = outMeshData.points.size();
                 for (size_t faceIdx = 0; faceIdx < faceVertexCounts.size(); ++faceIdx) {
@@ -1781,20 +1784,23 @@ bool UsdProcessor::ExtractMeshData(void* mesh,
                         uint32_t idx1 = static_cast<uint32_t>(faceVertexIndices[indexOffset + triIdx + 1]);
                         uint32_t idx2 = static_cast<uint32_t>(faceVertexIndices[indexOffset + triIdx + 2]);
                         if (idx1 >= vertexCount || idx2 >= vertexCount) continue;
-                        finalIndices.push_back(baseIdx);
-                        finalIndices.push_back(idx1);
-                        finalIndices.push_back(idx2);
+                        finalIndices[writeIdx++] = baseIdx;
+                        finalIndices[writeIdx++] = idx1;
+                        finalIndices[writeIdx++] = idx2;
                     }
                     indexOffset += numVertsInFace;
                 }
+                finalIndices.resize(writeIdx);
             } else {
                 MIDDLEWARE_LOG_DEBUG("Preserving original topology for subdivision (scheme=%s)", subdivScheme.c_str());
-                finalIndices.reserve(faceVertexIndices.size());
+                finalIndices.resize(faceVertexIndices.size());
+                size_t writeIdx = 0;
                 const size_t vertexCount = outMeshData.points.size();
                 for (const auto& idx : faceVertexIndices) {
                     if (static_cast<size_t>(idx) >= vertexCount) continue;
-                    finalIndices.push_back(static_cast<uint32_t>(idx));
+                    finalIndices[writeIdx++] = static_cast<uint32_t>(idx);
                 }
+                finalIndices.resize(writeIdx);
             }
 
             if (finalIndices.empty()) { MIDDLEWARE_LOG_WARNING("No valid indices generated"); return false; }

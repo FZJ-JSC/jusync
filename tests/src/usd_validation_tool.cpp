@@ -66,11 +66,23 @@ enum TestMode {
     FULL,
     STATIC_CHECK,
     USD_BASIC,
+    GEOMETRY_HASH,
     COLLISION,
     ERROR_HANDLING,
     PERFORMANCE,
     INTEGRATION
 };
+
+// FNV-1a 64 over raw bytes: a stable digest of the exact payload a consumer
+// receives, used to prove optimisations do not alter geometry.
+static uint64_t HashBytes(uint64_t h, const void* data, size_t bytes) {
+    const unsigned char* p = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < bytes; ++i) {
+        h ^= static_cast<uint64_t>(p[i]);
+        h *= 1099511628211ull;
+    }
+    return h;
+}
 
 class USDValidator {
 private:
@@ -204,6 +216,44 @@ public:
                   << results.failedFiles << " failed" << std::endl;
 
         return results.failedFiles > 0 ? 1 : 0;
+    }
+
+    // Geometry digest across the in-situ compact path (the one the UE plugin
+    // uses). Prints stable hashes so before/after builds can be diffed.
+    int runGeometryHashTests(const std::string& testDataPath) {
+        std::cout << "🔎 Hashing geometry via Query/Fill compact path..." << std::endl;
+
+        std::vector<std::string> usdFiles;
+        if (!explicitFile.empty()) {
+            if (!fs::exists(explicitFile)) {
+                std::cerr << "❌ Explicit USD file not found: " << explicitFile << std::endl;
+                return 1;
+            }
+            usdFiles.push_back(explicitFile);
+        } else {
+            usdFiles = findUSDFiles(testDataPath);
+            if (usdFiles.empty()) {
+                std::cerr << "❌ No USD files found" << std::endl;
+                return 1;
+            }
+        }
+
+        if (!InitializeMiddleware_C(nullptr)) {
+            std::cerr << "❌ Failed to initialize middleware" << std::endl;
+            return 1;
+        }
+
+        int failures = 0;
+        for (const auto& filePath : usdFiles) {
+            if (!hashFileGeometry(filePath)) {
+                ++failures;
+            }
+        }
+
+        ShutdownMiddleware_C();
+        std::cout << "📊 Geometry hash: " << (usdFiles.size() - failures) << " ok, "
+                  << failures << " failed" << std::endl;
+        return failures > 0 ? 1 : 0;
     }
 
     // Collision generation tests
@@ -396,8 +446,137 @@ private:
         return usdFiles;
     }
 
-    void processFileBasic(const std::string& filePath) {
-        std::string filename = fs::path(filePath).filename().string();
+    bool hashFileGeometry(const std::string& filePath) {
+        const std::string filename = fs::path(filePath).filename().string();
+
+        std::ifstream in(filePath, std::ios::binary);
+        if (!in) {
+            std::cerr << "❌ Cannot open " << filePath << std::endl;
+            return false;
+        }
+        std::vector<unsigned char> buffer((std::istreambuf_iterator<char>(in)),
+                                          std::istreambuf_iterator<char>());
+        if (buffer.empty()) {
+            std::cerr << "❌ Empty file " << filePath << std::endl;
+            return false;
+        }
+
+        void* handle = nullptr;
+        CMeshLayout* meshLayouts = nullptr;
+        size_t meshCount = 0;
+        CPointCloudLayout* cloudLayouts = nullptr;
+        size_t cloudCount = 0;
+
+        if (!QueryUSDFullLayout_C(buffer.data(), buffer.size(), filename.c_str(),
+                                  &handle, &meshLayouts, &meshCount,
+                                  &cloudLayouts, &cloudCount)) {
+            std::cerr << "❌ Layout query failed for " << filename << std::endl;
+            return false;
+        }
+
+        std::vector<CMeshDataFillCompact> fillMeshes(meshCount);
+        std::vector<std::vector<float>> pointStore(meshCount);
+        std::vector<std::vector<int32_t>> indexStore(meshCount);
+        std::vector<std::vector<float>> normalStore(meshCount);
+        std::vector<std::vector<float>> uvStore(meshCount);
+        std::vector<std::vector<unsigned char>> colorStore(meshCount);
+
+        for (size_t i = 0; i < meshCount; ++i) {
+            const CMeshLayout& l = meshLayouts[i];
+            // Defensive sizing: the fill loops are driven by the parsed arrays,
+            // which mirror these counts.
+            const size_t normalCount = std::max(l.normals_count, l.points_count);
+            const size_t uvCount = std::max(l.uvs_count, l.points_count);
+            const size_t colorCount = std::max(l.vertex_colors_count, l.points_count);
+
+            pointStore[i].assign(l.points_count * 3, 0.0f);
+            indexStore[i].assign(l.indices_count, 0);
+            normalStore[i].assign(normalCount * 3, 0.0f);
+            uvStore[i].assign(uvCount * 2, 0.0f);
+            colorStore[i].assign(colorCount * 4, 0);
+
+            CMeshDataFillCompact& f = fillMeshes[i];
+            f.points = pointStore[i].data();
+            f.indices = indexStore[i].data();
+            f.normals = l.normals_count > 0 ? normalStore[i].data() : nullptr;
+            f.uvs = l.uvs_count > 0 ? uvStore[i].data() : nullptr;
+            f.vertex_colors8 = l.vertex_colors_count > 0 ? colorStore[i].data() : nullptr;
+        }
+
+        std::vector<CPointCloudDataFill> fillClouds(cloudCount);
+        std::vector<std::vector<double>> cloudPosStore(cloudCount);
+        std::vector<std::vector<unsigned char>> cloudColorStore(cloudCount);
+        std::vector<std::vector<float>> cloudWidthStore(cloudCount);
+
+        for (size_t i = 0; i < cloudCount; ++i) {
+            const CPointCloudLayout& l = cloudLayouts[i];
+            cloudPosStore[i].assign(l.point_count * 3, 0.0);
+            cloudColorStore[i].assign(l.point_count * 4, 0);
+            cloudWidthStore[i].assign(l.point_count, 0.0f);
+
+            CPointCloudDataFill& f = fillClouds[i];
+            f.positions = cloudPosStore[i].data();
+            f.colors8 = l.has_colors ? cloudColorStore[i].data() : nullptr;
+            f.widths = l.has_widths ? cloudWidthStore[i].data() : nullptr;
+            f.bounding_box_min[0] = f.bounding_box_min[1] = f.bounding_box_min[2] = 0.0f;
+            f.bounding_box_max[0] = f.bounding_box_max[1] = f.bounding_box_max[2] = 0.0f;
+            f.lidar_points = nullptr;
+            f.lidar_point_stride = 0;
+            f.lidar_point_version = 0;
+        }
+
+        const int fillResult = FillUSDFullCompact_C(
+            handle,
+            fillMeshes.empty() ? nullptr : fillMeshes.data(), fillMeshes.size(),
+            fillClouds.empty() ? nullptr : fillClouds.data(), fillClouds.size());
+
+        if (!fillResult) {
+            std::cerr << "❌ Geometry fill failed for " << filename << std::endl;
+            FreeUSDFullLayouts_C(meshLayouts, meshCount, cloudLayouts, cloudCount);
+            FreeParsedUSD_C(handle);
+            return false;
+        }
+
+        const uint64_t seed = 1469598103934665603ull;
+        std::cout << "H file=" << filename
+                  << " meshes=" << meshCount << " clouds=" << cloudCount << std::endl;
+
+        for (size_t i = 0; i < meshCount; ++i) {
+            uint64_t h = seed;
+            h = HashBytes(h, pointStore[i].data(), pointStore[i].size() * sizeof(float));
+            h = HashBytes(h, indexStore[i].data(), indexStore[i].size() * sizeof(int32_t));
+            h = HashBytes(h, normalStore[i].data(), normalStore[i].size() * sizeof(float));
+            h = HashBytes(h, uvStore[i].data(), uvStore[i].size() * sizeof(float));
+            h = HashBytes(h, colorStore[i].data(), colorStore[i].size());
+
+            std::cout << "M file=" << filename << " name=" << meshLayouts[i].element_name
+                      << " v=" << meshLayouts[i].points_count
+                      << " i=" << meshLayouts[i].indices_count
+                      << " n=" << meshLayouts[i].normals_count
+                      << " u=" << meshLayouts[i].uvs_count
+                      << " c=" << meshLayouts[i].vertex_colors_count
+                      << " h=" << std::hex << h << std::dec << std::endl;
+        }
+
+        for (size_t i = 0; i < cloudCount; ++i) {
+            uint64_t h = seed;
+            h = HashBytes(h, cloudPosStore[i].data(), cloudPosStore[i].size() * sizeof(double));
+            h = HashBytes(h, cloudColorStore[i].data(), cloudColorStore[i].size());
+            h = HashBytes(h, cloudWidthStore[i].data(), cloudWidthStore[i].size() * sizeof(float));
+            h = HashBytes(h, fillClouds[i].bounding_box_min, sizeof(float) * 3);
+            h = HashBytes(h, fillClouds[i].bounding_box_max, sizeof(float) * 3);
+
+            std::cout << "C file=" << filename << " name=" << cloudLayouts[i].element_name
+                      << " pts=" << cloudLayouts[i].point_count
+                      << " h=" << std::hex << h << std::dec << std::endl;
+        }
+
+        FreeUSDFullLayouts_C(meshLayouts, meshCount, cloudLayouts, cloudCount);
+        FreeParsedUSD_C(handle);
+        return true;
+    }
+
+    void processFileBasic(const std::string& filePath) {        std::string filename = fs::path(filePath).filename().string();
         std::cout << " Testing " << filename << "... ";
 
         // Set up output filtering
@@ -537,6 +716,7 @@ TestMode parseMode(int argc, char* argv[], std::string& collisionType, std::stri
         std::string arg = argv[i];
         if (arg == "--mode=static-check") mode = STATIC_CHECK;
         else if (arg == "--mode=usd-basic") mode = USD_BASIC;
+        else if (arg == "--mode=geometry-hash") mode = GEOMETRY_HASH;
         else if (arg == "--mode=collision") mode = COLLISION;
         else if (arg == "--mode=error-handling") mode = ERROR_HANDLING;
         else if (arg == "--mode=performance") mode = PERFORMANCE;
@@ -600,6 +780,10 @@ int main(int argc, char* argv[]) {
 
         case USD_BASIC:
             result = validator.runUSDBasicTests(test_data_dir.string());
+            break;
+
+        case GEOMETRY_HASH:
+            result = validator.runGeometryHashTests(test_data_dir.string());
             break;
 
         case COLLISION:

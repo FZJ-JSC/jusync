@@ -61,6 +61,15 @@ bool AnariUsdClient::connect(const char* brokerEndpoint, int timeoutMs) {
         zmqContext->set(zmq::ctxopt::max_sockets, 1024);
         zmqContext->set(zmq::ctxopt::io_threads, 1);
 
+#if defined(ZMQ_ZERO_COPY_RECV)
+        // Let the decoder hand over the received buffer instead of copying it
+        // into a fresh message. The bundled libzmq may not be built with the
+        // draft API, so a rejection here is not fatal.
+        if (zmq_ctx_set(zmqContext->handle(), ZMQ_ZERO_COPY_RECV, 1) != 0) {
+            MIDDLEWARE_LOG_DEBUG("ZMQ_ZERO_COPY_RECV not available (errno=%d)", zmq_errno());
+        }
+#endif
+
         zmqSocket = std::make_unique<zmq::socket_t>(*zmqContext, zmq::socket_type::dealer);
         if (!zmqSocket) {
             MIDDLEWARE_LOG_ERROR("Failed to create ZMQ DEALER socket");
@@ -1054,8 +1063,11 @@ bool AnariUsdClient::getFileSync(const std::string& filename, int32_t targetRank
     auto chunkCallback = [&file](const std::string& fname, const uint8_t* chunk,
                                   size_t chunkSize, uint64_t offset, uint64_t totalSize) {
         file.totalSize = totalSize;
-        if (file.data.size() < offset + chunkSize) {
-            file.data.resize(offset + chunkSize);
+        // Allocate once from the announced size; only grow if a chunk lands
+        // beyond it.
+        const uint64_t needed = offset + chunkSize;
+        if (file.data.size() < needed) {
+            file.data.resize(needed > totalSize ? needed : totalSize);
         }
         std::memcpy(file.data.data() + offset, chunk, chunkSize);
     };
@@ -1836,8 +1848,11 @@ bool AnariUsdClient::requestFilesParallel(
             [file_state](const std::string& fname, const uint8_t* chunk, size_t chunkSize,
                         uint64_t offset, uint64_t total_size) {
                 file_state->total_size = total_size;
-                if (file_state->data.size() < offset + chunkSize) {
-                    file_state->data.resize(offset + chunkSize);
+                // Size the buffer once from the announced total instead of
+                // growing it chunk by chunk (repeated realloc + copy).
+                const uint64_t needed = offset + chunkSize;
+                if (file_state->data.size() < needed) {
+                    file_state->data.resize(needed > total_size ? needed : total_size);
                 }
                 std::memcpy(file_state->data.data() + offset, chunk, chunkSize);
             };
@@ -1935,6 +1950,11 @@ void AnariUsdClient::dispatcherThread() {
     auto lastPing = lastInbound;
     bool deadReported = false;
 
+    // Reused across iterations: zmq_msg_recv releases the previous content, and
+    // a moved-from message_t is re-initialised empty, so this avoids two
+    // allocations per frame.
+    zmq::message_t delimMsg, dataMsg;
+
     while (dispatcherActive.load()) {
         try {
             int pollResult = zmq::poll(items, 1, std::chrono::milliseconds(100));
@@ -1989,8 +2009,6 @@ void AnariUsdClient::dispatcherThread() {
                 }
                 continue;
             }
-
-            zmq::message_t delimMsg, dataMsg;
 
             {
                 std::lock_guard<std::mutex> recvLock(recvMutex);

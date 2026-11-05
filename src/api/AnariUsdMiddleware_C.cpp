@@ -726,6 +726,19 @@ static bool FillCloudIntoBuffer(const anari_usd_middleware::UsdProcessor::PointC
         dst.lidar_point_version == 1u &&
         dst.lidar_point_stride == static_cast<int32_t>(sizeof(CPointCloudLidarPoint_v1));
 
+    // Bounds are accumulated in the same pass as the position write instead of
+    // walking the source array a second time. The seed stays at the origin so
+    // the reported box is identical to the previous two-pass version.
+    float bminX = 0.0f, bminY = 0.0f, bminZ = 0.0f;
+    float bmaxX = 0.0f, bmaxY = 0.0f, bmaxZ = 0.0f;
+    bool bBboxAccumulated = false;
+    auto accumulateBounds = [&](const auto& p) {
+        bminX = fminf(bminX, p.x); bmaxX = fmaxf(bmaxX, p.x);
+        bminY = fminf(bminY, p.y); bmaxY = fmaxf(bmaxY, p.y);
+        bminZ = fminf(bminZ, p.z); bmaxZ = fmaxf(bmaxZ, p.z);
+        bBboxAccumulated = true;
+    };
+
     if (bDirectLidarFill && n > 0) {
         auto* outPoints = static_cast<CPointCloudLidarPoint_v1*>(dst.lidar_points);
         const bool bHasVertexColors = !src.vertex_colors.empty();
@@ -754,6 +767,7 @@ static bool FillCloudIntoBuffer(const anari_usd_middleware::UsdProcessor::PointC
             out.normal[1] = 127;
             out.normal[2] = 127;
             out.flags = 1u;
+            accumulateBounds(src.positions[i]);
         }
     }
 
@@ -762,6 +776,7 @@ static bool FillCloudIntoBuffer(const anari_usd_middleware::UsdProcessor::PointC
             dst.positions[i * 3 + 0] = static_cast<double>(src.positions[i].x);
             dst.positions[i * 3 + 1] = static_cast<double>(src.positions[i].z);
             dst.positions[i * 3 + 2] = static_cast<double>(-src.positions[i].y);
+            if (!bDirectLidarFill) accumulateBounds(src.positions[i]);
         }
     }
 
@@ -785,20 +800,17 @@ static bool FillCloudIntoBuffer(const anari_usd_middleware::UsdProcessor::PointC
         }
     }
 
-    for (int i = 0; i < 3; ++i) {
-        dst.bounding_box_min[i] = 0.0f;
-        dst.bounding_box_max[i] = 0.0f;
-    }
-    if (n > 0) {
+    if (n > 0 && !bBboxAccumulated) {
         for (size_t i = 0; i < n; ++i) {
-            dst.bounding_box_min[0] = fminf(dst.bounding_box_min[0], src.positions[i].x);
-            dst.bounding_box_min[1] = fminf(dst.bounding_box_min[1], src.positions[i].y);
-            dst.bounding_box_min[2] = fminf(dst.bounding_box_min[2], src.positions[i].z);
-            dst.bounding_box_max[0] = fmaxf(dst.bounding_box_max[0], src.positions[i].x);
-            dst.bounding_box_max[1] = fmaxf(dst.bounding_box_max[1], src.positions[i].y);
-            dst.bounding_box_max[2] = fmaxf(dst.bounding_box_max[2], src.positions[i].z);
+            accumulateBounds(src.positions[i]);
         }
     }
+    dst.bounding_box_min[0] = bminX;
+    dst.bounding_box_min[1] = bminY;
+    dst.bounding_box_min[2] = bminZ;
+    dst.bounding_box_max[0] = bmaxX;
+    dst.bounding_box_max[1] = bmaxY;
+    dst.bounding_box_max[2] = bmaxZ;
     return true;
 }
 
