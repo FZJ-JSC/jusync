@@ -10,6 +10,9 @@
 #include <sstream>
 #include <streambuf>
 #include <cstring>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
 
 // Include both C and C++ interfaces
 #include "AnariUsdMiddleware.h"
@@ -68,11 +71,28 @@ enum TestMode {
     USD_BASIC,
     GEOMETRY_HASH,
     TEXTURE_HASH,
+    CORE_API,
     COLLISION,
     ERROR_HANDLING,
     PERFORMANCE,
     INTEGRATION
 };
+
+static const char* ModeName(TestMode mode) {
+    switch (mode) {
+        case FULL: return "full";
+        case STATIC_CHECK: return "static-check";
+        case USD_BASIC: return "usd-basic";
+        case GEOMETRY_HASH: return "geometry-hash";
+        case TEXTURE_HASH: return "texture-hash";
+        case CORE_API: return "core-api";
+        case COLLISION: return "collision";
+        case ERROR_HANDLING: return "error-handling";
+        case PERFORMANCE: return "performance";
+        case INTEGRATION: return "integration";
+    }
+    return "unknown";
+}
 
 // FNV-1a 64 over raw bytes: a stable digest of the exact payload a consumer
 // receives, used to prove optimisations do not alter geometry.
@@ -257,10 +277,13 @@ public:
         return failures > 0 ? 1 : 0;
     }
 
-    // Builds an uncompressed 24-bit BMP so the texture tests need no image
-    // files on disk.  Rows are bottom-up, as BMP expects.
-    static std::vector<unsigned char> makeTestBmp(int width, int height) {
-        const int rowBytes = width * 3;
+    // Builds an uncompressed BMP so the texture tests need no image files on
+    // disk.  Rows are bottom-up, as BMP expects.  Both 24-bit RGB and 32-bit
+    // BGRA are produced by the same pattern so their decoded pixels match.
+    static std::vector<unsigned char> makeTestBmp(int width, int height,
+                                                  int bitsPerPixel = 24) {
+        const int bytesPerPixel = bitsPerPixel / 8;
+        const int rowBytes = width * bytesPerPixel;
         const int pad = (4 - (rowBytes % 4)) % 4;
         const int imageSize = (rowBytes + pad) * height;
         std::vector<unsigned char> bmp(54 + imageSize, 0);
@@ -284,7 +307,7 @@ public:
         put32(18, static_cast<uint32_t>(width));
         put32(22, static_cast<uint32_t>(height));
         put16(26, 1);
-        put16(28, 24);
+        put16(28, static_cast<uint16_t>(bitsPerPixel));
         put32(34, static_cast<uint32_t>(imageSize));
 
         int off = 54;
@@ -293,6 +316,9 @@ public:
                 bmp[off++] = static_cast<unsigned char>(x * 40 + y * 7);       // B
                 bmp[off++] = static_cast<unsigned char>(200 - x * 13 + y * 3); // G
                 bmp[off++] = static_cast<unsigned char>(50 + x * 11 + y * 20); // R
+                if (bytesPerPixel == 4) {
+                    bmp[off++] = static_cast<unsigned char>(80 + x * 17 + y * 9); // A
+                }
             }
             for (int p = 0; p < pad; ++p) {
                 bmp[off++] = 0;
@@ -302,23 +328,30 @@ public:
     }
 
     // The handle API must return exactly the same pixels as the legacy
-    // struct API, for both a normal image and the two-row gradient case.
+    // struct API for several image sizes and both RGB and RGBA BMPs.  PNG
+    // encode/decode is checked in memory and through a file, and malformed
+    // inputs must be rejected without crashing.
     int runTextureHashTests() {
-        std::cout << "🧪 Comparing legacy and handle texture decode..." << std::endl;
+        std::cout << "Comparing texture decode, PNG round-trips and bad input..." << std::endl;
 
         if (!InitializeMiddleware_C(nullptr)) {
-            std::cerr << "❌ Failed to initialize middleware" << std::endl;
+            std::cerr << "Failed to initialize middleware" << std::endl;
             return 1;
         }
 
         int failures = 0;
-        const struct { const char* name; int width; int height; } cases[] = {
-            {"bmp_4x3", 4, 3},
-            {"bmp_4x2_gradient", 4, 2},
+        int total = 0;
+        const struct { const char* name; int width; int height; int bpp; } cases[] = {
+            {"bmp_4x3_rgb", 4, 3, 24},
+            {"bmp_4x2_gradient_rgb", 4, 2, 24},
+            {"bmp_5x3_rgba", 5, 3, 32},
+            {"bmp_1x1_rgb", 1, 1, 24},
         };
 
         for (const auto& c : cases) {
-            const std::vector<unsigned char> bmp = makeTestBmp(c.width, c.height);
+            ++total;
+            const std::vector<unsigned char> bmp =
+                makeTestBmp(c.width, c.height, c.bpp);
 
             CTextureData legacy = CreateTextureFromBuffer_C(bmp.data(), bmp.size());
             CTextureHandle* handle = CreateTextureHandle_C(bmp.data(), bmp.size());
@@ -339,9 +372,10 @@ public:
                 digest = HashBytes(digest, hp, hs);
             }
 
-            std::cout << (ok ? "  ✅ " : "  ❌ ") << c.name
+            std::cout << (ok ? "  ok   " : "  FAIL ") << c.name
                       << " legacy=" << legacy.width << "x" << legacy.height
                       << " handle=" << hw << "x" << hh
+                      << " channels=" << hc
                       << " bytes=" << (haveHandle ? hs : 0)
                       << " hash=" << std::hex << digest << std::dec << std::endl;
 
@@ -353,8 +387,215 @@ public:
             FreeTextureData_C(&legacy);
         }
 
+        // In-memory PNG encode/decode must preserve the source pixels.
+        ++total;
+        {
+            const std::vector<unsigned char> bmp = makeTestBmp(6, 1, 24);
+            CTextureData source = CreateTextureFromBuffer_C(bmp.data(), bmp.size());
+
+            unsigned char* png = nullptr;
+            size_t pngSize = 0;
+            const bool encoded = GetGradientLineAsPNGBuffer_C(
+                bmp.data(), bmp.size(), &png, &pngSize) != 0;
+
+            int pw = 0, ph = 0, pc = 0;
+            const bool haveDims = encoded &&
+                GetPNGDimensions_C(png, pngSize, &pw, &ph, &pc) != 0;
+
+            CTextureData decoded = {};
+            if (encoded) {
+                decoded = CreateTextureFromBuffer_C(png, pngSize);
+            }
+
+            const bool ok = encoded && haveDims && source.data && decoded.data &&
+                pw == source.width && ph == source.height &&
+                pc == source.channels &&
+                decoded.width == source.width &&
+                decoded.height == source.height &&
+                decoded.channels == source.channels &&
+                decoded.data_size == source.data_size &&
+                std::memcmp(decoded.data, source.data, source.data_size) == 0;
+
+            std::cout << (ok ? "  ok   " : "  FAIL ")
+                      << "png_memory_roundtrip"
+                      << " png=" << source.width << "x" << source.height
+                      << " dims=" << pw << "x" << ph << "x" << pc
+                      << " bytes=" << pngSize << std::endl;
+
+            if (!ok) {
+                ++failures;
+            }
+
+            FreeBuffer_C(png);
+            FreeTextureData_C(&decoded);
+            FreeTextureData_C(&source);
+        }
+
+        // The file-writing variant must produce the same PNG payload.
+        ++total;
+        {
+            const std::vector<unsigned char> bmp = makeTestBmp(6, 1, 24);
+            CTextureData source = CreateTextureFromBuffer_C(bmp.data(), bmp.size());
+            const fs::path pngPath = fs::current_path() / "jusync_texture_roundtrip.png";
+
+            const bool wrote = WriteGradientLineAsPNG_C(
+                bmp.data(), bmp.size(), pngPath.string().c_str()) != 0;
+
+            std::vector<unsigned char> pngBytes;
+            const bool read = wrote && readFileBytes(pngPath.string(), pngBytes);
+            CTextureData decoded = {};
+            if (read) {
+                decoded = CreateTextureFromBuffer_C(pngBytes.data(), pngBytes.size());
+            }
+
+            const bool ok = wrote && read && source.data && decoded.data &&
+                decoded.width == source.width &&
+                decoded.height == source.height &&
+                decoded.channels == source.channels &&
+                decoded.data_size == source.data_size &&
+                std::memcmp(decoded.data, source.data, source.data_size) == 0;
+
+            std::cout << (ok ? "  ok   " : "  FAIL ")
+                      << "png_file_roundtrip"
+                      << " bytes=" << pngBytes.size() << std::endl;
+
+            if (!ok) {
+                ++failures;
+            }
+
+            std::error_code ec;
+            fs::remove(pngPath, ec);
+            FreeTextureData_C(&decoded);
+            FreeTextureData_C(&source);
+        }
+
+        // Bad buffers and impossible row requests must fail cleanly.
+        ++total;
+        {
+            bool ok = true;
+            unsigned char junk[32] = {};
+
+            CTextureData bad = CreateTextureFromBuffer_C(nullptr, 0);
+            if (bad.data || bad.data_size != 0) {
+                ok = false;
+            }
+
+            CTextureData badData = CreateTextureFromBuffer_C(junk, sizeof(junk));
+            if (badData.data) {
+                ok = false;
+            }
+
+            CTextureHandle* badHandle = CreateTextureHandle_C(junk, sizeof(junk));
+            if (badHandle) {
+                ok = false;
+            }
+
+            int w = 1, h = 1, c = 1;
+            if (GetPNGDimensions_C(junk, sizeof(junk), &w, &h, &c) != 0) {
+                ok = false;
+            }
+
+            unsigned char* row = nullptr;
+            size_t rowSize = 0;
+            if (GetImageRowAsPNGBuffer_C(junk, sizeof(junk), 0, &row, &rowSize) != 0 ||
+                row != nullptr) {
+                ok = false;
+            }
+
+            std::cout << (ok ? "  ok   " : "  FAIL ")
+                      << "malformed_texture_input" << std::endl;
+
+            if (!ok) {
+                ++failures;
+            }
+
+            FreeTextureHandle_C(badHandle);
+            FreeTextureData_C(&badData);
+            FreeTextureData_C(&bad);
+        }
+
         ShutdownMiddleware_C();
-        std::cout << "📊 Texture hash: " << (2 - failures) << " ok, "
+        std::cout << "Texture hash: " << (total - failures) << " ok, "
+                  << failures << " failed" << std::endl;
+        return failures > 0 ? 1 : 0;
+    }
+
+
+    // Cross-checks every public parse/fill entry point against the in-situ
+    // view path the UE plugin uses.  The sample files cover a large mesh and a
+    // mesh without colours; the synthetic scene adds point clouds, vertex
+    // colours and a UV set without needing another file on disk.
+    int runCoreApiTests(const std::string& testDataPath) {
+        std::cout << "Cross-checking disk, buffer, view and fill APIs..." << std::endl;
+
+        std::vector<std::string> usdFiles;
+        if (!explicitFile.empty()) {
+            if (!fs::exists(explicitFile)) {
+                std::cerr << "Explicit USD file not found: " << explicitFile << std::endl;
+                return 1;
+            }
+            usdFiles.push_back(explicitFile);
+        } else {
+            usdFiles = findUSDFiles(testDataPath);
+            if (usdFiles.empty()) {
+                std::cerr << "No USD files found" << std::endl;
+                return 1;
+            }
+        }
+
+        if (!InitializeMiddleware_C(nullptr)) {
+            std::cerr << "Failed to initialize middleware" << std::endl;
+            return 1;
+        }
+
+        int failures = 0;
+        int total = 0;
+        for (const auto& filePath : usdFiles) {
+            ++total;
+            std::vector<unsigned char> bytes;
+            if (!readFileBytes(filePath, bytes)) {
+                std::cerr << "  FAIL " << filePath << ": cannot read file" << std::endl;
+                ++failures;
+                continue;
+            }
+
+            if (!checkCoreApiBuffer(bytes, fs::path(filePath).filename().string())) {
+                ++failures;
+            }
+        }
+
+        static const char* syntheticScene =
+            "#usda 1.0\n"
+            "def Xform \"World\"\n"
+            "{\n"
+            "    def Mesh \"Tri\"\n"
+            "    {\n"
+            "        int[] faceVertexCounts = [3, 3]\n"
+            "        int[] faceVertexIndices = [0, 1, 2, 0, 2, 3]\n"
+            "        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]\n"
+            "        normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (interpolation = \"vertex\")\n"
+            "        color3f[] primvars:color = [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)] (interpolation = \"vertex\")\n"
+            "        float2[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = \"vertex\")\n"
+            "        uniform token subdivisionScheme = \"none\"\n"
+            "    }\n"
+            "    def Points \"Cloud\"\n"
+            "    {\n"
+            "        point3f[] points = [(0, 1, 2), (3, 4, 5), (-1, 0.5, 2.5)]\n"
+            "        normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1)]\n"
+            "        float[] widths = [0.1, 0.2, 0.3]\n"
+            "        color3f[] primvars:color = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]\n"
+            "    }\n"
+            "}\n";
+
+        ++total;
+        std::vector<unsigned char> synthetic(syntheticScene,
+                                             syntheticScene + std::strlen(syntheticScene));
+        if (!checkCoreApiBuffer(synthetic, "synthetic_core_api.usda")) {
+            ++failures;
+        }
+
+        ShutdownMiddleware_C();
+        std::cout << "Core API parity: " << (total - failures) << " ok, "
                   << failures << " failed" << std::endl;
         return failures > 0 ? 1 : 0;
     }
@@ -443,6 +684,48 @@ public:
             }
         }
 
+        // Test the pointer-based entry points with invalid input.  These are
+        // the paths used by the streaming client, so they must reject bad
+        // buffers instead of returning half-filled layouts.
+        {
+            if (InitializeMiddleware_C(nullptr)) {
+                unsigned char junk[32] = {};
+                void* handle = nullptr;
+                CMeshLayout* meshLayouts = nullptr;
+                size_t meshCount = 0;
+                CPointCloudLayout* cloudLayouts = nullptr;
+                size_t cloudCount = 0;
+
+                const bool layoutRejected = QueryUSDFullLayout_C(
+                    junk, sizeof(junk), "junk.usda",
+                    &handle, &meshLayouts, &meshCount,
+                    &cloudLayouts, &cloudCount) == 0 && handle == nullptr;
+
+                CMeshData* meshes = nullptr;
+                size_t fullMeshCount = 0;
+                CPointCloudData* clouds = nullptr;
+                size_t fullCloudCount = 0;
+                const bool fullRejected = LoadUSDFullFromPointer_C(
+                    junk, sizeof(junk), "junk.usda",
+                    &meshes, &fullMeshCount, &clouds, &fullCloudCount) == 0;
+
+                const bool cloudRejected = ProcessPointCloudFromUSD_C(
+                    junk, sizeof(junk), "junk.usda", &clouds, &fullCloudCount) == 0;
+
+                const bool formatRejected = ValidateUSDFormat_C(
+                    junk, sizeof(junk), "junk.usda") == 0;
+
+                ShutdownMiddleware_C();
+
+                if (layoutRejected && fullRejected && cloudRejected && formatRejected) {
+                    std::cout << "   ok Invalid pointer payloads correctly rejected" << std::endl;
+                } else {
+                    std::cout << "   FAIL Invalid pointer payloads were accepted" << std::endl;
+                    allPassed = false;
+                }
+            }
+        }
+
         return allPassed ? 0 : 1;
     }
 
@@ -499,6 +782,7 @@ public:
         int result = 0;
         result |= runStaticChecks();
         result |= runUSDBasicTests(testDataPath);
+        result |= runCoreApiTests(testDataPath);
         result |= runErrorHandlingTests();
 
         if (result == 0) {
@@ -531,6 +815,401 @@ public:
     }
 
 private:
+    static bool SameBytes(const void* a, size_t aBytes, const void* b, size_t bBytes) {
+        if (aBytes != bBytes) return false;
+        if (aBytes == 0) return true;
+        if (!a || !b) return false;
+        return std::memcmp(a, b, aBytes) == 0;
+    }
+
+    static unsigned char ColorToByte(float v) {
+        float c = v * 255.0f;
+        if (c < 0.0f) c = 0.0f;
+        if (c > 255.0f) c = 255.0f;
+        return static_cast<unsigned char>(c);
+    }
+
+    bool readFileBytes(const std::string& filePath, std::vector<unsigned char>& out) {
+        std::ifstream in(filePath, std::ios::binary);
+        if (!in) return false;
+        out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        return !out.empty();
+    }
+
+    bool checkCoreApiBuffer(const std::vector<unsigned char>& bytes,
+                            const std::string& filename) {
+        struct MeshOwner {
+            CMeshData* data = nullptr;
+            size_t count = 0;
+            ~MeshOwner() { if (data) FreeMeshData_C(data, count); }
+        };
+        struct CloudOwner {
+            CPointCloudData* data = nullptr;
+            size_t count = 0;
+            ~CloudOwner() { if (data) FreePointCloudData_C(data, count); }
+        };
+        struct LayoutOwner {
+            CMeshLayout* meshes = nullptr;
+            size_t meshCount = 0;
+            CPointCloudLayout* clouds = nullptr;
+            size_t cloudCount = 0;
+            ~LayoutOwner() {
+                if (meshes || clouds) {
+                    FreeUSDFullLayouts_C(meshes, meshCount, clouds, cloudCount);
+                }
+            }
+        };
+        struct ParsedOwner {
+            void* handle = nullptr;
+            ~ParsedOwner() { if (handle) FreeParsedUSD_C(handle); }
+        };
+
+        bool ok = true;
+        auto fail = [&](const std::string& reason) {
+            ok = false;
+            std::cerr << "  FAIL " << filename << ": " << reason << std::endl;
+        };
+
+        if (bytes.empty()) {
+            fail("empty buffer");
+            return false;
+        }
+
+        if (ValidateUSDFormat_C(bytes.data(), bytes.size(), filename.c_str()) != 1) {
+            fail("ValidateUSDFormat_C rejected a valid USD buffer");
+        }
+
+        const char* extensions = GetSupportedUSDExtensions_C();
+        if (!extensions || !std::strstr(extensions, ".usda") ||
+            !std::strstr(extensions, ".usdc") || !std::strstr(extensions, ".usdz")) {
+            fail("GetSupportedUSDExtensions_C is missing a supported extension");
+        }
+
+        // Copying entry point (historical path).
+        MeshOwner legacy;
+        if (!LoadUSDBuffer_C(bytes.data(), bytes.size(), filename.c_str(),
+                             &legacy.data, &legacy.count)) {
+            fail("LoadUSDBuffer_C failed");
+            return false;
+        }
+
+        // In-situ view entry point used by the UE plugin.
+        MeshOwner full;
+        CloudOwner fullClouds;
+        if (!LoadUSDFullFromPointer_C(bytes.data(), bytes.size(), filename.c_str(),
+                                      &full.data, &full.count,
+                                      &fullClouds.data, &fullClouds.count)) {
+            fail("LoadUSDFullFromPointer_C failed");
+            return false;
+        }
+
+        if (legacy.count != full.count) {
+            fail("mesh count differs between copy and view paths");
+        }
+
+        const size_t meshCount = std::min(legacy.count, full.count);
+        for (size_t i = 0; i < meshCount; ++i) {
+            const CMeshData& a = legacy.data[i];
+            const CMeshData& b = full.data[i];
+            if (std::strcmp(a.element_name, b.element_name) != 0 ||
+                std::strcmp(a.type_name, b.type_name) != 0) {
+                fail("mesh name/type differs between copy and view paths");
+            }
+            if (a.points_count != b.points_count ||
+                a.indices_count != b.indices_count ||
+                a.normals_count != b.normals_count ||
+                a.uvs_count != b.uvs_count ||
+                a.vertex_colors_count != b.vertex_colors_count) {
+                fail("mesh attribute counts differ between copy and view paths");
+            }
+            if (!SameBytes(a.points, a.points_count * sizeof(float),
+                           b.points, b.points_count * sizeof(float)) ||
+                !SameBytes(a.indices, a.indices_count * sizeof(unsigned int),
+                           b.indices, b.indices_count * sizeof(unsigned int)) ||
+                !SameBytes(a.normals, a.normals_count * sizeof(float),
+                           b.normals, b.normals_count * sizeof(float)) ||
+                !SameBytes(a.uvs, a.uvs_count * sizeof(float),
+                           b.uvs, b.uvs_count * sizeof(float)) ||
+                !SameBytes(a.vertex_colors, a.vertex_colors_count * sizeof(float),
+                           b.vertex_colors, b.vertex_colors_count * sizeof(float))) {
+                fail("mesh payload differs between copy and view paths");
+            }
+        }
+
+        // Layout + compact fill path, exactly what the UE stream builder uses.
+        ParsedOwner parsed;
+        LayoutOwner layout;
+        if (!QueryUSDFullLayout_C(bytes.data(), bytes.size(), filename.c_str(),
+                                  &parsed.handle,
+                                  &layout.meshes, &layout.meshCount,
+                                  &layout.clouds, &layout.cloudCount)) {
+            fail("QueryUSDFullLayout_C failed");
+            return false;
+        }
+
+        if (layout.meshCount != full.count) {
+            fail("layout mesh count differs from view path");
+        }
+        if (layout.cloudCount != fullClouds.count) {
+            fail("layout cloud count differs from view path");
+        }
+
+        const size_t compactMeshCount = std::min(layout.meshCount, full.count);
+        std::vector<std::vector<float>> compactPoints(compactMeshCount);
+        std::vector<std::vector<int32_t>> compactIndices(compactMeshCount);
+        std::vector<std::vector<float>> compactNormals(compactMeshCount);
+        std::vector<std::vector<float>> compactUvs(compactMeshCount);
+        std::vector<std::vector<unsigned char>> compactColors(compactMeshCount);
+        std::vector<CMeshDataFillCompact> compactMeshes(compactMeshCount);
+
+        for (size_t i = 0; i < compactMeshCount; ++i) {
+            const CMeshLayout& l = layout.meshes[i];
+            const CMeshData& src = full.data[i];
+            if (std::strcmp(l.element_name, src.element_name) != 0 ||
+                l.points_count * 3 != src.points_count ||
+                l.indices_count != src.indices_count ||
+                l.normals_count * 3 != src.normals_count ||
+                l.uvs_count * 2 != src.uvs_count ||
+                l.vertex_colors_count != src.vertex_colors_count) {
+                fail("layout counts differ from parsed view data");
+            }
+
+            compactPoints[i].assign(l.points_count * 3, 0.0f);
+            compactIndices[i].assign(l.indices_count, 0);
+            compactNormals[i].assign(l.normals_count * 3, 0.0f);
+            compactUvs[i].assign(l.uvs_count * 2, 0.0f);
+            compactColors[i].assign(l.vertex_colors_count * 4, 0);
+
+            CMeshDataFillCompact& dst = compactMeshes[i];
+            dst.points = compactPoints[i].empty() ? nullptr : compactPoints[i].data();
+            dst.indices = compactIndices[i].empty() ? nullptr : compactIndices[i].data();
+            dst.normals = compactNormals[i].empty() ? nullptr : compactNormals[i].data();
+            dst.uvs = compactUvs[i].empty() ? nullptr : compactUvs[i].data();
+            dst.vertex_colors8 = compactColors[i].empty() ? nullptr : compactColors[i].data();
+        }
+
+        if (!FillUSDFullCompact_C(parsed.handle,
+                                  compactMeshes.empty() ? nullptr : compactMeshes.data(),
+                                  compactMeshes.size(), nullptr, 0)) {
+            fail("FillUSDFullCompact_C failed");
+        } else {
+            for (size_t i = 0; i < compactMeshCount; ++i) {
+                const CMeshData& src = full.data[i];
+                const size_t nv = std::min(src.points_count / 3,
+                                           compactPoints[i].size() / 3);
+                for (size_t v = 0; v < nv; ++v) {
+                    const size_t o = v * 3;
+                    if (compactPoints[i][o + 0] != src.points[o + 0] ||
+                        compactPoints[i][o + 1] != -src.points[o + 1] ||
+                        compactPoints[i][o + 2] != src.points[o + 2]) {
+                        fail("compact points differ from the Z-up view convention");
+                        break;
+                    }
+                }
+
+                const size_t nn = std::min(src.normals_count / 3,
+                                           compactNormals[i].size() / 3);
+                for (size_t n = 0; n < nn; ++n) {
+                    const size_t o = n * 3;
+                    if (compactNormals[i][o + 0] != src.normals[o + 0] ||
+                        compactNormals[i][o + 1] != -src.normals[o + 1] ||
+                        compactNormals[i][o + 2] != src.normals[o + 2]) {
+                        fail("compact normals differ from the Z-up view convention");
+                        break;
+                    }
+                }
+
+                const size_t ni = std::min(src.indices_count, compactIndices[i].size());
+                for (size_t n = 0; n < ni; ++n) {
+                    if (compactIndices[i][n] != static_cast<int32_t>(src.indices[n])) {
+                        fail("compact indices differ from parsed indices");
+                        break;
+                    }
+                }
+
+                const size_t nu = std::min(src.uvs_count, compactUvs[i].size());
+                for (size_t n = 0; n < nu; ++n) {
+                    if (compactUvs[i][n] != src.uvs[n]) {
+                        fail("compact UVs differ from parsed UVs");
+                        break;
+                    }
+                }
+
+            }
+        }
+
+        // Full (double) fill must agree with the compact fill.
+        std::vector<std::vector<double>> fullPoints(compactMeshCount);
+        std::vector<std::vector<int32_t>> fullIndices(compactMeshCount);
+        std::vector<std::vector<double>> fullNormals(compactMeshCount);
+        std::vector<std::vector<double>> fullUvs(compactMeshCount);
+        std::vector<std::vector<unsigned char>> fullColors(compactMeshCount);
+        std::vector<CMeshDataFill> fullMeshes(compactMeshCount);
+
+        for (size_t i = 0; i < compactMeshCount; ++i) {
+            const CMeshLayout& l = layout.meshes[i];
+            fullPoints[i].assign(l.points_count * 3, 0.0);
+            fullIndices[i].assign(l.indices_count, 0);
+            fullNormals[i].assign(l.normals_count * 3, 0.0);
+            fullUvs[i].assign(l.uvs_count * 2, 0.0);
+            fullColors[i].assign(l.vertex_colors_count * 4, 0);
+
+            CMeshDataFill& dst = fullMeshes[i];
+            dst.points = fullPoints[i].empty() ? nullptr : fullPoints[i].data();
+            dst.indices = fullIndices[i].empty() ? nullptr : fullIndices[i].data();
+            dst.normals = fullNormals[i].empty() ? nullptr : fullNormals[i].data();
+            dst.uvs = fullUvs[i].empty() ? nullptr : fullUvs[i].data();
+            dst.vertex_colors8 = fullColors[i].empty() ? nullptr : fullColors[i].data();
+        }
+
+        if (!FillUSDFull_C(parsed.handle,
+                           fullMeshes.empty() ? nullptr : fullMeshes.data(),
+                           fullMeshes.size(), nullptr, 0)) {
+            fail("FillUSDFull_C failed");
+        } else {
+            for (size_t i = 0; i < compactMeshCount; ++i) {
+                if (fullPoints[i].size() != compactPoints[i].size() ||
+                    fullNormals[i].size() != compactNormals[i].size() ||
+                    fullUvs[i].size() != compactUvs[i].size() ||
+                    fullColors[i] != compactColors[i]) {
+                    fail("full-fill buffer sizing differs from compact fill");
+                    continue;
+                }
+                for (size_t n = 0; n < fullPoints[i].size(); ++n) {
+                    if (fullPoints[i][n] != static_cast<double>(compactPoints[i][n]) ||
+                        (n < fullNormals[i].size() &&
+                         fullNormals[i][n] != static_cast<double>(compactNormals[i][n])) ||
+                        (n < fullUvs[i].size() &&
+                         fullUvs[i][n] != static_cast<double>(compactUvs[i][n]))) {
+                        fail("full fill differs from compact fill");
+                        break;
+                    }
+                }
+                for (size_t n = 0; n < fullIndices[i].size(); ++n) {
+                    if (fullIndices[i][n] != compactIndices[i][n]) {
+                        fail("full-fill indices differ from compact fill");
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Point clouds: the copying extractor and the view path must match.
+        CloudOwner processedClouds;
+        if (!ProcessPointCloudFromUSD_C(bytes.data(), bytes.size(), filename.c_str(),
+                                        &processedClouds.data, &processedClouds.count)) {
+            fail("ProcessPointCloudFromUSD_C failed");
+        } else {
+            if (processedClouds.count != fullClouds.count) {
+                fail("point-cloud count differs between copy and view paths");
+            }
+            const size_t cloudCount = std::min(processedClouds.count, fullClouds.count);
+            for (size_t i = 0; i < cloudCount; ++i) {
+                const CPointCloudData& a = processedClouds.data[i];
+                const CPointCloudData& b = fullClouds.data[i];
+                if (std::strcmp(a.element_name, b.element_name) != 0 ||
+                    a.points_count != b.points_count ||
+                    a.has_colors != b.has_colors ||
+                    a.has_normals != b.has_normals ||
+                    a.has_widths != b.has_widths) {
+                    fail("point-cloud metadata differs between copy and view paths");
+                }
+                if (!SameBytes(a.positions, a.points_count * 3 * sizeof(float),
+                               b.positions, b.points_count * 3 * sizeof(float)) ||
+                    (a.has_colors && !SameBytes(a.colors, a.points_count * 4 * sizeof(float),
+                                                b.colors, b.points_count * 4 * sizeof(float))) ||
+                    (a.has_widths && !SameBytes(a.widths, a.points_count * sizeof(float),
+                                                b.widths, b.points_count * sizeof(float)))) {
+                    fail("point-cloud payload differs between copy and view paths");
+                }
+            }
+        }
+
+        for (size_t i = 0; i < std::min(layout.cloudCount, fullClouds.count); ++i) {
+            const CPointCloudLayout& l = layout.clouds[i];
+            const CPointCloudData& c = fullClouds.data[i];
+            if (std::strcmp(l.element_name, c.element_name) != 0 ||
+                l.point_count != c.points_count ||
+                l.has_colors != c.has_colors ||
+                l.has_normals != c.has_normals ||
+                l.has_widths != c.has_widths) {
+                fail("point-cloud layout differs from parsed view data");
+            }
+        }
+
+        const size_t cloudCount = std::min(layout.cloudCount, fullClouds.count);
+        std::vector<std::vector<double>> compactCloudPositions(cloudCount);
+        std::vector<std::vector<unsigned char>> compactCloudColors(cloudCount);
+        std::vector<std::vector<float>> compactCloudWidths(cloudCount);
+        std::vector<CPointCloudDataFill> compactClouds(cloudCount);
+
+        for (size_t i = 0; i < cloudCount; ++i) {
+            const CPointCloudLayout& l = layout.clouds[i];
+            compactCloudPositions[i].assign(l.point_count * 3, 0.0);
+            compactCloudColors[i].assign(l.has_colors ? l.point_count * 4 : 0, 0);
+            compactCloudWidths[i].assign(l.has_widths ? l.point_count : 0, 0.0f);
+
+            CPointCloudDataFill& dst = compactClouds[i];
+            dst.positions = compactCloudPositions[i].empty()
+                ? nullptr : compactCloudPositions[i].data();
+            dst.colors8 = compactCloudColors[i].empty()
+                ? nullptr : compactCloudColors[i].data();
+            dst.widths = compactCloudWidths[i].empty()
+                ? nullptr : compactCloudWidths[i].data();
+            dst.bounding_box_min[0] = dst.bounding_box_min[1] = dst.bounding_box_min[2] = 0.0f;
+            dst.bounding_box_max[0] = dst.bounding_box_max[1] = dst.bounding_box_max[2] = 0.0f;
+            dst.lidar_points = nullptr;
+            dst.lidar_point_stride = 0;
+            dst.lidar_point_version = 0;
+        }
+
+        if (cloudCount > 0 &&
+            !FillUSDFullCompact_C(parsed.handle, nullptr, 0,
+                                  compactClouds.data(), compactClouds.size())) {
+            fail("compact point-cloud fill failed");
+        } else {
+            for (size_t i = 0; i < cloudCount; ++i) {
+                const CPointCloudData& src = fullClouds.data[i];
+                const size_t np = std::min(src.points_count,
+                                           compactCloudPositions[i].size() / 3);
+                for (size_t p = 0; p < np; ++p) {
+                    const size_t o = p * 3;
+                    if (compactCloudPositions[i][o + 0] != src.positions[o + 0] ||
+                        compactCloudPositions[i][o + 1] != src.positions[o + 2] ||
+                        compactCloudPositions[i][o + 2] != -src.positions[o + 1]) {
+                        fail("compact point positions differ from the UE Y-up convention");
+                        break;
+                    }
+                }
+                if (src.has_colors) {
+                    const size_t nc = std::min(src.points_count * 4,
+                                               compactCloudColors[i].size());
+                    for (size_t n = 0; n < nc; ++n) {
+                        if (compactCloudColors[i][n] != ColorToByte(src.colors[n])) {
+                            fail("compact point colours differ from the view path");
+                            break;
+                        }
+                    }
+                }
+                if (src.has_widths) {
+                    const size_t nw = std::min(src.points_count,
+                                               compactCloudWidths[i].size());
+                    for (size_t n = 0; n < nw; ++n) {
+                        if (compactCloudWidths[i][n] != src.widths[n]) {
+                            fail("compact point widths differ from the view path");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        std::cout << "  " << (ok ? "ok   " : "FAIL ") << filename
+                  << " meshes=" << full.count
+                  << " clouds=" << fullClouds.count << std::endl;
+        return ok;
+    }
+
     std::vector<std::string> findUSDFiles(const std::string& directoryPath) {
         std::vector<std::string> usdFiles;
         try {
@@ -898,6 +1577,7 @@ TestMode parseMode(int argc, char* argv[], std::string& collisionType, std::stri
         else if (arg == "--mode=usd-basic") mode = USD_BASIC;
         else if (arg == "--mode=geometry-hash") mode = GEOMETRY_HASH;
         else if (arg == "--mode=texture-hash") mode = TEXTURE_HASH;
+        else if (arg == "--mode=core-api" || arg == "--mode=api-parity") mode = CORE_API;
         else if (arg == "--mode=collision") mode = COLLISION;
         else if (arg == "--mode=error-handling") mode = ERROR_HANDLING;
         else if (arg == "--mode=performance") mode = PERFORMANCE;
@@ -943,7 +1623,7 @@ int main(int argc, char* argv[]) {
     fs::path test_data_dir = findTestDataDir(argc, argv);
 
     std::cout << "🚀 USD Middleware Test Runner" << std::endl;
-    std::cout << "Mode: " << mode << std::endl;
+    std::cout << "Mode: " << ModeName(mode) << std::endl;
     std::cout << "Test Data Dir: " << test_data_dir << std::endl;
     if (!explicitFile.empty()) {
         std::cout << "Explicit File: " << explicitFile << std::endl;
@@ -971,6 +1651,10 @@ int main(int argc, char* argv[]) {
             result = validator.runTextureHashTests();
             break;
 
+        case CORE_API:
+            result = validator.runCoreApiTests(test_data_dir.string());
+            break;
+
         case COLLISION:
             result = validator.runCollisionTests(test_data_dir.string(), collisionType);
             break;
@@ -992,6 +1676,7 @@ int main(int argc, char* argv[]) {
             // Run all tests in sequence
             result |= validator.runStaticChecks();
             result |= validator.runUSDBasicTests(test_data_dir.string());
+            result |= validator.runCoreApiTests(test_data_dir.string());
             result |= validator.runCollisionTests(test_data_dir.string(), "simple");
             result |= validator.runErrorHandlingTests();
             result |= validator.runPerformanceTests(test_data_dir.string());
