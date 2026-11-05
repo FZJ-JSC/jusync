@@ -239,20 +239,6 @@ private:
                          int timeoutMs,
                          const std::atomic<bool>* abortFlag);
 
-    bool handleFileChunkResponse(const ZmqFileChunk& chunk,
-                                  const std::vector<uint8_t>& chunkData,
-                                  FileChunkCallback chunkCallback);
-    bool handleFileCompleteResponse(const ZmqFileComplete& complete,
-                                     FileCompleteCallback completeCallback);
-    bool handleFileListResponse(const ZmqFileListResponse& list,
-                                 const std::vector<uint8_t>& data,
-                                 FileListCallback callback);
-    bool handleFileListWithSizesResponse(const ZmqFileListResponse& list,
-                                           const std::vector<uint8_t>& data,
-                                           FileListWithSizesCallback callback);
-    bool handleErrorResponse(const ZmqErrorResponse& error,
-                             ErrorCallback errorCallback);
-
     uint32_t generateRequestId();
 
 #if PLATFORM_WINDOWS
