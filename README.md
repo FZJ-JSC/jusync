@@ -348,6 +348,8 @@ The CMake build registers labeled tests:
 | `error` | `error_handling_tests` |
 | `performance` | `performance_benchmarks` |
 | `integration` | `integration_suite` |
+| `parity` | `geometry_hash`, `texture_hash`, `file_view`, `core_api_parity`, `file_view_live_*` |
+| `live` | `file_view_live_alias`, `file_view_live_split` |
 | `file` | `usd_file_*` per-USD-sample tests |
 
 Run a group locally:
@@ -384,6 +386,35 @@ Single-file mode:
 ```bash
 ./build/usd_validation_tool --mode=usd-basic tests/data/usd_samples/simpleCubeVertex.usda
 ```
+
+#### Live file-view check
+
+`--mode=file-view-live` downloads one file from a running ANARI-USD sender twice,
+through the copying buffer API and through the zero-copy `FileView` API, then
+compares the bytes and the compact-fill digest:
+
+```bash
+./build/usd_validation_tool --mode=file-view-live \
+  --endpoint=tcp://127.0.0.1:5556 --file=FullScene.usda
+```
+
+`tests/src/test_broker.cpp` builds as `jusync_test_broker`, an in-repo sender
+that speaks the same wire protocol. It can serve a directory, or launch the
+client itself and return its exit code:
+
+```bash
+./build/jusync_test_broker --dir=tests/data/usd_samples --chunks=1 \
+  --run=./build/usd_validation_tool \
+  --run-arg=--mode=file-view-live \
+  --run-arg=--endpoint={endpoint} \
+  --run-arg=--file=k_actor__triangles.usda \
+  --run-arg=--require-broker
+```
+
+`--chunks=1` forces a whole-file single chunk (the aliased path), `--chunks=3`
+the assembled path, and `--port=0` (the default) picks a free port, so the
+`file_view_live_*` CTest entries run in parallel without an external broker.
+A missing broker is a skip unless `--require-broker` is passed.
 
 ### CI Failure Feedback
 

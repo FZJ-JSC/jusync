@@ -535,6 +535,18 @@ if(BUILD_TESTS)
     add_test(NAME rawgeo_v3 COMMAND test_rawgeo_v3)
     set_tests_properties(rawgeo_v3 PROPERTIES TIMEOUT 60 LABELS "protocol")
 
+    # In-repo ANARI-USD sender used by the opt-in live mode and by the
+    # file_view_live_* CTest entries. It speaks the real wire protocol
+    # (ROUTER replies to a DEALER client) and can launch the client itself, so
+    # the tests need no shell backgrounding, no Python and no external broker.
+    add_executable(jusync_test_broker tests/src/test_broker.cpp)
+    target_include_directories(jusync_test_broker PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${ZMQ_INCLUDE_DIR}
+    )
+    target_link_libraries(jusync_test_broker PRIVATE ${ZMQ_STATIC_TARGET})
+    target_compile_features(jusync_test_broker PRIVATE cxx_std_17)
+
     # Test Categories - These are run as independent CI checks.
     add_test(NAME "build_verification"
               COMMAND ${CMAKE_COMMAND} -E echo "Build verification test"
@@ -562,6 +574,34 @@ if(BUILD_TESTS)
 
     add_test(NAME "core_api_parity"
               COMMAND usd_validation_tool --mode=core-api
+              WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+    # End-to-end file-view downloads against the in-repo sender. One whole-file
+    # chunk exercises the aliased (zero-copy) path; three chunks exercise the
+    # assembled path. --require-broker makes a sender startup failure fail
+    # instead of skip, and --port=0 lets parallel jobs pick free ports.
+    add_test(NAME "file_view_live_alias"
+              COMMAND jusync_test_broker
+                  --dir=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/usd_samples
+                  --chunks=1
+                  --run=$<TARGET_FILE:usd_validation_tool>
+                  --run-arg=--mode=file-view-live
+                  --run-arg=--endpoint={endpoint}
+                  --run-arg=--file=k_actor__triangles.usda
+                  --run-arg=--require-broker
+                  --run-arg=--timeout=60000
+              WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+    add_test(NAME "file_view_live_split"
+              COMMAND jusync_test_broker
+                  --dir=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/usd_samples
+                  --chunks=3
+                  --run=$<TARGET_FILE:usd_validation_tool>
+                  --run-arg=--mode=file-view-live
+                  --run-arg=--endpoint={endpoint}
+                  --run-arg=--file=k_actor__triangles.usda
+                  --run-arg=--require-broker
+                  --run-arg=--timeout=60000
               WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     # Collision tests for different complexity levels
@@ -601,6 +641,8 @@ if(BUILD_TESTS)
     set_tests_properties(build_verification binary_static_check PROPERTIES LABELS "build")
     set_tests_properties(usd_basic_processing PROPERTIES LABELS "basic")
     set_tests_properties(geometry_hash texture_hash file_view core_api_parity PROPERTIES LABELS "parity")
+    set_tests_properties(file_view_live_alias file_view_live_split
+        PROPERTIES TIMEOUT 180 LABELS "parity;live")
     set_tests_properties(collision_simple collision_complex collision_convex PROPERTIES LABELS "collision")
     set_tests_properties(error_handling_tests PROPERTIES LABELS "error")
     set_tests_properties(performance_benchmarks PROPERTIES LABELS "performance")

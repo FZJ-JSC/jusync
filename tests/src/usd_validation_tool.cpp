@@ -182,10 +182,13 @@ public:
 
     // Options for --mode=file-view-live.  Empty endpoint means the
     // middleware default; empty file means "first USD file the broker lists".
+    // With --require-broker an unreachable endpoint is a failure instead of a
+    // skip, so CTest cannot pass vacuously when the sender did not start.
     std::string liveEndpoint;
     std::string liveFile;
     int32_t liveRank = 0;
     int liveTimeoutMs = 30000;
+    bool liveRequireBroker = false;
 
     // Static checks for GitHub Actions
     int runStaticChecks() {
@@ -838,8 +841,10 @@ public:
 
     // Opt-in end-to-end check against a running broker: the same file is
     // downloaded through the copying buffer path and through the view path,
-    // then compared byte for byte and by compact-fill digest.  A missing
-    // broker is a skip, not a failure, because this mode is not part of CTest.
+    // then compared byte for byte and by compact-fill digest.  A missing or
+    // dead broker is a skip unless --require-broker was passed; the CTest
+    // entries use that flag together with jusync_test_broker, which launches
+    // this tool, so a sender that never came up cannot pass silently.
     int runFileViewLiveTest() {
         std::cout << "Live broker check: view vs copy download..." << std::endl;
 
@@ -858,30 +863,53 @@ public:
             return 1;
         }
 
-        if (!IsConnected_C()) {
-            std::cout << "  skip: middleware could not connect (endpoint "
-                      << (endpoint ? endpoint : "default") << ")" << std::endl;
+        auto skip = [&](const std::string& reason) {
+            std::cout << "  skip: " << reason << std::endl;
+            DisconnectFromBroker_C();
             ShutdownMiddleware_C();
-            return 0;
+            return liveRequireBroker ? 1 : 0;
+        };
+
+        // InitializeMiddleware_C only builds the USD/collision processors; the
+        // ANARI-USD DEALER client is created by ConnectToBroker_C.  Without
+        // this call every download API short-circuits and the test would skip
+        // even when a broker is running.
+        const int connectTimeoutMs = std::min(liveTimeoutMs, 5000);
+        if (!ConnectToBroker_C(endpoint, connectTimeoutMs)) {
+            return skip(std::string("cannot open a broker connection to ") +
+                        (endpoint ? endpoint : "default"));
+        }
+
+        if (!IsConnected_C()) {
+            return skip(std::string("middleware could not connect (endpoint ") +
+                        (endpoint ? endpoint : "default") + ")");
         }
         if (!IsBrokerConnected_C()) {
-            std::cout << "  skip: no broker at " << (endpoint ? endpoint : "default")
-                      << " (start a worker+bridge to run this mode)" << std::endl;
-            ShutdownMiddleware_C();
-            return 0;
+            return skip(std::string("no broker at ") +
+                        (endpoint ? endpoint : "default") +
+                        " (start a worker+bridge to run this mode)");
         }
-        check("broker_connected", true);
 
+        // IsBrokerConnected_C only reflects the DEALER socket state, and ZeroMQ
+        // connects asynchronously, so a reachable-but-dead endpoint still looks
+        // connected.  The file-list round trip is the cheapest request that
+        // proves something is answering the protocol.  (A worker-count probe
+        // cannot be used: RequestTotalWorkerCount_C reports success with a
+        // default count even when no response arrives.)
+        const int probeTimeoutMs = std::min(liveTimeoutMs, 5000);
         char** names = nullptr;
         uint64_t* sizes = nullptr;
         size_t count = 0;
-        bool listed = RequestFileListWithSizes_C(liveRank, &names, &sizes, &count,
-                                                 liveTimeoutMs) != 0;
-        const bool haveSizes = listed;
-        if (!listed) {
-            listed = RequestFileList_C(liveRank, &names, &count, liveTimeoutMs) != 0;
+        if (RequestFileListWithSizes_C(liveRank, &names, &sizes, &count,
+                                       probeTimeoutMs) == 0) {
+            return skip(std::string("no broker answered a file-list request at ") +
+                        (endpoint ? endpoint : "default") +
+                        " within " + std::to_string(probeTimeoutMs) + "ms");
         }
-        check("file_list", listed && count > 0);
+        check("broker_connected", true);
+        const bool haveSizes = true;
+        const bool listed = true;
+        check("file_list", count > 0);
 
         std::string chosen;
         uint64_t chosenSize = 0;
@@ -2064,7 +2092,7 @@ private:
 // Parse command line arguments
 TestMode parseMode(int argc, char* argv[], std::string& collisionType, std::string& explicitFile,
                    std::string& liveEndpoint, std::string& liveFile, int32_t& liveRank,
-                   int& liveTimeoutMs) {
+                   int& liveTimeoutMs, bool& liveRequireBroker) {
     TestMode mode = FULL;
     collisionType = "simple";
     explicitFile.clear();
@@ -2072,6 +2100,7 @@ TestMode parseMode(int argc, char* argv[], std::string& collisionType, std::stri
     liveFile.clear();
     liveRank = 0;
     liveTimeoutMs = 30000;
+    liveRequireBroker = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -2090,6 +2119,7 @@ TestMode parseMode(int argc, char* argv[], std::string& collisionType, std::stri
         else if (arg.substr(0, 7) == "--file=") liveFile = arg.substr(7);
         else if (arg.substr(0, 7) == "--rank=") liveRank = std::atoi(arg.substr(7).c_str());
         else if (arg.substr(0, 10) == "--timeout=") liveTimeoutMs = std::atoi(arg.substr(10).c_str());
+        else if (arg == "--require-broker") liveRequireBroker = true;
         else if (arg.substr(0, 7) == "--type=") collisionType = arg.substr(7);
         else if (arg.substr(0, 2) != "--") explicitFile = arg;
     }
@@ -2131,8 +2161,10 @@ int main(int argc, char* argv[]) {
     std::string liveFile;
     int32_t liveRank = 0;
     int liveTimeoutMs = 30000;
+    bool liveRequireBroker = false;
     TestMode mode = parseMode(argc, argv, collisionType, explicitFile,
-                              liveEndpoint, liveFile, liveRank, liveTimeoutMs);
+                              liveEndpoint, liveFile, liveRank, liveTimeoutMs,
+                              liveRequireBroker);
     fs::path test_data_dir = findTestDataDir(argc, argv);
 
     std::cout << "🚀 USD Middleware Test Runner" << std::endl;
@@ -2147,7 +2179,7 @@ int main(int argc, char* argv[]) {
         std::cout << "Broker File: " << (liveFile.empty() ? "(first USD file)" : liveFile)
                   << std::endl;
         std::cout << "Rank: " << liveRank << ", Timeout: " << liveTimeoutMs << "ms"
-                  << std::endl;
+                  << (liveRequireBroker ? ", require broker" : "") << std::endl;
     }
     std::cout << std::string(60, '-') << std::endl;
 
@@ -2157,6 +2189,7 @@ int main(int argc, char* argv[]) {
     validator.liveFile = liveFile;
     validator.liveRank = liveRank;
     validator.liveTimeoutMs = liveTimeoutMs;
+    validator.liveRequireBroker = liveRequireBroker;
     int result = 0;
 
     switch (mode) {

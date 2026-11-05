@@ -314,7 +314,9 @@ bool AnariUsdClient::requestFileList(int32_t targetRank, FileListCallback callba
         }
 
         std::string filename = chunk->getFilename();
-        if (filename != "filelist.json") {
+        // ANARI-USD's sender names this "__file_list__.json"; "filelist.json"
+        // is kept for older bridges.
+        if (filename != "filelist.json" && filename != "__file_list__.json") {
             MIDDLEWARE_LOG_WARNING("File list response has unexpected filename: %s", filename.c_str());
         }
 
@@ -489,7 +491,7 @@ bool AnariUsdClient::requestFileListWithSizes(int32_t targetRank, FileListWithSi
             }
 
             std::string filename = chunk->getFilename();
-            if (filename != "filelist.json") {
+            if (filename != "filelist.json" && filename != "__file_list__.json") {
                 MIDDLEWARE_LOG_WARNING("File list response has unexpected filename: %s", filename.c_str());
             }
 
