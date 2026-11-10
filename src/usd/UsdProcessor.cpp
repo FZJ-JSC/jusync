@@ -2741,15 +2741,39 @@ bool UsdProcessor::ExtractPointCloudData(lightusd::GeomPoints* geomPoints,
 
         {
             outData.positions.resize(rawPoints->size());
-            for (size_t i = 0; i < rawPoints->size(); i++) {
-                const auto& pt = (*rawPoints)[i];
-                glm::vec4 homogeneous = glm::vec4(static_cast<float>(pt.x),
-                                                  static_cast<float>(pt.y),
-                                                  static_cast<float>(pt.z), 1.0f);
-                glm::vec4 transformed = worldTransform * homogeneous;
-                outData.positions[i] = glm::vec3(transformed.x / transformed.w,
-                                                 transformed.y / transformed.w,
-                                                 transformed.z / transformed.w);
+
+            // Most point clouds sit under an identity world transform, and when
+            // they do the per-point mat4 multiply and perspective divide are
+            // pure overhead (millions of points per frame).
+            bool bIdentityTransform = true;
+            for (int column = 0; column < 4 && bIdentityTransform; ++column) {
+                for (int row = 0; row < 4; ++row) {
+                    const float expected = (column == row) ? 1.0f : 0.0f;
+                    if (worldTransform[column][row] != expected) {
+                        bIdentityTransform = false;
+                        break;
+                    }
+                }
+            }
+
+            if (bIdentityTransform) {
+                for (size_t i = 0; i < rawPoints->size(); i++) {
+                    const auto& pt = (*rawPoints)[i];
+                    outData.positions[i] = glm::vec3(static_cast<float>(pt.x),
+                                                     static_cast<float>(pt.y),
+                                                     static_cast<float>(pt.z));
+                }
+            } else {
+                for (size_t i = 0; i < rawPoints->size(); i++) {
+                    const auto& pt = (*rawPoints)[i];
+                    glm::vec4 homogeneous = glm::vec4(static_cast<float>(pt.x),
+                                                      static_cast<float>(pt.y),
+                                                      static_cast<float>(pt.z), 1.0f);
+                    glm::vec4 transformed = worldTransform * homogeneous;
+                    outData.positions[i] = glm::vec3(transformed.x / transformed.w,
+                                                     transformed.y / transformed.w,
+                                                     transformed.z / transformed.w);
+                }
             }
         }
         MIDDLEWARE_LOG_INFO("Extracted %zu point positions from %s",
